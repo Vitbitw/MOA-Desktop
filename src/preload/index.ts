@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('moaAPI', {
   getMoaConfig: () => ipcRenderer.invoke('moa:getConfig'),
   setMoaConfig: (config: unknown) => ipcRenderer.invoke('moa:setConfig', config),
 
+  // MoA Send
+  sendMessage: (msg: { conversationId?: string; content: string; mode: string }) =>
+    ipcRenderer.invoke('moa:sendMessage', msg),
+
   // App
   getVersion: () => ipcRenderer.invoke('app:getVersion')
 })

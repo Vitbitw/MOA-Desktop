@@ -20,6 +20,10 @@ interface MoaAPI {
   getMoaConfig: () => Promise<unknown>
   setMoaConfig: (config: unknown) => unknown
 
+  // MoA Send
+  sendMessage: (msg: { conversationId?: string; content: string; mode: string }) =>
+    Promise<{ success: boolean; data?: unknown; error?: string }>
+
   // App
   getVersion: () => Promise<string>
 }

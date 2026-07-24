@@ -8,6 +8,7 @@ import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults
 import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig } from './moa/moaConfig'
+import { executeMoA } from './moa/moaEngine'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -158,6 +159,70 @@ function registerIpcHandlers() {
 
   ipcMain.handle(IPC.MOA_SET_CONFIG, (_e, config) => {
     return setMoaConfig(config)
+  })
+
+  // ── MoA Send Message ──
+  ipcMain.handle(IPC.MOA_SEND_MESSAGE, async (_e, msg: {
+    conversationId?: string
+    title?: string
+    content: string
+    mode: string
+  }) => {
+    try {
+      const db = getDatabase()
+      let convId = msg.conversationId
+      const now = Date.now()
+
+      // Auto-create conversation if none
+      if (!convId) {
+        convId = crypto.randomUUID()
+        const title = msg.title || (msg.content.length > 30 ? msg.content.slice(0, 30) + '…' : msg.content)
+        db.exec(
+          'INSERT INTO conversations (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+          [convId, title, msg.mode, now, now]
+        )
+      }
+
+      // Save user message
+      const userMsgId = crypto.randomUUID()
+      db.exec(
+        `INSERT INTO messages (id, conversation_id, role, content, mode, timestamp)
+         VALUES (?, ?, 'user', ?, ?, ?)`,
+        [userMsgId, convId, msg.content, msg.mode, now]
+      )
+
+      // Execute MoA via proxy
+      const config = getMoaConfig()
+      const moaResult = await executeMoA({
+        messages: [{ role: 'user', content: msg.content }],
+        subModels: config.subModels,
+        aggregator: config.aggregator || undefined,
+        mode: (msg.mode === 'aggregate' ? 'aggregate' : 'compare') as 'aggregate' | 'compare' | 'direct',
+        aggregationPromptVariant: config.aggregationPromptVariant
+      })
+
+      // Save assistant response
+      const asstMsgId = crypto.randomUUID()
+      const responseContent = moaResult.success ? moaResult.content : (moaResult.error || '处理失败')
+      db.exec(
+        `INSERT INTO messages (id, conversation_id, role, content, mode, sub_outputs, timestamp)
+         VALUES (?, ?, 'assistant', ?, ?, ?, ?)`,
+        [
+          asstMsgId, convId, responseContent, msg.mode,
+          JSON.stringify(moaResult.subOutputs || []), Date.now()
+        ]
+      )
+
+      // Update conversation
+      db.exec('UPDATE conversations SET message_count = message_count + 2, updated_at = ? WHERE id = ?', [Date.now(), convId])
+
+      // Fetch updated conversation list
+      const conversations = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
+
+      return { success: true, data: { conversationId: convId, moaResult, conversations } }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
   })
 }
 
