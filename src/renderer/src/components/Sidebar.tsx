@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useConversationStore } from '../store/conversationStore'
 import { useConfigStore } from '../store/configStore'
+import type { Conversation } from '../../../shared/types'
 import { Settings, MessageSquare, Cpu } from 'lucide-react'
 
 export default function Sidebar({
@@ -34,7 +35,7 @@ export default function Sidebar({
           messageCount: c.message_count
         }))
         useConversationStore.setState({
-          conversations: convs,
+          conversations: convs as Conversation[],
           currentConversationId: id === currentId ? null : currentId,
           messages: id === currentId ? [] : useConversationStore.getState().messages
         })

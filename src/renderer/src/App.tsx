@@ -2,6 +2,7 @@ import React from 'react'
 import { useEffect, useState } from 'react'
 import { useConfigStore } from './store/configStore'
 import { useConversationStore } from './store/conversationStore'
+import type { Conversation, MoAMode } from '../../shared/types'
 import Sidebar from './components/Sidebar'
 import ChatArea from './components/ChatArea'
 import InputBox from './components/InputBox'
@@ -15,10 +16,10 @@ function App() {
   const [activeTab, setActiveTab] = useState<'chat' | 'providers' | 'moa'>('chat')
 
   useEffect(() => {
-    window.moaAPI.getProviders().then((res) => {
+    window.moaAPI.getProviders().then((res: { success: boolean; data: unknown }) => {
       if (res.success) setProviders(res.data as any)
     })
-    window.moaAPI.getConversations().then((res) => {
+    window.moaAPI.getConversations().then((res: { success: boolean; data: unknown }) => {
       if (res.success) setConversations(res.data as any)
     })
   }, [])
