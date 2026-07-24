@@ -4,7 +4,8 @@ import path from 'path'
 import { getDatabase } from './db/database'
 import { IPC } from '../shared/ipc-channels'
 import type { AppSettings } from '../shared/types'
-import { DEFAULT_SETTINGS } from '../shared/defaults'
+import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
+import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -160,12 +161,22 @@ app.whenReady().then(async () => {
   // Create window
   createWindow()
 
+  // Start proxy server
+  const proxyApp = createProxyServer()
+  try {
+    await startProxyServer(proxyApp, DEFAULT_PORT, DEFAULT_HOST)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[Main] Proxy server failed to start:', msg)
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
 app.on('before-quit', () => {
+  stopProxyServer()
   getDatabase().flush()
 })
 
