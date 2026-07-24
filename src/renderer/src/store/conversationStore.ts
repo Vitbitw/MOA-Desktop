@@ -1,6 +1,19 @@
 import { create } from 'zustand'
 import type { Conversation, ChatMessage, MoAMode, SubModelOutput } from '../../../shared/types'
 
+/** Factory: convert DB row to Conversation type. */
+function convFromRow(c: any): Conversation {
+  return {
+    id: c.id,
+    title: c.title || '',
+    mode: c.mode || 'aggregate',
+    subModels: c.sub_models ? JSON.parse(c.sub_models) : [],
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    messageCount: c.message_count || 0
+  }
+}
+
 interface ConversationState {
   conversations: Conversation[]
   currentConversationId: string | null
@@ -21,6 +34,8 @@ interface ConversationState {
   sendMessage: (content: string) => Promise<void>
   selectConversation: (id: string) => Promise<void>
   newConversation: () => void
+  deleteConversation: (id: string) => Promise<void>
+  refreshConversations: () => Promise<void>
 }
 
 export const useConversationStore = create<ConversationState>((set, get) => ({
@@ -41,12 +56,31 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
 
   newConversation: () => set({ currentConversationId: null, messages: [] }),
 
+  refreshConversations: async () => {
+    try {
+      const res = await window.moaAPI.getConversations()
+      if (res.success) {
+        const convs = ((res.data as any[]) || []).map(convFromRow)
+        // Move current conversation to top if it still exists
+        const { currentConversationId } = get()
+        set({
+          conversations: convs,
+          currentConversationId: convs.some((c) => c.id === currentConversationId)
+            ? currentConversationId
+            : null
+        })
+      }
+    } catch {
+      // silent
+    }
+  },
+
   selectConversation: async (id) => {
     set({ loading: true, error: null })
     try {
       const res = await window.moaAPI.getMessages(id)
       if (res.success) {
-        const msgs = (res.data as any[]).map((m: any) => ({
+        const msgs = ((res.data as any[]) || []).map((m: any) => ({
           id: m.id,
           conversationId: m.conversation_id,
           role: m.role as 'user' | 'assistant' | 'system',
@@ -64,13 +98,27 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     }
   },
 
+  deleteConversation: async (id) => {
+    try {
+      await window.moaAPI.deleteConversation(id)
+      await get().refreshConversations()
+      const { currentConversationId } = get()
+      if (currentConversationId === id) {
+        set({ currentConversationId: null, messages: [] })
+      }
+    } catch {
+      // silent
+    }
+  },
+
   sendMessage: async (content) => {
     const { mode, currentConversationId } = get()
     if (!content.trim()) return
 
-    // Optimistic: add user message locally
+    // Optimistic: add user message locally (no conversationId yet for new conversations)
+    const tempId = crypto.randomUUID()
     const userMsg: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: tempId,
       conversationId: currentConversationId || '',
       role: 'user',
       content,
@@ -100,7 +148,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
 
         // Patch the optimistic user message's conversationId
         const patchedMessages = get().messages.map((m) =>
-          m.role === 'user' && (!m.conversationId || m.conversationId === '')
+          m.id === tempId && (!m.conversationId || m.conversationId === '')
             ? { ...m, conversationId: data.conversationId }
             : m
         )
@@ -115,15 +163,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           timestamp: Date.now()
         }
 
-        const convs = (data.conversations || []).map((c: any) => ({
-          id: c.id,
-          title: c.title,
-          mode: c.mode as MoAMode,
-          subModels: [],
-          createdAt: c.created_at,
-          updatedAt: c.updated_at,
-          messageCount: c.message_count
-        }))
+        const convs = ((data.conversations || []) as any[]).map(convFromRow)
 
         set((state) => ({
           messages: [...patchedMessages, asstMsg],
@@ -136,6 +176,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       }
     } catch (err) {
       set({ error: String(err), loading: false })
+    } finally {
+      set({ loading: false })
     }
   }
 }))
