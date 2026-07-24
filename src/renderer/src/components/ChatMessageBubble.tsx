@@ -1,6 +1,8 @@
 import React, { memo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import type { ChatMessage } from '../../../shared/types'
 
 function ChatMessageBubble({ msg }: { msg: ChatMessage }) {
@@ -19,7 +21,7 @@ function ChatMessageBubble({ msg }: { msg: ChatMessage }) {
           <pre className="whitespace-pre-wrap font-sans m-0">{msg.content}</pre>
         ) : (
           <div className="prose prose-sm dark:prose-invert max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
               {msg.content}
             </ReactMarkdown>
           </div>
@@ -42,7 +44,7 @@ function ChatMessageBubble({ msg }: { msg: ChatMessage }) {
                     </span>
                   </div>
                   {out.status === 'success' ? (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
                       {out.content.slice(0, 500)}
                     </ReactMarkdown>
                   ) : (
