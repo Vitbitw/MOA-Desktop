@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('moaAPI', {
   getSettings: () => ipcRenderer.invoke('settings:getAll'),
   setSetting: (key: string, value: unknown) => ipcRenderer.invoke('settings:set', key, value),
 
+  // MoA Config
+  getMoaConfig: () => ipcRenderer.invoke('moa:getConfig'),
+  setMoaConfig: (config: unknown) => ipcRenderer.invoke('moa:setConfig', config),
+
   // App
   getVersion: () => ipcRenderer.invoke('app:getVersion')
 })
