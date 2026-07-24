@@ -1,5 +1,5 @@
 // ─── MoA Modes ───
-export type MoAMode = 'aggregate' | 'compare'
+export type MoAMode = 'aggregate' | 'compare' | 'direct'
 
 // ─── Providers ───
 export interface Provider {

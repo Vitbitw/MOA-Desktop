@@ -16,6 +16,10 @@ export const IPC = {
   SETTINGS_GET_ALL: 'settings:getAll',
   SETTINGS_SET: 'settings:set',
 
+  // MoA Config
+  MOA_GET_CONFIG: 'moa:getConfig',
+  MOA_SET_CONFIG: 'moa:setConfig',
+
   // App
   APP_GET_VERSION: 'app:getVersion',
 } as const
