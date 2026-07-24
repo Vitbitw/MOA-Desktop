@@ -1,6 +1,5 @@
 import React, { useState } from 'react'
 import { useConversationStore } from '../store/conversationStore'
-import { useConfigStore } from '../store/configStore'
 
 export default function InputBox() {
   const [text, setText] = useState('')
@@ -8,7 +7,6 @@ export default function InputBox() {
   const setMode = useConversationStore((s) => s.setMode)
   const sendMessage = useConversationStore((s) => s.sendMessage)
   const loading = useConversationStore((s) => s.loading)
-  const subModels = useConfigStore((s) => s.subModels)
 
   const [subCount, setSubCount] = React.useState(3)
 
