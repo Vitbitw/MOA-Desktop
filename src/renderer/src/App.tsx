@@ -1,20 +1,35 @@
 import React from 'react'
+import { useEffect } from 'react'
+import { useConfigStore } from './store/configStore'
+import { useConversationStore } from './store/conversationStore'
+import Sidebar from './components/Sidebar'
+import ChatArea from './components/ChatArea'
+import InputBox from './components/InputBox'
+import ErrorBoundary from './components/ErrorBoundary'
 
 function App() {
+  const setProviders = useConfigStore((s) => s.setProviders)
+  const setConversations = useConversationStore((s) => s.setConversations)
+
+  useEffect(() => {
+    window.moaAPI.getProviders().then((res) => {
+      if (res.success) setProviders(res.data as any)
+    })
+    window.moaAPI.getConversations().then((res) => {
+      if (res.success) setConversations(res.data as any)
+    })
+  }, [])
+
   return (
-    <div className="flex items-center justify-center min-h-screen bg-zinc-50 dark:bg-[#1a1b1e]">
-      <div className="text-center">
-        <h1 className="text-2xl font-bold text-zinc-800 dark:text-zinc-100">
-          MoA Desktop
-        </h1>
-        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-          Mixture of Agents 桌面客户端
-        </p>
-        <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
-          v1.0.0 · 代理服务启动中...
-        </p>
+    <ErrorBoundary>
+      <div className="flex h-screen overflow-hidden bg-background">
+        <Sidebar />
+        <main className="flex flex-col flex-1 min-w-0">
+          <ChatArea />
+          <InputBox />
+        </main>
       </div>
-    </div>
+    </ErrorBoundary>
   )
 }
 
