@@ -223,6 +223,17 @@ function registerIpcHandlers() {
       // Update conversation
       db.exec('UPDATE conversations SET message_count = message_count + 2, updated_at = ? WHERE id = ?', [Date.now(), convId])
 
+      // Log request
+      const logId = crypto.randomUUID()
+      const logDuration = Date.now() - now
+      const totalPT = moaResult.subOutputs.reduce((sum, o) => sum + (o.tokenUsage?.prompt || 0), 0)
+      const totalCT = moaResult.subOutputs.reduce((sum, o) => sum + (o.tokenUsage?.completion || 0), 0)
+      db.exec(
+        `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail)
+         VALUES (?, ?, '127.0.0.1', 'chat', ?, ?, ?, ?, 0, ?, ?, ?)`,
+        [logId, now, msg.mode, moaResult.subOutputs.length, totalPT, totalCT, logDuration, moaResult.success ? 1 : 0, moaResult.success ? null : (moaResult.error || null)]
+      )
+
       // Fetch updated conversation list
       const conversations = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
 

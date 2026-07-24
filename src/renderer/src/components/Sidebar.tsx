@@ -1,7 +1,7 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { useConversationStore } from '../store/conversationStore'
 import { useConfigStore } from '../store/configStore'
-import { Settings, MessageSquare, Cpu, Sun, Moon } from 'lucide-react'
+import { Search, Settings, MessageSquare, Cpu, Sun, Moon } from 'lucide-react'
 
 export default function Sidebar({
   activeTab,
@@ -16,6 +16,8 @@ export default function Sidebar({
   const selectConversation = useConversationStore((s) => s.selectConversation)
   const newConversation = useConversationStore((s) => s.newConversation)
   const deleteConversation = useConversationStore((s) => s.deleteConversation)
+  const [search, setSearch] = useState('')
+
   const [dark, setDark] = React.useState(
     () => localStorage.getItem('moa-theme') === 'dark' ||
       (!localStorage.getItem('moa-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)
@@ -27,6 +29,10 @@ export default function Sidebar({
     document.documentElement.classList.toggle('dark', next)
     localStorage.setItem('moa-theme', next ? 'dark' : 'light')
   }
+
+  const filtered = conversations.filter((c) =>
+    !search.trim() || c.title.toLowerCase().includes(search.toLowerCase())
+  )
 
   return (
     <aside className="w-64 flex-shrink-0 border-r border-border bg-card flex flex-col">
@@ -57,10 +63,23 @@ export default function Sidebar({
       {/* Chat list */}
       {activeTab === 'chat' && (
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {conversations.length === 0 && (
-            <p className="text-xs text-muted-foreground text-center mt-8">暂无对话</p>
+          {/* Search bar */}
+          <div className="relative mb-2">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="搜索对话..."
+              className="w-full rounded-md border border-input bg-background pl-7 pr-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+          </div>
+
+          {filtered.length === 0 && (
+            <p className="text-xs text-muted-foreground text-center mt-8">
+              {search ? '无匹配对话' : '暂无对话'}
+            </p>
           )}
-          {conversations.map((conv) => (
+          {filtered.map((conv) => (
             <div key={conv.id} className="group relative">
               <button
                 onClick={() => selectConversation(conv.id)}

@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useConversationStore } from '../store/conversationStore'
+import { useConfigStore } from '../store/configStore'
 
 export default function InputBox() {
   const [text, setText] = useState('')
@@ -7,6 +8,11 @@ export default function InputBox() {
   const setMode = useConversationStore((s) => s.setMode)
   const sendMessage = useConversationStore((s) => s.sendMessage)
   const loading = useConversationStore((s) => s.loading)
+  const subModels = useConfigStore((s) => s.subModels)
+
+  const estimatedTokens = Math.ceil(text.length * 0.4) // ~2.5 chars per token
+  const subModelEstimate = estimatedTokens + 200 // system prompt overhead
+  const subCount = subModels.length || 3
 
   const handleSend = () => {
     if (!text.trim() || loading) return
@@ -43,6 +49,10 @@ export default function InputBox() {
             📊 原始对比
           </button>
         </div>
+
+        <span className="text-xs text-muted-foreground">
+          子模型×{subCount} ≈ {subModelEstimate} | 总计 ≈ {estimatedTokens + subCount * subModelEstimate} tokens
+        </span>
 
         {loading && (
           <span className="text-xs text-blue-500 animate-pulse">处理中...</span>
