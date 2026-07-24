@@ -7,7 +7,7 @@ import type { AppSettings } from '../shared/types'
 import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
-import { getMoaConfig, setMoaConfig } from './moa/moaConfig'
+import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA } from './moa/moaEngine'
 
 let mainWindow: BrowserWindow | null = null
@@ -241,6 +241,13 @@ app.whenReady().then(async () => {
     console.log('[Main] Database initialized')
   } catch (err) {
     console.error('[Main] Database init failed:', err)
+  }
+
+  // Load MoA config from DB
+  try {
+    loadMoaConfigFromDb()
+  } catch (err) {
+    console.error('[Main] MoA config load failed:', err)
   }
 
   // Seed built-in providers on first launch

@@ -48,4 +48,10 @@ CREATE TABLE IF NOT EXISTS request_logs (
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS moa_config (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `
