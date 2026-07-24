@@ -1,5 +1,10 @@
+import crypto from 'node:crypto'
 import { app, BrowserWindow, ipcMain } from 'electron'
 import path from 'path'
+import { getDatabase } from './db/database'
+import { IPC } from '../shared/ipc-channels'
+import type { AppSettings } from '../shared/types'
+import { DEFAULT_SETTINGS } from '../shared/defaults'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -24,12 +29,144 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(() => {
+function registerIpcHandlers() {
+  // ── Config / Providers ──
+  ipcMain.handle(IPC.CONFIG_GET_PROVIDERS, () => {
+    try {
+      const providers = getDatabase().query('SELECT * FROM providers ORDER BY name')
+      return { success: true, data: providers }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.CONFIG_ADD_PROVIDER, (_e, data: unknown) => {
+    try {
+      return { success: true, data }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.CONFIG_REMOVE_PROVIDER, (_e, _id: string) => {
+    try {
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // ── Conversations ──
+  ipcMain.handle(IPC.DB_GET_CONVERSATIONS, () => {
+    try {
+      const convs = getDatabase().query(
+        'SELECT * FROM conversations ORDER BY updated_at DESC'
+      )
+      return { success: true, data: convs }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.DB_CREATE_CONVERSATION, (_e, data: { title: string; mode: string }) => {
+    try {
+      const id = crypto.randomUUID()
+      const now = Date.now()
+      getDatabase().exec(
+        'INSERT INTO conversations (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+        [id, data.title, data.mode, now, now]
+      )
+      return { success: true, data: { id, ...data, createdAt: now } }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.DB_DELETE_CONVERSATION, (_e, id: string) => {
+    try {
+      getDatabase().exec('DELETE FROM messages WHERE conversation_id = ?', [id])
+      getDatabase().exec('DELETE FROM conversations WHERE id = ?', [id])
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.DB_GET_MESSAGES, (_e, conversationId: string) => {
+    try {
+      const msgs = getDatabase().query(
+        'SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp',
+        [conversationId]
+      )
+      return { success: true, data: msgs }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.DB_ADD_MESSAGE, (_e, msg: {
+    conversationId: string; role: string; content: string; mode: string; subOutputs?: string; tokenUsage?: string
+  }) => {
+    try {
+      const id = crypto.randomUUID()
+      getDatabase().exec(
+        `INSERT INTO messages (id, conversation_id, role, content, mode, sub_outputs, token_usage, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, msg.conversationId, msg.role, msg.content, msg.mode, msg.subOutputs || null, msg.tokenUsage || null, Date.now()]
+      )
+      return { success: true, data: { id } }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // ── Settings ──
+  ipcMain.handle(IPC.SETTINGS_GET_ALL, () => {
+    try {
+      // For now return defaults; future: read from electron-store
+      return { success: true, data: DEFAULT_SETTINGS }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.SETTINGS_SET, (_e, key: string, value: unknown) => {
+    try {
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // ── App ──
+  ipcMain.handle(IPC.APP_GET_VERSION, () => {
+    return app.getVersion()
+  })
+}
+
+app.whenReady().then(async () => {
+  // Init database
+  const db = getDatabase()
+  try {
+    await db.init()
+    console.log('[Main] Database initialized')
+  } catch (err) {
+    console.error('[Main] Database init failed:', err)
+  }
+
+  // Register IPC handlers
+  registerIpcHandlers()
+
+  // Create window
   createWindow()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on('before-quit', () => {
+  getDatabase().flush()
 })
 
 app.on('window-all-closed', () => {
