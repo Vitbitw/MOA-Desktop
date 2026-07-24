@@ -98,6 +98,13 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           conversations: any[]
         }
 
+        // Patch the optimistic user message's conversationId
+        const patchedMessages = get().messages.map((m) =>
+          m.role === 'user' && (!m.conversationId || m.conversationId === '')
+            ? { ...m, conversationId: data.conversationId }
+            : m
+        )
+
         const asstMsg: ChatMessage = {
           id: crypto.randomUUID(),
           conversationId: data.conversationId,
@@ -119,7 +126,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         }))
 
         set((state) => ({
-          messages: [...state.messages, asstMsg],
+          messages: [...patchedMessages, asstMsg],
           conversations: convs,
           currentConversationId: data.conversationId || state.currentConversationId,
           loading: false

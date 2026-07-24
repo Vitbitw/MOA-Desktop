@@ -183,6 +183,13 @@ function registerIpcHandlers() {
         )
       }
 
+      // Load conversation history BEFORE saving user message (for multi-turn context)
+      const historyRows = db.query<{ role: string; content: string }>(
+        'SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY timestamp',
+        [convId]
+      )
+      const historyMessages = historyRows.map((r) => ({ role: r.role, content: r.content }))
+
       // Save user message
       const userMsgId = crypto.randomUUID()
       db.exec(
@@ -191,10 +198,10 @@ function registerIpcHandlers() {
         [userMsgId, convId, msg.content, msg.mode, now]
       )
 
-      // Execute MoA via proxy
+      // Execute MoA with full history (history doesn't include the just-saved message)
       const config = getMoaConfig()
       const moaResult = await executeMoA({
-        messages: [{ role: 'user', content: msg.content }],
+        messages: [...historyMessages, { role: 'user', content: msg.content }],
         subModels: config.subModels,
         aggregator: config.aggregator || undefined,
         mode: (msg.mode === 'aggregate' ? 'aggregate' : 'compare') as 'aggregate' | 'compare' | 'direct',
