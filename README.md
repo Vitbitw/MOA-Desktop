@@ -11,7 +11,7 @@
 - **框架**: Electron 33+ / React 18 / TypeScript
 - **样式**: Tailwind CSS v3 + Shadcn/ui
 - **状态**: Zustand
-- **存储**: better-sqlite3 / electron-store
+- **存储**: sql.js / electron-store
 - **代理**: Express
 - **打包**: electron-builder
 
