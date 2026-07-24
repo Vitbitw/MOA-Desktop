@@ -5,7 +5,8 @@ import { getDatabase } from './db/database'
 import { IPC } from '../shared/ipc-channels'
 import type { AppSettings } from '../shared/types'
 import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
-import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
+import { createProxyServer, startProxyServer, stopProxyServer, setProxyConfig } from './proxy/server'
+import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -34,24 +35,41 @@ function registerIpcHandlers() {
   // ── Config / Providers ──
   ipcMain.handle(IPC.CONFIG_GET_PROVIDERS, () => {
     try {
-      const providers = getDatabase().query('SELECT * FROM providers ORDER BY name')
-      return { success: true, data: providers }
+      return { success: true, data: getAllProviders() }
     } catch (err) {
       return { success: false, error: String(err) }
     }
   })
 
-  ipcMain.handle(IPC.CONFIG_ADD_PROVIDER, (_e, data: unknown) => {
+  ipcMain.handle(IPC.CONFIG_ADD_PROVIDER, (_e, data: { name: string; baseUrl: string; apiKey: string }) => {
     try {
-      return { success: true, data }
+      const { name, baseUrl, apiKey } = data
+      const result = addProvider(name, baseUrl, apiKey)
+      // Wire proxy to the newly added provider (addProvider resolves baseUrl internally)
+      const providers = getAllProviders()
+      const added = providers.find((p) => p.id === result.id)
+      if (added) {
+        setProxyConfig(added.baseUrl, added.apiKey)
+      }
+      return { success: true, data: result }
     } catch (err) {
       return { success: false, error: String(err) }
     }
   })
 
-  ipcMain.handle(IPC.CONFIG_REMOVE_PROVIDER, (_e, _id: string) => {
+  ipcMain.handle(IPC.CONFIG_REMOVE_PROVIDER, (_e, id: string) => {
     try {
+      removeProvider(id)
       return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.CONFIG_GET_MODELS, async (_e, providerId: string) => {
+    try {
+      const models = await fetchAndCacheModels(providerId)
+      return { success: true, data: models }
     } catch (err) {
       return { success: false, error: String(err) }
     }
@@ -60,9 +78,7 @@ function registerIpcHandlers() {
   // ── Conversations ──
   ipcMain.handle(IPC.DB_GET_CONVERSATIONS, () => {
     try {
-      const convs = getDatabase().query(
-        'SELECT * FROM conversations ORDER BY updated_at DESC'
-      )
+      const convs = getDatabase().query('SELECT * FROM conversations ORDER BY updated_at DESC')
       return { success: true, data: convs }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -115,6 +131,7 @@ function registerIpcHandlers() {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, msg.conversationId, msg.role, msg.content, msg.mode, msg.subOutputs || null, msg.tokenUsage || null, Date.now()]
       )
+      getDatabase().exec('UPDATE conversations SET message_count = message_count + 1, updated_at = ? WHERE id = ?', [Date.now(), msg.conversationId])
       return { success: true, data: { id } }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -123,12 +140,7 @@ function registerIpcHandlers() {
 
   // ── Settings ──
   ipcMain.handle(IPC.SETTINGS_GET_ALL, () => {
-    try {
-      // For now return defaults; future: read from electron-store
-      return { success: true, data: DEFAULT_SETTINGS }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
+    return { success: true, data: DEFAULT_SETTINGS }
   })
 
   ipcMain.handle(IPC.SETTINGS_SET, (_e, key: string, value: unknown) => {
@@ -153,6 +165,13 @@ app.whenReady().then(async () => {
     console.log('[Main] Database initialized')
   } catch (err) {
     console.error('[Main] Database init failed:', err)
+  }
+
+  // Seed built-in providers on first launch
+  try {
+    seedBuiltInProviders()
+  } catch (err) {
+    console.error('[Main] Failed to seed providers:', err)
   }
 
   // Register IPC handlers
