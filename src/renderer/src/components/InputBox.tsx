@@ -10,9 +10,17 @@ export default function InputBox() {
   const loading = useConversationStore((s) => s.loading)
   const subModels = useConfigStore((s) => s.subModels)
 
-  const estimatedTokens = Math.ceil(text.length * 0.4) // ~2.5 chars per token
+  const [subCount, setSubCount] = React.useState(3)
+
+  React.useEffect(() => {
+    window.moaAPI.getMoaConfig().then((config: any) => {
+      if (config?.subModels?.length) setSubCount(config.subModels.length)
+    })
+  }, [])
+
+  const estimatedTokens = Math.ceil(text.length * 1.5) // CN: ~1.5 tokens/char
   const subModelEstimate = estimatedTokens + 200 // system prompt overhead
-  const subCount = subModels.length || 3
+  const subModelCount = subCount || 3
 
   const handleSend = () => {
     if (!text.trim() || loading) return
@@ -51,7 +59,7 @@ export default function InputBox() {
         </div>
 
         <span className="text-xs text-muted-foreground">
-          子模型×{subCount} ≈ {subModelEstimate} | 总计 ≈ {estimatedTokens + subCount * subModelEstimate} tokens
+          子模型×{subModelCount} ≈ {subModelEstimate} | 总计 ≈ {estimatedTokens + subModelCount * subModelEstimate} tokens
         </span>
 
         {loading && (

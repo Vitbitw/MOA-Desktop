@@ -226,8 +226,8 @@ function registerIpcHandlers() {
       // Log request
       const logId = crypto.randomUUID()
       const logDuration = Date.now() - now
-      const totalPT = moaResult.subOutputs.reduce((sum, o) => sum + (o.tokenUsage?.prompt || 0), 0)
-      const totalCT = moaResult.subOutputs.reduce((sum, o) => sum + (o.tokenUsage?.completion || 0), 0)
+      const totalPT = (moaResult.subOutputs || []).reduce((sum, o) => sum + (o.tokenUsage?.prompt || 0), 0)
+      const totalCT = (moaResult.subOutputs || []).reduce((sum, o) => sum + (o.tokenUsage?.completion || 0), 0)
       db.exec(
         `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail)
          VALUES (?, ?, '127.0.0.1', 'chat', ?, ?, ?, ?, 0, ?, ?, ?)`,
