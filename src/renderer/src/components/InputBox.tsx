@@ -5,18 +5,12 @@ export default function InputBox() {
   const [text, setText] = useState('')
   const mode = useConversationStore((s) => s.mode)
   const setMode = useConversationStore((s) => s.setMode)
-  const addMessage = useConversationStore((s) => s.addMessage)
+  const sendMessage = useConversationStore((s) => s.sendMessage)
+  const loading = useConversationStore((s) => s.loading)
 
   const handleSend = () => {
-    if (!text.trim()) return
-    addMessage({
-      id: crypto.randomUUID(),
-      conversationId: 'new',
-      role: 'user',
-      content: text,
-      mode,
-      timestamp: Date.now()
-    })
+    if (!text.trim() || loading) return
+    sendMessage(text)
     setText('')
   }
 
@@ -29,7 +23,7 @@ export default function InputBox() {
 
   return (
     <div className="border-t border-border p-4 bg-background">
-      {/* Mode toggle + controls */}
+      {/* Mode toggle */}
       <div className="flex items-center gap-4 mb-2">
         <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5">
           <button
@@ -50,9 +44,9 @@ export default function InputBox() {
           </button>
         </div>
 
-        <span className="text-xs text-muted-foreground">
-          子模型×3 ≈ 1.5K | 总计 ≈ 2.3K tokens
-        </span>
+        {loading && (
+          <span className="text-xs text-blue-500 animate-pulse">处理中...</span>
+        )}
       </div>
 
       {/* Input area */}
@@ -63,14 +57,15 @@ export default function InputBox() {
           onKeyDown={handleKeyDown}
           placeholder="输入问题... (Enter发送, Shift+Enter换行)"
           rows={2}
-          className="flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          disabled={loading}
+          className="flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
         />
         <button
           onClick={handleSend}
-          disabled={!text.trim()}
+          disabled={!text.trim() || loading}
           className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          发送
+          {loading ? '...' : '发送'}
         </button>
       </div>
     </div>
