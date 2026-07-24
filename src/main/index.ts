@@ -5,8 +5,9 @@ import { getDatabase } from './db/database'
 import { IPC } from '../shared/ipc-channels'
 import type { AppSettings } from '../shared/types'
 import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
-import { createProxyServer, startProxyServer, stopProxyServer, setProxyConfig } from './proxy/server'
+import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
+import { getMoaConfig, setMoaConfig } from './moa/moaConfig'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -45,12 +46,6 @@ function registerIpcHandlers() {
     try {
       const { name, baseUrl, apiKey } = data
       const result = addProvider(name, baseUrl, apiKey)
-      // Wire proxy to the newly added provider (addProvider resolves baseUrl internally)
-      const providers = getAllProviders()
-      const added = providers.find((p) => p.id === result.id)
-      if (added) {
-        setProxyConfig(added.baseUrl, added.apiKey)
-      }
       return { success: true, data: result }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -154,6 +149,15 @@ function registerIpcHandlers() {
   // ── App ──
   ipcMain.handle(IPC.APP_GET_VERSION, () => {
     return app.getVersion()
+  })
+
+  // ── MoA Config ──
+  ipcMain.handle(IPC.MOA_GET_CONFIG, () => {
+    return getMoaConfig()
+  })
+
+  ipcMain.handle(IPC.MOA_SET_CONFIG, (_e, config) => {
+    return setMoaConfig(config)
   })
 }
 

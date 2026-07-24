@@ -16,6 +16,10 @@ interface MoaAPI {
   getSettings: () => Promise<{ success: boolean; data: unknown }>
   setSetting: (key: string, value: unknown) => Promise<{ success: boolean }>
 
+  // MoA Config
+  getMoaConfig: () => Promise<unknown>
+  setMoaConfig: (config: unknown) => unknown
+
   // App
   getVersion: () => Promise<string>
 }

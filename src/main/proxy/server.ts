@@ -1,132 +1,214 @@
 import express, { type Express, type Request, type Response } from 'express'
 import cors from 'cors'
 import type { Server } from 'node:http'
+import { getAllProviders } from '../providers/providerManager'
+import { getMoaConfig } from '../moa/moaConfig'
+import { executeMoA } from '../moa/moaEngine'
 
 let server: Server | null = null
-let currentTargetUrl = 'https://api.openai.com/v1'
-let currentApiKey = ''
 
-export function setProxyConfig(targetUrl: string, apiKey: string) {
-  currentTargetUrl = targetUrl
-  currentApiKey = apiKey
+/** Find first enabled provider with an API key for direct passthrough. */
+function firstUsableProvider(): { baseUrl: string; apiKey: string } | null {
+  const providers = getAllProviders()
+  for (const p of providers) {
+    if (p.enabled && p.apiKey) return { baseUrl: p.baseUrl, apiKey: p.apiKey }
+  }
+  return null
 }
 
 export function createProxyServer(): Express {
   const app: Express = express()
-
   app.use(cors())
   app.use(express.json({ limit: '2mb' }))
 
   // ── Health ──
   app.get('/health', (_req: Request, res: Response) => {
+    const provider = firstUsableProvider()
+    const config = getMoaConfig()
     res.json({
       status: 'ok',
       version: '1.0.0',
       uptimeSeconds: Math.floor(process.uptime()),
       activeRequests: 0,
       queueLength: 0,
-      moaConfig: { subCount: 1, mode: 'direct' },
-      providers: [
-        { name: 'default', status: currentApiKey ? 'ok' : 'no_key', model: 'passthrough' }
-      ]
+      moaConfig: { subCount: config.subModels.length, mode: config.mode },
+      providers: [{ name: 'default', status: provider ? 'ok' : 'no_key', model: config.mode }]
     })
   })
 
-  // ── Models list ──
+  // ── Models list (passthrough to first provider) ──
   app.get('/v1/models', async (_req: Request, res: Response) => {
+    const provider = firstUsableProvider()
+    if (!provider) { res.json({ object: 'list', data: [] }); return }
     try {
-      const resp = await fetch(`${currentTargetUrl}/models`, {
-        headers: { Authorization: `Bearer ${currentApiKey}` }
+      const resp = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}/models`, {
+        headers: { Authorization: `Bearer ${provider.apiKey}` }
       })
-      const data = await resp.json()
-      res.json(data)
+      res.json(await resp.json())
     } catch {
       res.json({ object: 'list', data: [] })
     }
   })
 
-  // ── Chat completions (direct passthrough) ──
+  // ── Chat completions ──
   app.post('/v1/chat/completions', async (req: Request, res: Response) => {
-    if (!currentApiKey) {
+    const provider = firstUsableProvider()
+    if (!provider) {
       res.status(503).json({
-        error: { message: 'No API key configured. Configure a provider first.', type: 'moa_config_error' }
+        error: { message: 'No enabled provider with API key configured.', type: 'moa_config_error' }
       })
       return
     }
 
-    const { stream } = req.body
+    const config = getMoaConfig()
+    const { messages, stream } = req.body
 
-    try {
-      const upstream = await fetch(`${currentTargetUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${currentApiKey}`
-        },
-        body: JSON.stringify(req.body)
-      })
-
-      if (!upstream.ok) {
-        const errBody = await upstream.text()
-        res.status(502).json({
-          error: {
-            message: `Upstream returned ${upstream.status}: ${errBody.slice(0, 500)}`,
-            type: 'upstream_error'
-          }
+    // ── Direct mode ──
+    if (config.mode === 'direct' || config.subModels.length === 0) {
+      try {
+        const upstream = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.apiKey}` },
+          body: JSON.stringify({ ...req.body, model: req.body.model || '' })
         })
-        return
-      }
 
-      if (stream) {
-        res.setHeader('Content-Type', 'text/event-stream')
-        res.setHeader('Cache-Control', 'no-cache')
-        res.setHeader('Connection', 'keep-alive')
-
-        const reader = upstream.body?.getReader()
-        if (!reader) {
-          res.status(502).json({ error: { message: 'No response body from upstream', type: 'upstream_error' } })
+        if (!upstream.ok) {
+          const errBody = await upstream.text()
+          res.status(502).json({
+            error: { message: `Upstream ${upstream.status}: ${errBody.slice(0, 500)}`, type: 'upstream_error' }
+          })
           return
         }
 
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              res.write(line + '\n\n')
-            }
+        if (stream) {
+          res.setHeader('Content-Type', 'text/event-stream')
+          res.setHeader('Cache-Control', 'no-cache')
+          res.setHeader('Connection', 'keep-alive')
+          const reader = upstream.body?.getReader()
+          if (!reader) { res.status(502).json({ error: { message: 'No body', type: 'upstream_error' } }); return }
+          const decoder = new TextDecoder()
+          let buffer = ''
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split('\n')
+            buffer = lines.pop() || ''
+            for (const line of lines) { if (line.startsWith('data: ')) res.write(line + '\n\n') }
           }
+          if (buffer) res.write(buffer + '\n\n')
+          res.write('data: [DONE]\n\n')
+          res.end()
+        } else {
+          const data = await upstream.json()
+          res.json(data)
         }
-
-        if (buffer) res.write(buffer + '\n\n')
-        res.write('data: [DONE]\n\n')
-        res.end()
-      } else {
-        const data = await upstream.json()
-        // Ensure standard OpenAI format
-        res.json({
-          id: data.id || `chatcmpl-${Date.now()}`,
-          object: 'chat.completion',
-          created: data.created || Math.floor(Date.now() / 1000),
-          model: data.model || 'moa-passthrough',
-          choices: data.choices || [],
-          usage: data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-        })
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        res.status(502).json({ error: { message: `Proxy: ${msg}`, type: 'proxy_error' } })
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
+      return
+    }
+
+    // ── MoA mode (aggregate / compare) ──
+    const result = await executeMoA({
+      messages: messages || [],
+      subModels: config.subModels,
+      aggregator: config.aggregator || undefined,
+      mode: config.mode === 'aggregate' ? 'aggregate' : 'compare',
+      aggregationPromptVariant: config.aggregationPromptVariant
+    })
+
+    if (!result.success) {
       res.status(502).json({
-        error: { message: `Proxy error: ${msg}`, type: 'proxy_error' }
+        error: { message: result.error || 'MoA execution failed', type: 'moa_error' }
+      })
+      return
+    }
+
+    if (config.mode === 'compare') {
+      // Return sub-model outputs as a structured JSON for external tools
+      res.json({
+        id: `chatcmpl-moa-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: 'moa-compare',
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: result.subOutputs.map((o, i) =>
+              `=== ${o.modelId} (${o.status}) ===\n${o.content || o.error || ''}`
+            ).join('\n\n')
+          },
+          finish_reason: 'stop'
+        }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      })
+      return
+    }
+
+    // ── Aggregate mode ──
+    if (stream) {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.setHeader('Cache-Control', 'no-cache')
+      res.setHeader('Connection', 'keep-alive')
+      const content = result.content
+      // Simulate token-by-token streaming from the aggregated content
+      const tokens = content.split(/(?<=\s|(?<=[，。！？、；：]))/g)
+      for (const token of tokens) {
+        const payload = JSON.stringify({
+          id: `chatcmpl-moa-${Date.now()}`,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: 'moa-aggregated',
+          choices: [{ index: 0, delta: { content: token }, finish_reason: null }]
+        })
+        res.write(`data: ${payload}\n\n`)
+      }
+      const donePayload = JSON.stringify({
+        id: `chatcmpl-moa-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: 'moa-aggregated',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+      })
+      res.write(`data: ${donePayload}\n\n`)
+      res.write('data: [DONE]\n\n')
+      res.end()
+    } else {
+      res.json({
+        id: `chatcmpl-moa-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: 'moa-aggregated',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: result.content },
+          finish_reason: 'stop'
+        }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        ...(stream ? {} : { x_moa_sub_models: result.subOutputs.map(o => ({ modelId: o.modelId, status: o.status, durationMs: o.durationMs })) })
       })
     }
+  })
+
+  // ── Non-completions passthrough ──
+  ;['/v1/embeddings', '/v1/images/generations', '/v1/audio/transcriptions', '/v1/audio/speech', '/v1/moderations'].forEach((endpoint) => {
+    app.post(endpoint, async (req: Request, res: Response) => {
+      const provider = firstUsableProvider()
+      if (!provider) { res.status(503).json({ error: { message: 'No provider configured', type: 'moa_config_error' } }); return }
+      try {
+        const upstream = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.apiKey}` },
+          body: JSON.stringify(req.body)
+        })
+        res.status(upstream.status).json(await upstream.json())
+      } catch {
+        res.status(502).json({ error: { message: 'Passthrough failed', type: 'proxy_error' } })
+      }
+    })
   })
 
   return app
@@ -139,20 +221,11 @@ export function startProxyServer(app: Express, port: number, host: string): Prom
       resolve()
     })
     server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        console.error(`[Proxy] Port ${port} in use`)
-        reject(new Error(`Port ${port} in use`))
-      } else {
-        reject(err)
-      }
+      if (err.code === 'EADDRINUSE') { reject(new Error(`Port ${port} in use`)) } else { reject(err) }
     })
   })
 }
 
 export function stopProxyServer(): void {
-  if (server) {
-    server.close()
-    server = null
-    console.log('[Proxy] stopped')
-  }
+  if (server) { server.close(); server = null; console.log('[Proxy] stopped') }
 }
