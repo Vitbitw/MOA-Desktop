@@ -214,16 +214,26 @@ export function createProxyServer(): Express {
   return app
 }
 
-export function startProxyServer(app: Express, port: number, host: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server = app.listen(port, host, () => {
-      console.log(`[Proxy] http://${host}:${port}`)
-      resolve()
+export function startProxyServer(app: Express, port: number, host: string): Promise<number> {
+  return tryListen(app, port, host, 0)
+
+  function tryListen(expressApp: Express, p: number, h: string, attempt: number): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const s = expressApp.listen(p, h, () => {
+        server = s
+        if (p !== port) console.log(`[Proxy] Port ${port} in use, using ${p} instead`)
+        console.log(`[Proxy] http://${h}:${p}`)
+        resolve(p)
+      })
+      s.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE' && attempt < 10) {
+          tryListen(expressApp, p + 1, h, attempt + 1).then(resolve, reject)
+        } else {
+          reject(err)
+        }
+      })
     })
-    server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') { reject(new Error(`Port ${port} in use`)) } else { reject(err) }
-    })
-  })
+  }
 }
 
 export function stopProxyServer(): void {

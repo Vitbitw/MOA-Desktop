@@ -274,10 +274,13 @@ app.whenReady().then(async () => {
   // Create window
   createWindow()
 
-  // Start proxy server
+  // Start proxy server (auto-finds next available port if DEFAULT_PORT is busy)
   const proxyApp = createProxyServer()
   try {
-    await startProxyServer(proxyApp, DEFAULT_PORT, DEFAULT_HOST)
+    const actualPort = await startProxyServer(proxyApp, DEFAULT_PORT, DEFAULT_HOST)
+    if (actualPort !== DEFAULT_PORT) {
+      console.log(`[Main] Proxy running on port ${actualPort} (requested ${DEFAULT_PORT})`)
+    }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[Main] Proxy server failed to start:', msg)
