@@ -41,5 +41,19 @@ app-config.json
 
 # Test temp
 test-*/
+
+# Hermes / AI辅助开发
 .hermes/
 .superpowers/
+
+# 设计文档
+产品设计文档_v1.md
+
+# 任务跟踪
+tasks/
+
+# TypeScript 增量编译缓存
+*.tsbuildinfo
+
+# 日志
+*.log
