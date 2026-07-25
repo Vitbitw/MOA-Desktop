@@ -62,7 +62,7 @@ export default function MonitorView() {
     <div className="flex-1 flex flex-col overflow-hidden bg-background">
       {/* Error banner */}
       {error && (
-        <div className="px-4 py-2 text-sm text-destructive bg-destructive/10 border-b border-destructive/30">
+        <div className="px-4 py-2 text-base text-destructive bg-destructive/10 border-b border-destructive/30">
           {error}
         </div>
       )}
@@ -71,7 +71,7 @@ export default function MonitorView() {
       <div className="flex-1 overflow-y-auto border-b border-border min-h-0">
         <div className="p-3">
           {/* Header bar */}
-          <div className="flex items-center gap-2 mb-2 text-xs text-muted-foreground">
+          <div className="flex items-center gap-2 mb-2 text-sm text-muted-foreground">
             <span className="font-semibold uppercase tracking-wider">Sub-Model Outputs</span>
             <span className="text-muted-foreground/40">|</span>
             <span>
@@ -86,9 +86,9 @@ export default function MonitorView() {
                   disabled={!canGoPrev}
                   className="p-0.5 rounded hover:bg-accent disabled:opacity-30 disabled:cursor-not-allowed"
                 >
-                  <ChevronLeft className="w-3.5 h-3.5" />
+                  <ChevronLeft className="w-4 h-4" />
                 </button>
-                <span className="text-xs tabular-nums">
+                <span className="text-sm tabular-nums">
                   Round {activeRoundIndex + 1}/{assistantMessages.length}
                 </span>
                 <button
@@ -96,7 +96,7 @@ export default function MonitorView() {
                   disabled={!canGoNext}
                   className="p-0.5 rounded hover:bg-accent disabled:opacity-30 disabled:cursor-not-allowed"
                 >
-                  <ChevronRight className="w-3.5 h-3.5" />
+                  <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
             )}
@@ -109,7 +109,7 @@ export default function MonitorView() {
           {/* Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {displayOutputs.length === 0 && !loading && (
-              <div className="col-span-full text-xs text-muted-foreground text-center py-12">
+              <div className="col-span-full text-sm text-muted-foreground text-center py-12">
                 发送问题后将在此显示各子模型的输出
               </div>
             )}

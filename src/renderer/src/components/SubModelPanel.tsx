@@ -27,20 +27,20 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
 
   return (
     <div className={`
-      rounded-lg border bg-card text-sm overflow-hidden
+      rounded-lg border bg-card text-base overflow-hidden
       ${output.status === 'error' ? 'border-red-500/30' : 'border-border'}
       ${isRunningOrPending ? 'ring-1 ring-blue-500/20' : ''}
     `}>
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-muted/30">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className={`font-mono text-xs ${STATUS_COLOR[output.status]}`}>
+          <span className={`font-mono text-sm ${STATUS_COLOR[output.status]}`}>
             {STATUS_ICON[output.status]}
           </span>
-          <span className="text-xs font-medium text-foreground truncate" title={output.modelId}>
+          <span className="text-sm font-medium text-foreground truncate" title={output.modelId}>
             #{output.index + 1} {shortModelName}
           </span>
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground shrink-0">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground shrink-0">
           {output.durationMs != null && (
             <span>{(output.durationMs / 1000).toFixed(1)}s</span>
           )}
@@ -55,22 +55,22 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
 
       <div className="px-3 py-2 max-h-60 overflow-y-auto">
         {output.status === 'error' ? (
-          <div className="text-xs text-red-400 font-mono whitespace-pre-wrap">{output.error}</div>
+          <div className="text-sm text-red-400 font-mono whitespace-pre-wrap">{output.error}</div>
         ) : output.content ? (
-          <div className="prose prose-sm dark:prose-invert max-w-none text-xs">
+          <div className="prose dark:prose-invert max-w-none text-sm">
             <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
               {output.content}
             </ReactMarkdown>
           </div>
         ) : (
-          <div className="text-xs text-muted-foreground">
+          <div className="text-sm text-muted-foreground">
             {output.status === 'pending' ? '等待调度...' : output.status === 'running' ? '接收中...' : '无输出内容'}
           </div>
         )}
       </div>
 
       {output.tokenUsage && (
-        <div className="px-3 py-1 border-t border-border text-xs text-muted-foreground">
+        <div className="px-3 py-1 border-t border-border text-sm text-muted-foreground">
           ↑{output.tokenUsage.prompt} ↓{output.tokenUsage.completion}
         </div>
       )}
