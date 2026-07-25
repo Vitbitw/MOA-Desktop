@@ -12,6 +12,7 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
+  "exclude": ["out/", "node_modules/", "dist/"],
   "references": [
     { "path": "./tsconfig.node.json" },
     { "path": "./tsconfig.web.json" }

@@ -136,11 +136,32 @@ function registerIpcHandlers() {
 
   // ── Settings ──
   ipcMain.handle(IPC.SETTINGS_GET_ALL, () => {
-    return { success: true, data: DEFAULT_SETTINGS }
+    try {
+      const row = getDatabase().queryOne<{ value: string }>(
+        "SELECT value FROM moa_config WHERE key = 'app_settings'"
+      )
+      if (row?.value) {
+        const saved = JSON.parse(row.value)
+        return { success: true, data: { ...DEFAULT_SETTINGS, ...saved } }
+      }
+      return { success: true, data: DEFAULT_SETTINGS }
+    } catch (err) {
+      return { success: true, data: DEFAULT_SETTINGS }
+    }
   })
 
   ipcMain.handle(IPC.SETTINGS_SET, (_e, key: string, value: unknown) => {
     try {
+      // Load current, update, save
+      const row = getDatabase().queryOne<{ value: string }>(
+        "SELECT value FROM moa_config WHERE key = 'app_settings'"
+      )
+      const current = row?.value ? JSON.parse(row.value) : {}
+      current[key] = value
+      getDatabase().exec(
+        'INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES (\'app_settings\', ?, ?)',
+        [JSON.stringify(current), Date.now()]
+      )
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -204,7 +225,7 @@ function registerIpcHandlers() {
         messages: [...historyMessages, { role: 'user', content: msg.content }],
         subModels: config.subModels,
         aggregator: config.aggregator || undefined,
-        mode: (msg.mode === 'aggregate' ? 'aggregate' : 'compare') as 'aggregate' | 'compare' | 'direct',
+        mode: msg.mode as 'aggregate' | 'compare' | 'direct',
         aggregationPromptVariant: config.aggregationPromptVariant
       })
 
