@@ -1,3 +1,5 @@
+import type { SubOutputUpdate, AggregationChunk } from './types'
+
 interface MoaAPI {
   // Config / Providers
   getProviders: () => Promise<{ success: boolean; data: unknown; error?: string }>
@@ -26,6 +28,13 @@ interface MoaAPI {
 
   // App
   getVersion: () => Promise<string>
+
+  // MoA Event Listeners (streaming)
+  onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => () => void
+  onAggregationStart: (callback: () => void) => () => void
+  onAggregationChunk: (callback: (data: AggregationChunk) => void) => () => void
+  onAllDone: (callback: (data: { conversationId: string; conversations: unknown[] }) => void) => () => void
+  removeAllListeners: () => void
 }
 
 declare global {
