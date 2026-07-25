@@ -31,7 +31,6 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
       ${output.status === 'error' ? 'border-red-500/30' : 'border-border'}
       ${isRunningOrPending ? 'ring-1 ring-blue-500/20' : ''}
     `}>
-      {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-muted/30">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className={`font-mono text-xs ${STATUS_COLOR[output.status]}`}>
@@ -54,7 +53,6 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
         </div>
       </div>
 
-      {/* Content */}
       <div className="px-3 py-2 max-h-60 overflow-y-auto">
         {output.status === 'error' ? (
           <div className="text-xs text-red-400 font-mono whitespace-pre-wrap">{output.error}</div>
@@ -71,7 +69,6 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
         )}
       </div>
 
-      {/* Token usage footer */}
       {output.tokenUsage && (
         <div className="px-3 py-1 border-t border-border text-xs text-muted-foreground">
           ↑{output.tokenUsage.prompt} ↓{output.tokenUsage.completion}

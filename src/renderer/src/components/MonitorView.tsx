@@ -53,7 +53,7 @@ export default function MonitorView() {
   const displayAggregatorContent = hasLive ? aggregatorText : historyContent
 
   // Pending grid while loading but no data yet
-  const subModelCount = Math.max(displayOutputs.length || assistantMessages.length > 0 ? displayOutputs.length : 3, 2)
+  const subModelCount = Math.max(displayOutputs.length || 3, 2)
 
   const canGoPrev = !hasLive && activeRoundIndex > 0
   const canGoNext = !hasLive && activeRoundIndex < latestRoundIndex
