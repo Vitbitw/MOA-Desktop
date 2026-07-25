@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { useConversationStore } from '../store/conversationStore'
 import { useConfigStore } from '../store/configStore'
-import { Search, Settings, MessageSquare, Cpu, Sun, Moon } from 'lucide-react'
+import { Search, Settings, MessageSquare, Sun, Moon } from 'lucide-react'
 
 export default function Sidebar({
   activeTab,
@@ -10,7 +10,7 @@ export default function Sidebar({
   onViewModeChange
 }: {
   activeTab: string
-  onTabChange: (tab: 'chat' | 'providers' | 'moa') => void
+  onTabChange: (tab: 'chat' | 'settings') => void
   viewMode: 'standard' | 'monitor'
   onViewModeChange: (mode: 'standard' | 'monitor') => void
 }) {
@@ -56,11 +56,8 @@ export default function Sidebar({
         <button onClick={() => onTabChange('chat')} className={`flex items-center gap-1.5 flex-1 px-3 py-2 text-xs border-b-2 transition-colors ${activeTab === 'chat' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
           <MessageSquare className="w-3.5 h-3.5" /> 对话
         </button>
-        <button onClick={() => onTabChange('providers')} className={`flex items-center gap-1.5 flex-1 px-3 py-2 text-xs border-b-2 transition-colors ${activeTab === 'providers' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
-          <Settings className="w-3.5 h-3.5" /> 厂商
-        </button>
-        <button onClick={() => onTabChange('moa')} className={`flex items-center gap-1.5 flex-1 px-3 py-2 text-xs border-b-2 transition-colors ${activeTab === 'moa' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
-          <Cpu className="w-3.5 h-3.5" /> MoA
+        <button onClick={() => onTabChange('settings')} className={`flex items-center gap-1.5 flex-1 px-3 py-2 text-xs border-b-2 transition-colors ${activeTab === 'settings' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
+          <Settings className="w-3.5 h-3.5" /> 设置
         </button>
       </div>
 

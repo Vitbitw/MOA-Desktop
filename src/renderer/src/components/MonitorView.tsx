@@ -72,10 +72,10 @@ export default function MonitorView() {
         <div className="p-3">
           {/* Header bar */}
           <div className="flex items-center gap-2 mb-2 text-sm text-muted-foreground">
-            <span className="font-semibold uppercase tracking-wider">Sub-Model Outputs</span>
+            <span className="font-semibold uppercase tracking-wider">子模型输出</span>
             <span className="text-muted-foreground/40">|</span>
             <span>
-              {mode === 'aggregate' ? 'A Mode' : mode === 'compare' ? 'D Mode' : 'Direct'}
+              {mode === 'aggregate' ? 'A 模式' : mode === 'compare' ? 'D 模式' : '直通'}
             </span>
 
             {/* Round navigation */}
@@ -89,7 +89,7 @@ export default function MonitorView() {
                   <ChevronLeft className="w-4 h-4" />
                 </button>
                 <span className="text-sm tabular-nums">
-                  Round {activeRoundIndex + 1}/{assistantMessages.length}
+                  第{activeRoundIndex + 1}/{assistantMessages.length}轮
                 </span>
                 <button
                   onClick={() => setActiveRoundIndex(activeRoundIndex + 1)}
@@ -102,7 +102,7 @@ export default function MonitorView() {
             )}
 
             {hasLive && (
-              <span className="text-blue-500 animate-pulse ml-auto">● Running</span>
+              <span className="text-blue-500 animate-pulse ml-auto">● 运行中</span>
             )}
           </div>
 
@@ -141,7 +141,7 @@ export default function MonitorView() {
           running={aggregatorRunning || (loading && hasLive)}
           mode={mode}
           roundLabel={!hasLive && assistantMessages.length > 1
-            ? `Round ${activeRoundIndex + 1}/${assistantMessages.length}`
+            ? `第${activeRoundIndex + 1}/${assistantMessages.length}轮`
             : undefined
           }
         />

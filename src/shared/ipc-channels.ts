@@ -34,6 +34,10 @@ export const IPC_EVENT = {
   MOA_AGGREGATION_CHUNK: 'moa:aggregationChunk',
   MOA_AGGREGATION_DONE: 'moa:aggregationDone',
   MOA_ALL_DONE: 'moa:allDone',
+
+  // Menu events
+  MENU_NEW_CONVERSATION: 'menu:newConversation',
+  MENU_COPY_PROXY_URL: 'menu:copyProxyUrl',
 } as const
 
 export type IPCChannel = (typeof IPC)[keyof typeof IPC]

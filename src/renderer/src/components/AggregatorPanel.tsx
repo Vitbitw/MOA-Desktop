@@ -24,9 +24,9 @@ export default function AggregatorPanel({
   }, [content])
 
   const modeLabel =
-    mode === 'aggregate' ? 'Aggregated' :
-    mode === 'compare' ? 'Compare (D)' :
-    'Direct'
+    mode === 'aggregate' ? '聚合输出' :
+    mode === 'compare' ? '对比 (D)' :
+    '直通'
 
   return (
     <div className="flex flex-col h-full">
@@ -43,7 +43,7 @@ export default function AggregatorPanel({
           )}
         </div>
         <div className="text-sm text-muted-foreground">
-          {content.length > 0 && `${content.length} chars`}
+          {content.length > 0 && `${content.length} 字符`}
         </div>
       </div>
 

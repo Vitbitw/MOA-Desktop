@@ -105,7 +105,7 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
       content: '',
       subOutputs: [],
       success: false,
-      error: 'No usable sub-models: check provider configuration and API keys'
+      error: '没有可用的子模型：请检查厂商配置和 API Key'
     }
   }
 
@@ -149,7 +149,7 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
       content: '',
       subOutputs,
       success: false,
-      error: 'All sub-models failed. Check provider health and API keys.'
+      error: '所有子模型均失败。请检查厂商连接和 API Key。'
     }
   }
 
@@ -165,7 +165,7 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
       subOutputs,
       success: false,
       partialFailure: successfulCount < subOutputs.length,
-      error: 'No aggregator model configured. Configure one in settings or switch to D mode.'
+      error: '未配置聚合模型。请在设置中配置或切换为 D 模式。'
     }
   }
 
@@ -213,7 +213,7 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
       success: false,
       partialFailure: successfulCount < subOutputs.length,
       aggregatorContent: '',
-      error: `Aggregator failed: ${aggResult.error}. Sub-models available in compare view.`
+      error: `聚合失败：${aggResult.error}。子模型输出可在对比视图中查看。`
     }
   }
 
@@ -250,7 +250,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
       content: '',
       subOutputs: [],
       success: false,
-      error: 'No usable sub-models: check provider configuration and API keys'
+      error: '没有可用的子模型：请检查厂商配置和 API Key'
     }
   }
 
@@ -320,7 +320,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
       content: '',
       subOutputs,
       success: false,
-      error: 'All sub-models failed. Check provider health and API keys.'
+      error: '所有子模型均失败。请检查厂商连接和 API Key。'
     }
   }
 
@@ -335,7 +335,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
       subOutputs,
       success: false,
       partialFailure: successfulCount < subOutputs.length,
-      error: 'No aggregator model configured. Configure one in settings or switch to D mode.'
+      error: '未配置聚合模型。请在设置中配置或切换为 D 模式。'
     }
   }
 
@@ -387,7 +387,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
       success: false,
       partialFailure: successfulCount < subOutputs.length,
       aggregatorContent: '',
-      error: `Aggregator failed: ${aggResult.error}. Sub-models available in compare view.`
+      error: `聚合失败：${aggResult.error}。子模型输出可在对比视图中查看。`
     }
   }
 

@@ -120,7 +120,7 @@ export async function callSubModelsParallel(opts: ParallelCallOptions): Promise<
       providerId: sm.providerBaseUrl,
       content: '',
       status: 'error' as const,
-      error: 'Unexpected rejection in Promise.allSettled',
+      error: 'Promise.allSettled 中出现意外拒绝',
       durationMs: 0
     }
   })

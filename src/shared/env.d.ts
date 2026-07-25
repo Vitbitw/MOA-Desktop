@@ -35,6 +35,10 @@ interface MoaAPI {
   onAggregationChunk: (callback: (data: AggregationChunk) => void) => () => void
   onAllDone: (callback: (data: { conversationId: string; conversations: unknown[] }) => void) => () => void
   removeAllListeners: () => void
+
+  // Menu event listeners
+  onMenuNewConversation: (callback: () => void) => () => void
+  onMenuCopyProxyUrl: (callback: (url: string) => void) => () => void
 }
 
 declare global {

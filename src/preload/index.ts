@@ -64,5 +64,20 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.removeAllListeners(IPC_EVENT.MOA_AGGREGATION_START)
     ipcRenderer.removeAllListeners(IPC_EVENT.MOA_AGGREGATION_CHUNK)
     ipcRenderer.removeAllListeners(IPC_EVENT.MOA_ALL_DONE)
+    ipcRenderer.removeAllListeners(IPC_EVENT.MENU_NEW_CONVERSATION)
+    ipcRenderer.removeAllListeners(IPC_EVENT.MENU_COPY_PROXY_URL)
+  },
+
+  // Menu event listeners
+  onMenuNewConversation: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC_EVENT.MENU_NEW_CONVERSATION, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.MENU_NEW_CONVERSATION, handler)
+  },
+
+  onMenuCopyProxyUrl: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC_EVENT.MENU_COPY_PROXY_URL, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.MENU_COPY_PROXY_URL, handler)
   }
 })

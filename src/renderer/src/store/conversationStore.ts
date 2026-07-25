@@ -14,7 +14,7 @@ export interface LiveSubOutput {
 }
 
 /** Factory: convert DB row to Conversation type. */
-function convFromRow(c: any): Conversation {
+export function convFromRow(c: any): Conversation {
   return {
     id: c.id,
     title: c.title || '',

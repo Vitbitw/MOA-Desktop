@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, shell, clipboard } from 'electron'
 import path from 'path'
 import { getDatabase } from './db/database'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
@@ -31,6 +31,88 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
+}
+
+function createApplicationMenu() {
+  const isMac = process.platform === 'darwin'
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac ? [{
+      label: 'MoA Desktop',
+      submenu: [
+        { role: 'about' as const, label: '关于 MoA Desktop' },
+        { type: 'separator' as const },
+        { role: 'quit' as const, label: '退出' }
+      ]
+    }] : []),
+    {
+      label: '文件',
+      submenu: [
+        {
+          label: '新建对话',
+          accelerator: 'CmdOrCtrl+N',
+          click: () => {
+            mainWindow?.webContents.send(IPC_EVENT.MENU_NEW_CONVERSATION)
+          }
+        },
+        { type: 'separator' as const },
+        ...(isMac ? [] : [{ role: 'quit' as const, label: '退出' }])
+      ]
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo' as const, label: '撤销' },
+        { role: 'redo' as const, label: '重做' },
+        { type: 'separator' as const },
+        { role: 'cut' as const, label: '剪切' },
+        { role: 'copy' as const, label: '复制' },
+        { role: 'paste' as const, label: '粘贴' },
+        { role: 'selectAll' as const, label: '全选' }
+      ]
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload' as const, label: '重新加载' },
+        { role: 'forceReload' as const, label: '强制重新加载' },
+        { role: 'toggleDevTools' as const, label: '开发者工具' },
+        { type: 'separator' as const },
+        { role: 'resetZoom' as const, label: '重置缩放' },
+        { role: 'zoomIn' as const, label: '放大' },
+        { role: 'zoomOut' as const, label: '缩小' },
+        { type: 'separator' as const },
+        { role: 'togglefullscreen' as const, label: '全屏' }
+      ]
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize' as const, label: '最小化' },
+        { role: 'close' as const, label: '关闭' }
+      ]
+    },
+    {
+      label: '帮助',
+      submenu: [
+        {
+          label: 'API 代理地址',
+          click: () => {
+            const settings = DEFAULT_SETTINGS.proxy
+            const url = `http://${settings.host}:${settings.port}`
+            clipboard.writeText(url)
+            mainWindow?.webContents.send(IPC_EVENT.MENU_COPY_PROXY_URL, url)
+          }
+        },
+        { type: 'separator' as const },
+        {
+          label: '项目 GitHub',
+          click: () => shell.openExternal('https://github.com/')
+        }
+      ]
+    }
+  ]
+  const menu = Menu.buildFromTemplate(template)
+  Menu.setApplicationMenu(menu)
 }
 
 function registerIpcHandlers() {
@@ -332,6 +414,9 @@ app.whenReady().then(async () => {
 
   // Register IPC handlers
   registerIpcHandlers()
+
+  // Set up Chinese application menu
+  createApplicationMenu()
 
   // Create window
   createWindow()
