@@ -142,8 +142,23 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       if (res.success) {
         const data = res.data as {
           conversationId: string
-          moaResult: { content: string; subOutputs?: SubModelOutput[] }
+          moaResult: { content: string; subOutputs?: SubModelOutput[]; error?: string; success?: boolean }
           conversations: any[]
+        }
+
+        const moaResult = data.moaResult
+
+        // Build assistant message content from moaResult
+        let content: string
+        if (moaResult.success) {
+          content = moaResult.content
+            ? moaResult.content
+            : moaResult.subOutputs?.length
+              ? `已调用 ${moaResult.subOutputs.length} 个子模型`
+              : '(模型返回了空内容)'
+        } else {
+          // Use error from moaResult, or moaResult.content as fallback
+          content = moaResult.error || moaResult.content || '请求失败'
         }
 
         // Patch the optimistic user message's conversationId
@@ -157,9 +172,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           id: crypto.randomUUID(),
           conversationId: data.conversationId,
           role: 'assistant',
-          content: data.moaResult.content || '(空响应)',
+          content,
           mode,
-          subModelOutputs: data.moaResult.subOutputs,
+          subModelOutputs: moaResult.subOutputs,
           timestamp: Date.now()
         }
 

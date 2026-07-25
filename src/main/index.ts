@@ -194,6 +194,15 @@ function registerIpcHandlers() {
       let convId = msg.conversationId
       const now = Date.now()
 
+      // ── Validate MoA config before execution ──
+      const config = getMoaConfig()
+      if (config.subModels.length === 0) {
+        return { success: false, error: '请先配置子模型（MoA → 添加子模型）' }
+      }
+      if (msg.mode === 'aggregate' && !config.aggregator) {
+        return { success: false, error: '聚合模式需要配置聚合模型（MoA → 聚合模型），或切换为 D 模式' }
+      }
+
       // Auto-create conversation if none
       if (!convId) {
         convId = crypto.randomUUID()
@@ -220,7 +229,6 @@ function registerIpcHandlers() {
       )
 
       // Execute MoA with full history (history doesn't include the just-saved message)
-      const config = getMoaConfig()
       const moaResult = await executeMoA({
         messages: [...historyMessages, { role: 'user', content: msg.content }],
         subModels: config.subModels,
