@@ -1,6 +1,18 @@
 import { create } from 'zustand'
 import type { Conversation, ChatMessage, MoAMode, SubModelOutput } from '../../../shared/types'
 
+// ── Live streaming sub-output state (for Monitor View) ──
+export interface LiveSubOutput {
+  index: number
+  modelId: string
+  providerId: string
+  content: string
+  status: 'pending' | 'running' | 'success' | 'error'
+  error?: string
+  durationMs?: number
+  tokenUsage?: { prompt: number; completion: number }
+}
+
 /** Factory: convert DB row to Conversation type. */
 function convFromRow(c: any): Conversation {
   return {
@@ -30,6 +42,19 @@ interface ConversationState {
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
 
+  // ── Live streaming state ──
+  liveSubOutputs: LiveSubOutput[]
+  aggregatorText: string
+  aggregatorRunning: boolean
+
+  // ── Live streaming actions ──
+  setLiveSubOutputs: (outputs: LiveSubOutput[]) => void
+  updateLiveSubOutput: (index: number, update: Partial<LiveSubOutput>) => void
+  setAggregatorText: (text: string) => void
+  setAggregatorRunning: (running: boolean) => void
+  clearLiveState: () => void
+  cleanupLiveEvents: () => void
+
   // Async actions
   sendMessage: (content: string) => Promise<void>
   selectConversation: (id: string) => Promise<void>
@@ -53,6 +78,27 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   setMode: (mode) => set({ mode }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
+
+  // ── Live streaming initial values ──
+  liveSubOutputs: [],
+  aggregatorText: '',
+  aggregatorRunning: false,
+
+  // ── Live streaming actions ──
+  setLiveSubOutputs: (liveSubOutputs) => set({ liveSubOutputs }),
+  updateLiveSubOutput: (index, update) =>
+    set((state) => ({
+      liveSubOutputs: state.liveSubOutputs.map((o) =>
+        o.index === index ? { ...o, ...update } : o
+      )
+    })),
+  setAggregatorText: (aggregatorText) => set({ aggregatorText }),
+  setAggregatorRunning: (aggregatorRunning) => set({ aggregatorRunning }),
+  clearLiveState: () => set({
+    liveSubOutputs: [],
+    aggregatorText: '',
+    aggregatorRunning: false
+  }),
 
   newConversation: () => set({ currentConversationId: null, messages: [] }),
 
@@ -115,7 +161,74 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     const { mode, currentConversationId } = get()
     if (!content.trim()) return
 
-    // Optimistic: add user message locally (no conversationId yet for new conversations)
+    // 1. Clear previous live state
+    set({
+      liveSubOutputs: [],
+      aggregatorText: '',
+      aggregatorRunning: false,
+      error: null
+    })
+
+    // 2. Register IPC event listeners (BEFORE sending)
+    const unsubs: (() => void)[] = []
+    const cleanup = () => { unsubs.forEach(fn => fn()); unsubs.length = 0 }
+
+    if (window.moaAPI.onSubOutputUpdate) {
+      unsubs.push(window.moaAPI.onSubOutputUpdate((data: any) => {
+        const existing = get().liveSubOutputs.find((o) => o.index === data.index)
+        if (existing) {
+          get().updateLiveSubOutput(data.index, {
+            content: data.content,
+            status: data.status,
+            error: data.error,
+            durationMs: data.durationMs,
+            tokenUsage: data.tokenUsage
+          })
+        } else {
+          set((state) => ({
+            liveSubOutputs: [...state.liveSubOutputs, {
+              index: data.index,
+              modelId: data.modelId,
+              providerId: data.providerId,
+              content: data.content,
+              status: data.status as LiveSubOutput['status'],
+              error: data.error,
+              durationMs: data.durationMs,
+              tokenUsage: data.tokenUsage
+            }]
+          }))
+        }
+      }))
+    }
+
+    if (window.moaAPI.onAggregationStart) {
+      unsubs.push(window.moaAPI.onAggregationStart(() => {
+        set({ aggregatorRunning: true })
+      }))
+    }
+
+    if (window.moaAPI.onAggregationChunk) {
+      unsubs.push(window.moaAPI.onAggregationChunk((data: any) => {
+        if (typeof data.text === 'string') {
+          set({ aggregatorText: data.text, aggregatorRunning: !data.done })
+        }
+      }))
+    }
+
+    if (window.moaAPI.onAllDone) {
+      unsubs.push(window.moaAPI.onAllDone((_data: any) => {
+        cleanup()
+        // Keep the liveSubOutputs and aggregatorText for display
+        // Refresh conversations list
+        get().refreshConversations()
+      }))
+    }
+
+    // 3. Save the cleanup function (for view switching cleanup)
+    // We store it in a non-reactive field on the store
+    ;(get() as any)._liveCleanup = cleanup
+
+    // 4. Optimistic: add user message locally (no conversationId yet for new conversations)
     const tempId = crypto.randomUUID()
     const userMsg: ChatMessage = {
       id: tempId,
@@ -132,6 +245,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       error: null
     }))
 
+    // 5. Call backend (existing code continues for backward compatibility)
     try {
       const res = await window.moaAPI.sendMessage({
         conversationId: currentConversationId || undefined,
@@ -190,9 +304,19 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         set({ error: String(res.error || '请求失败'), loading: false })
       }
     } catch (err) {
+      cleanup()
       set({ error: String(err), loading: false })
     } finally {
       set({ loading: false })
+    }
+  },
+
+  // ── Cleanup live events externally (e.g., when switching views) ──
+  cleanupLiveEvents: () => {
+    const cleanup = (get() as any)._liveCleanup as (() => void) | undefined
+    if (cleanup) {
+      cleanup()
+      ;(get() as any)._liveCleanup = undefined
     }
   }
 }))
