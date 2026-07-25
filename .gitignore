@@ -41,3 +41,5 @@ app-config.json
 
 # Test temp
 test-*/
+.hermes/
+.superpowers/
