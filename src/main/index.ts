@@ -229,7 +229,7 @@ function registerIpcHandlers() {
       )
 
       // Execute MoA with event emission
-      const win = BrowserWindow.fromWebContents(event.sender)
+      const win = BrowserWindow.fromWebContents(_e.sender)
       const moaResult = await executeMoAWithEvents({
         messages: [...historyMessages, { role: 'user', content: msg.content }],
         subModels: config.subModels,
