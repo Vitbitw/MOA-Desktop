@@ -24,6 +24,19 @@ function App() {
     })
   }, [])
 
+  // Ctrl+K / Cmd+K → focus sidebar search
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault()
+        const input = document.querySelector<HTMLInputElement>('[data-search-input]')
+        input?.focus()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
   return (
     <ErrorBoundary>
       <div className="flex h-screen overflow-hidden bg-background">
