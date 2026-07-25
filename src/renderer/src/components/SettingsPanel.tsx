@@ -4,6 +4,7 @@ import { useConfigStore } from '../store/configStore'
 import { useConversationStore } from '../store/conversationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig } from '../../../shared/types'
+import { BUILT_IN_PROVIDER_TEMPLATES } from '../../../shared/defaults'
 
 type SettingsSection = 'moa' | 'providers' | 'proxy' | 'display' | 'pricing' | 'currency'
 
@@ -555,13 +556,6 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const templates = [
-    { name: 'OpenAI', url: 'https://api.openai.com/v1' },
-    { name: 'DeepSeek', url: 'https://api.deepseek.com/v1' },
-    { name: '硅基流动', url: 'https://api.siliconflow.cn/v1' },
-    { name: 'Groq', url: 'https://api.groq.com/openai/v1' }
-  ]
-
   const handleSave = async () => {
     if (!name.trim() || !apiKey.trim()) {
       setError('名称和 API Key 为必填')
@@ -595,10 +589,10 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
         <div className="mb-3">
           <p className="text-xs text-muted-foreground mb-1.5">快速选择：</p>
           <div className="flex flex-wrap gap-1.5">
-            {templates.map((t) => (
+            {BUILT_IN_PROVIDER_TEMPLATES.map((t) => (
               <button
                 key={t.name}
-                onClick={() => { setName(t.name); setBaseUrl(t.url) }}
+                onClick={() => { setName(t.name); setBaseUrl(t.baseUrl) }}
                 className={`px-2 py-1 text-xs rounded-md border transition-colors ${
                   name === t.name
                     ? 'border-primary bg-primary/10 text-primary'

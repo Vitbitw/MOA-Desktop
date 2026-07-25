@@ -71,14 +71,24 @@ export async function fetchAndCacheModels(providerId: string): Promise<ModelInfo
 }
 
 export function seedBuiltInProviders(): void {
-  const count = getDatabase().queryOne<{ c: number }>('SELECT COUNT(*) as c FROM providers')
-  if (count && count.c > 0) return
+  const existing = getDatabase().query<{ name: string }>('SELECT name FROM providers')
+  const existingNames = new Set(existing.map((row) => row.name))
 
+  let added = 0
   for (const tpl of BUILT_IN_PROVIDER_TEMPLATES) {
+    if (existingNames.has(tpl.name)) continue
     getDatabase().exec(
       'INSERT INTO providers (id, name, base_url, model_list, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)',
       [crypto.randomUUID(), tpl.name, tpl.baseUrl, '[]', Date.now()]
     )
+    added++
   }
-  console.log(`[Providers] Seeded ${BUILT_IN_PROVIDER_TEMPLATES.length} built-in providers`)
+
+  if (existing.length === 0) {
+    console.log(`[Providers] Seeded ${BUILT_IN_PROVIDER_TEMPLATES.length} built-in providers`)
+  } else if (added > 0) {
+    console.log(`[Providers] Added ${added} new built-in provider(s)`)
+  } else {
+    console.log(`[Providers] All ${BUILT_IN_PROVIDER_TEMPLATES.length} built-in providers already present`)
+  }
 }

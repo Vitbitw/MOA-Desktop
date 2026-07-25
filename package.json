@@ -2,6 +2,7 @@
   "name": "moa-desktop",
   "version": "1.0.0",
   "description": "Mixture of Agents (MoA) 桌面客户端 — 本地 API 代理 + 全功能聊天面板",
+  "license": "AGPL-3.0-or-later",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
