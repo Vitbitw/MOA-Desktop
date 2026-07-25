@@ -131,3 +131,20 @@ export interface PricingConfig {
   cacheRead: number
   cacheCreation: number
 }
+
+// ─── IPC Streaming Events ───
+export interface SubOutputUpdate {
+  index: number
+  modelId: string
+  providerId: string
+  content: string
+  status: 'success' | 'error'
+  error?: string
+  durationMs?: number
+  tokenUsage?: { prompt: number; completion: number }
+}
+
+export interface AggregationChunk {
+  text: string
+  done: boolean
+}

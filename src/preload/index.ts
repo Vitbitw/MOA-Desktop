@@ -1,4 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { IPC_EVENT } from '../shared/ipc-channels'
+import type { SubOutputUpdate, AggregationChunk } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
   // Config / Providers
@@ -30,5 +32,37 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.invoke('moa:sendMessage', msg),
 
   // App
-  getVersion: () => ipcRenderer.invoke('app:getVersion')
+  getVersion: () => ipcRenderer.invoke('app:getVersion'),
+
+  // MoA Event Listeners (streaming)
+  onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: SubOutputUpdate) => callback(data)
+    ipcRenderer.on(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE, handler)
+  },
+
+  onAggregationStart: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC_EVENT.MOA_AGGREGATION_START, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.MOA_AGGREGATION_START, handler)
+  },
+
+  onAggregationChunk: (callback: (data: AggregationChunk) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: AggregationChunk) => callback(data)
+    ipcRenderer.on(IPC_EVENT.MOA_AGGREGATION_CHUNK, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.MOA_AGGREGATION_CHUNK, handler)
+  },
+
+  onAllDone: (callback: (data: { conversationId: string; conversations: unknown[] }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; conversations: unknown[] }) => callback(data)
+    ipcRenderer.on(IPC_EVENT.MOA_ALL_DONE, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.MOA_ALL_DONE, handler)
+  },
+
+  removeAllListeners: () => {
+    ipcRenderer.removeAllListeners(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE)
+    ipcRenderer.removeAllListeners(IPC_EVENT.MOA_AGGREGATION_START)
+    ipcRenderer.removeAllListeners(IPC_EVENT.MOA_AGGREGATION_CHUNK)
+    ipcRenderer.removeAllListeners(IPC_EVENT.MOA_ALL_DONE)
+  }
 })

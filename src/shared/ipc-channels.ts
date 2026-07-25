@@ -27,4 +27,13 @@ export const IPC = {
   APP_GET_VERSION: 'app:getVersion',
 } as const
 
+export const IPC_EVENT = {
+  MOA_SUB_OUTPUT_UPDATE: 'moa:subOutputUpdate',
+  MOA_SUB_OUTPUT_ERROR: 'moa:subOutputError',
+  MOA_AGGREGATION_START: 'moa:aggregationStart',
+  MOA_AGGREGATION_CHUNK: 'moa:aggregationChunk',
+  MOA_AGGREGATION_DONE: 'moa:aggregationDone',
+  MOA_ALL_DONE: 'moa:allDone',
+} as const
+
 export type IPCChannel = (typeof IPC)[keyof typeof IPC]
