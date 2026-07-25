@@ -3,6 +3,7 @@ import { useConversationStore } from '../store/conversationStore'
 import SubModelPanel from './SubModelPanel'
 import AggregatorPanel from './AggregatorPanel'
 import type { LiveSubOutput } from '../store/conversationStore'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 export default function MonitorView() {
   const messages = useConversationStore((s) => s.messages)
@@ -13,12 +14,28 @@ export default function MonitorView() {
   const aggregatorText = useConversationStore((s) => s.aggregatorText)
   const aggregatorRunning = useConversationStore((s) => s.aggregatorRunning)
 
-  // History replay: use last assistant message's sub-model outputs
-  const lastAssistantMsg = [...messages].reverse().find((m) => m.role === 'assistant')
-  const historySubOutputs = lastAssistantMsg?.subModelOutputs || []
+  const hasLive = liveSubOutputs.length > 0
 
-  // Determine which outputs to display
-  const displayOutputs: LiveSubOutput[] = liveSubOutputs.length > 0
+  // ── Compute rounds from history messages ──
+  const assistantMessages = messages.filter((m) => m.role === 'assistant')
+  const latestRoundIndex = assistantMessages.length - 1
+
+  const [activeRoundIndex, setActiveRoundIndex] = React.useState(latestRoundIndex)
+
+  // Auto-follow when new rounds appear (history loaded, or new message received)
+  React.useEffect(() => {
+    if (!hasLive && assistantMessages.length > 0) {
+      setActiveRoundIndex(assistantMessages.length - 1)
+    }
+  }, [assistantMessages.length, hasLive])
+
+  // Get the active round's data
+  const activeRound = assistantMessages[activeRoundIndex]
+  const historySubOutputs = activeRound?.subModelOutputs || []
+  const historyContent = activeRound?.content || ''
+
+  // ── Determine what to display ──
+  const displayOutputs: LiveSubOutput[] = hasLive
     ? liveSubOutputs
     : historySubOutputs.length > 0
       ? historySubOutputs.map((o, i) => ({
@@ -33,14 +50,17 @@ export default function MonitorView() {
         }))
       : []
 
-  const displayAggregatorContent = aggregatorText || lastAssistantMsg?.content || ''
+  const displayAggregatorContent = hasLive ? aggregatorText : historyContent
 
-  // Sub-model count for pending grid
-  const subModelCount = Math.max(displayOutputs.length, 3)
+  // Pending grid while loading but no data yet
+  const subModelCount = Math.max(displayOutputs.length || assistantMessages.length > 0 ? displayOutputs.length : 3, 2)
+
+  const canGoPrev = !hasLive && activeRoundIndex > 0
+  const canGoNext = !hasLive && activeRoundIndex < latestRoundIndex
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-background">
-      {/* ── Error banner ── */}
+      {/* Error banner */}
       {error && (
         <div className="px-4 py-2 text-sm text-destructive bg-destructive/10 border-b border-destructive/30">
           {error}
@@ -57,7 +77,31 @@ export default function MonitorView() {
             <span>
               {mode === 'aggregate' ? 'A Mode' : mode === 'compare' ? 'D Mode' : 'Direct'}
             </span>
-            {loading && displayOutputs.length === 0 && (
+
+            {/* Round navigation */}
+            {!hasLive && assistantMessages.length > 1 && (
+              <div className="flex items-center gap-1 ml-auto">
+                <button
+                  onClick={() => setActiveRoundIndex(activeRoundIndex - 1)}
+                  disabled={!canGoPrev}
+                  className="p-0.5 rounded hover:bg-accent disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <span className="text-xs tabular-nums">
+                  Round {activeRoundIndex + 1}/{assistantMessages.length}
+                </span>
+                <button
+                  onClick={() => setActiveRoundIndex(activeRoundIndex + 1)}
+                  disabled={!canGoNext}
+                  className="p-0.5 rounded hover:bg-accent disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {hasLive && (
               <span className="text-blue-500 animate-pulse ml-auto">● Running</span>
             )}
           </div>
@@ -94,8 +138,12 @@ export default function MonitorView() {
         style={{ height: '35%', minHeight: '160px', maxHeight: '50%' }}>
         <AggregatorPanel
           content={displayAggregatorContent}
-          running={aggregatorRunning || loading}
+          running={aggregatorRunning || (loading && hasLive)}
           mode={mode}
+          roundLabel={!hasLive && assistantMessages.length > 1
+            ? `Round ${activeRoundIndex + 1}/${assistantMessages.length}`
+            : undefined
+          }
         />
       </div>
     </div>

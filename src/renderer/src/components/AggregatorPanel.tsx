@@ -7,11 +7,13 @@ import rehypeKatex from 'rehype-katex'
 export default function AggregatorPanel({
   content,
   running,
-  mode
+  mode,
+  roundLabel
 }: {
   content: string
   running: boolean
   mode: string
+  roundLabel?: string
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -28,11 +30,10 @@ export default function AggregatorPanel({
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-muted/20">
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
-            {modeLabel}
+            {roundLabel ? `${modeLabel} — ${roundLabel}` : modeLabel}
           </span>
           {running && (
             <span className="flex items-center gap-1 text-xs text-blue-500">
@@ -46,7 +47,6 @@ export default function AggregatorPanel({
         </div>
       </div>
 
-      {/* Content */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
         {content ? (
           <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
