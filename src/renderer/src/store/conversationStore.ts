@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Conversation, ChatMessage, MoAMode, SubModelOutput } from '../../../shared/types'
+import type { Conversation, ChatMessage, MoAMode, SubModelOutput, SubOutputUpdate, AggregationChunk } from '../../../shared/types'
 
 // ── Live streaming sub-output state (for Monitor View) ──
 export interface LiveSubOutput {
@@ -174,7 +174,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     const cleanup = () => { unsubs.forEach(fn => fn()); unsubs.length = 0 }
 
     if (window.moaAPI.onSubOutputUpdate) {
-      unsubs.push(window.moaAPI.onSubOutputUpdate((data: any) => {
+      unsubs.push(window.moaAPI.onSubOutputUpdate((data: SubOutputUpdate) => {
         const existing = get().liveSubOutputs.find((o) => o.index === data.index)
         if (existing) {
           get().updateLiveSubOutput(data.index, {
@@ -208,7 +208,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     }
 
     if (window.moaAPI.onAggregationChunk) {
-      unsubs.push(window.moaAPI.onAggregationChunk((data: any) => {
+      unsubs.push(window.moaAPI.onAggregationChunk((data: AggregationChunk) => {
         if (typeof data.text === 'string') {
           set({ aggregatorText: data.text, aggregatorRunning: !data.done })
         }
@@ -216,7 +216,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     }
 
     if (window.moaAPI.onAllDone) {
-      unsubs.push(window.moaAPI.onAllDone((_data: any) => {
+      unsubs.push(window.moaAPI.onAllDone((_data: { conversationId: string; conversations: unknown[] }) => {
         cleanup()
         // Keep the liveSubOutputs and aggregatorText for display
         // Refresh conversations list
