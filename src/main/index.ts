@@ -2,13 +2,13 @@ import crypto from 'node:crypto'
 import { app, BrowserWindow, ipcMain } from 'electron'
 import path from 'path'
 import { getDatabase } from './db/database'
-import { IPC } from '../shared/ipc-channels'
-import type { AppSettings } from '../shared/types'
+import { IPC, IPC_EVENT } from '../shared/ipc-channels'
+import type { AppSettings, SubOutputUpdate, AggregationChunk } from '../shared/types'
 import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
-import { executeMoA } from './moa/moaEngine'
+import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -228,13 +228,38 @@ function registerIpcHandlers() {
         [userMsgId, convId, msg.content, msg.mode, now]
       )
 
-      // Execute MoA with full history (history doesn't include the just-saved message)
-      const moaResult = await executeMoA({
+      // Execute MoA with event emission
+      const win = BrowserWindow.fromWebContents(event.sender)
+      const moaResult = await executeMoAWithEvents({
         messages: [...historyMessages, { role: 'user', content: msg.content }],
         subModels: config.subModels,
         aggregator: config.aggregator || undefined,
         mode: msg.mode as 'aggregate' | 'compare' | 'direct',
-        aggregationPromptVariant: config.aggregationPromptVariant
+        aggregationPromptVariant: config.aggregationPromptVariant,
+        emitSubOutput: (output, index) => {
+          if (win) {
+            win.webContents.send(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE, {
+              index,
+              modelId: output.modelId,
+              providerId: output.providerId,
+              content: output.content,
+              status: output.status,
+              error: output.error,
+              durationMs: output.durationMs,
+              tokenUsage: output.tokenUsage
+            } satisfies SubOutputUpdate)
+          }
+        },
+        emitAggregationStart: () => {
+          if (win) {
+            win.webContents.send(IPC_EVENT.MOA_AGGREGATION_START)
+          }
+        },
+        emitAggregationChunk: (text, done) => {
+          if (win) {
+            win.webContents.send(IPC_EVENT.MOA_AGGREGATION_CHUNK, { text, done } satisfies AggregationChunk)
+          }
+        }
       })
 
       // Save assistant response
@@ -265,6 +290,14 @@ function registerIpcHandlers() {
 
       // Fetch updated conversation list
       const conversations = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
+
+      // Emit allDone event
+      if (win) {
+        win.webContents.send(IPC_EVENT.MOA_ALL_DONE, {
+          conversationId: convId,
+          conversations
+        })
+      }
 
       return { success: true, data: { conversationId: convId, moaResult, conversations } }
     } catch (err) {

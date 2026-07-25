@@ -1,5 +1,5 @@
 import { getAllProviders } from '../providers/providerManager'
-import { callSubModelsParallel, countSuccessfulSubModels } from './subModelCaller'
+import { callSubModel, callSubModelsParallel, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, getAggregationPrompt } from './aggregationPrompt'
 import type { SubModelConfig, AggregatorConfig, SubModelOutput } from '../../shared/types'
 
@@ -216,6 +216,182 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
       error: `Aggregator failed: ${aggResult.error}. Sub-models available in compare view.`
     }
   }
+
+  return {
+    type: 'aggregate',
+    content: aggResult.content,
+    subOutputs,
+    aggregatorContent: aggResult.content,
+    success: true,
+    partialFailure: successfulCount < subOutputs.length
+  }
+}
+
+// ── Event-emitting variant ──────────────────────────────────────────
+
+export interface MoaRequestWithEvents extends MoaRequest {
+  emitSubOutput: (output: SubModelOutput, index: number) => void
+  emitAggregationStart: () => void
+  emitAggregationChunk: (text: string, done: boolean) => void
+}
+
+/**
+ * MoA engine entry point (event-emitting variant).
+ * Same logic as executeMoA, but calls sub-models individually so each
+ * result can be emitted via IPC callbacks as it completes.
+ * Also emits aggregation start/chunk events.
+ */
+export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<MoaResponse> {
+  // ── Resolve sub-models ──
+  const resolvedSubs = resolveSubModels(req.subModels)
+  if (resolvedSubs.length === 0) {
+    return {
+      type: req.mode,
+      content: '',
+      subOutputs: [],
+      success: false,
+      error: 'No usable sub-models: check provider configuration and API keys'
+    }
+  }
+
+  // ── Call sub-models individually, emitting each as it completes ──
+  const subOutputs: SubModelOutput[] = []
+  const timeoutMs = req.subTimeoutMs ?? 60_000
+
+  const promises = resolvedSubs.map((sm, index) =>
+    callSubModel({
+      providerBaseUrl: sm.providerBaseUrl,
+      apiKey: sm.apiKey,
+      modelId: sm.modelId,
+      messages: req.messages,
+      systemPrompt: req.systemPrompt,
+      timeoutMs
+    }).then((result) => {
+      subOutputs[index] = result
+      req.emitSubOutput(result, index)
+      return result
+    }).catch((err: unknown) => {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      const errorOutput: SubModelOutput = {
+        modelId: sm.modelId,
+        providerId: sm.providerBaseUrl,
+        content: '',
+        status: 'error',
+        error: errMsg,
+        durationMs: 0
+      }
+      subOutputs[index] = errorOutput
+      req.emitSubOutput(errorOutput, index)
+      return errorOutput
+    })
+  )
+
+  await Promise.allSettled(promises)
+
+  const successfulCount = countSuccessfulSubModels(subOutputs)
+
+  // ── Direct mode ──
+  if (req.mode === 'direct') {
+    const first = subOutputs[0]
+    return {
+      type: 'direct',
+      content: first.status === 'success' ? first.content : '',
+      subOutputs,
+      success: first.status === 'success',
+      error: first.status !== 'success' ? first.error : undefined
+    }
+  }
+
+  // ── Compare (D) mode ──
+  if (req.mode === 'compare') {
+    return {
+      type: 'compare',
+      content: '',
+      subOutputs,
+      success: successfulCount > 0,
+      partialFailure: successfulCount < subOutputs.length
+    }
+  }
+
+  // ── Aggregate (A) mode ──
+  if (successfulCount === 0) {
+    return {
+      type: 'aggregate',
+      content: '',
+      subOutputs,
+      success: false,
+      error: 'All sub-models failed. Check provider health and API keys.'
+    }
+  }
+
+  const successfulOutputs = subOutputs.filter((o) => o.status === 'success')
+
+  // Resolve aggregator model
+  const aggInfo = req.aggregator ? resolveAggregator(req.aggregator) : null
+  if (!aggInfo) {
+    return {
+      type: 'aggregate',
+      content: '',
+      subOutputs,
+      success: false,
+      partialFailure: successfulCount < subOutputs.length,
+      error: 'No aggregator model configured. Configure one in settings or switch to D mode.'
+    }
+  }
+
+  req.emitAggregationStart()
+
+  // Build aggregation messages
+  const aggPrompt = getAggregationPrompt(
+    req.aggregationPromptVariant || 'standard-zh',
+    req.customAggregationPrompt
+  )
+  const aggMessages = buildAggregationMessages(
+    req.messages,
+    successfulOutputs.map((o) => ({ modelId: o.modelId, content: o.content })),
+    aggPrompt
+  )
+
+  // Call aggregator
+  const aggResult = await callAggregator(aggInfo, aggMessages, req.aggTimeoutMs ?? 120_000)
+
+  if (!aggResult.success) {
+    // Try fallback aggregator if configured
+    if (req.aggregator?.fallbackProviderId && req.aggregator?.fallbackModelId) {
+      const fallbackAgg = resolveAggregator({
+        primaryModelId: req.aggregator.fallbackModelId,
+        primaryProviderId: req.aggregator.fallbackProviderId
+      })
+      if (fallbackAgg) {
+        const fallbackResult = await callAggregator(fallbackAgg, aggMessages, req.aggTimeoutMs ?? 120_000)
+        if (fallbackResult.success) {
+          req.emitAggregationChunk(fallbackResult.content, true)
+          return {
+            type: 'aggregate',
+            content: fallbackResult.content,
+            subOutputs,
+            aggregatorContent: fallbackResult.content,
+            success: true,
+            partialFailure: successfulCount < subOutputs.length
+          }
+        }
+      }
+    }
+
+    // Aggregation failed — degrade to compare
+    req.emitAggregationChunk('', true)
+    return {
+      type: 'aggregate',
+      content: '',
+      subOutputs,
+      success: false,
+      partialFailure: successfulCount < subOutputs.length,
+      aggregatorContent: '',
+      error: `Aggregator failed: ${aggResult.error}. Sub-models available in compare view.`
+    }
+  }
+
+  req.emitAggregationChunk(aggResult.content, true)
 
   return {
     type: 'aggregate',
