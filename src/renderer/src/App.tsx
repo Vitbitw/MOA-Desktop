@@ -7,6 +7,7 @@ import Sidebar from './components/Sidebar'
 import ChatArea from './components/ChatArea'
 import InputBox from './components/InputBox'
 import ErrorBoundary from './components/ErrorBoundary'
+import MonitorView from './components/MonitorView'
 import ProvidersPanel from './components/ProvidersPanel'
 import MoAConfigPanel from './components/MoAConfigPanel'
 
@@ -14,6 +15,14 @@ function App() {
   const setProviders = useConfigStore((s) => s.setProviders)
   const setConversations = useConversationStore((s) => s.setConversations)
   const [activeTab, setActiveTab] = useState<'chat' | 'providers' | 'moa'>('chat')
+  const [viewMode, setViewMode] = useState<'standard' | 'monitor'>('standard')
+
+  // Task 7: cleanup live events when switching back to standard view
+  useEffect(() => {
+    if (viewMode === 'standard') {
+      useConversationStore.getState().cleanupLiveEvents?.()
+    }
+  }, [viewMode])
 
   useEffect(() => {
     window.moaAPI.getProviders().then((res: { success: boolean; data: unknown }) => {
@@ -43,14 +52,21 @@ function App() {
         <Sidebar
           activeTab={activeTab}
           onTabChange={setActiveTab}
+          viewMode={viewMode}
+          onViewModeChange={setViewMode}
         />
         <main className="flex flex-col flex-1 min-w-0">
-          {activeTab === 'chat' && (
+          {activeTab === 'chat' && viewMode === 'monitor' ? (
+            <>
+              <MonitorView />
+              <InputBox />
+            </>
+          ) : activeTab === 'chat' ? (
             <>
               <ChatArea />
               <InputBox />
             </>
-          )}
+          ) : null}
           {activeTab === 'providers' && (
             <div className="flex-1 overflow-y-auto p-6">
               <ProvidersPanel />

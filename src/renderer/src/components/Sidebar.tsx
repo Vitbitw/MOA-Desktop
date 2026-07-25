@@ -5,10 +5,14 @@ import { Search, Settings, MessageSquare, Cpu, Sun, Moon } from 'lucide-react'
 
 export default function Sidebar({
   activeTab,
-  onTabChange
+  onTabChange,
+  viewMode,
+  onViewModeChange
 }: {
   activeTab: string
   onTabChange: (tab: 'chat' | 'providers' | 'moa') => void
+  viewMode: 'standard' | 'monitor'
+  onViewModeChange: (mode: 'standard' | 'monitor') => void
 }) {
   const conversations = useConversationStore((s) => s.conversations)
   const providers = useConfigStore((s) => s.providers)
@@ -59,6 +63,32 @@ export default function Sidebar({
           <Cpu className="w-3.5 h-3.5" /> MoA
         </button>
       </div>
+
+      {/* View mode toggle — visible only when chat tab is active */}
+      {activeTab === 'chat' && (
+        <div className="flex border-b border-border">
+          <button
+            onClick={() => onViewModeChange('standard')}
+            className={`flex items-center gap-1 flex-1 px-3 py-1.5 text-xs border-b-2 transition-colors ${
+              viewMode === 'standard'
+                ? 'border-primary text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            标准
+          </button>
+          <button
+            onClick={() => onViewModeChange('monitor')}
+            className={`flex items-center gap-1 flex-1 px-3 py-1.5 text-xs border-b-2 transition-colors ${
+              viewMode === 'monitor'
+                ? 'border-primary text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            监控
+          </button>
+        </div>
+      )}
 
       {/* Chat list */}
       {activeTab === 'chat' && (
