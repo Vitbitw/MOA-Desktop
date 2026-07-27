@@ -47,7 +47,7 @@
       "target": [
         "nsis"
       ],
-      "icon": null
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
