@@ -455,9 +455,11 @@ function registerIpcHandlers() {
   ipcMain.handle(IPC.DB_UPDATE_CONVERSATION_TITLE, (_e, conversationId: string, title: string, titleEdited?: boolean) => {
     try {
       const db = getDatabase()
+      // Only update title & title_edited — never touch updated_at;
+      // sort order must reflect real activity, not metadata changes.
       db.exec(
-        'UPDATE conversations SET title = ?, title_edited = ?, updated_at = ? WHERE id = ?',
-        [title, titleEdited ? 1 : 0, Date.now(), conversationId]
+        'UPDATE conversations SET title = ?, title_edited = ? WHERE id = ?',
+        [title, titleEdited ? 1 : 0, conversationId]
       )
       const conversations = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
       return { success: true, conversations }
