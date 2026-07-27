@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Conversation, ChatMessage, MoAMode, SubModelOutput, SubOutputUpdate, AggregationChunk } from '../../../shared/types'
+import type { Conversation, ChatMessage, MoAMode, SubModelOutput, SubOutputUpdate, AggregationChunk, TitleSettings } from '../../../shared/types'
 
 // ── Live streaming sub-output state (for Monitor View) ──
 export interface LiveSubOutput {
@@ -22,7 +22,8 @@ export function convFromRow(c: any): Conversation {
     subModels: c.sub_models ? JSON.parse(c.sub_models) : [],
     createdAt: c.created_at,
     updatedAt: c.updated_at,
-    messageCount: c.message_count || 0
+    messageCount: c.message_count || 0,
+    titleEdited: !!c.title_edited
   }
 }
 
@@ -33,6 +34,9 @@ interface ConversationState {
   mode: MoAMode
   loading: boolean
   error: string | null
+
+  // ── Title generation ──
+  titleLoading: Record<string, boolean>
 
   setConversations: (convs: Conversation[]) => void
   setCurrentConversation: (id: string | null) => void
@@ -61,6 +65,10 @@ interface ConversationState {
   newConversation: () => void
   deleteConversation: (id: string) => Promise<void>
   refreshConversations: () => Promise<void>
+
+  // ── Title actions ──
+  updateConversationTitle: (id: string, title: string, titleEdited?: boolean) => Promise<void>
+  generateAndSetTitle: (id: string, messages: Array<{ role: string; content: string }>, titleSettings: TitleSettings) => Promise<void>
 }
 
 export const useConversationStore = create<ConversationState>((set, get) => ({
@@ -70,6 +78,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   mode: 'aggregate',
   loading: false,
   error: null,
+  titleLoading: {},
 
   setConversations: (conversations) => set({ conversations }),
   setCurrentConversation: (currentConversationId) => set({ currentConversationId }),
@@ -221,11 +230,50 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         // Keep the liveSubOutputs and aggregatorText for display
         // Refresh conversations list
         get().refreshConversations()
+
+        // ── Auto-trigger title generation (fire-and-forget, non-blocking) ──
+        window.moaAPI.getSettings().then((settingsRes: any) => {
+          if (!settingsRes.success) return
+          const titleSettings = settingsRes.data?.title as TitleSettings | undefined
+          if (!titleSettings) return
+          // Read fresh state inside async callback to avoid stale closure
+          const currentState = get()
+          const cId = _data.conversationId || currentState.currentConversationId
+          if (!cId) return
+          const conv = currentState.conversations.find((c) => c.id === cId)
+          if (!conv) return
+
+          // Guard: never overwrite user-edited titles
+          if (conv.titleEdited) return
+
+          // ── Branch A: First-time generation ──
+          const isDefaultTitle = !conv.title || conv.title === '新对话'
+          const isFirstAllowed = titleSettings.autoMode === 'first_reply'
+            || titleSettings.autoMode === 'first_and_manual'
+          if (isDefaultTitle && isFirstAllowed) {
+            get().generateAndSetTitle(cId, currentState.messages, titleSettings)
+            return
+          }
+
+          // ── Branch B: Realtime update ──
+          // Only trigger when realtime mode is enabled and a title already exists
+          if (!isDefaultTitle && titleSettings.realtimeMode !== 'off') {
+            if (titleSettings.realtimeMode === 'every_reply') {
+              get().generateAndSetTitle(cId, currentState.messages, titleSettings)
+            } else if (titleSettings.realtimeMode === 'every_n_rounds' && titleSettings.realtimeN > 0) {
+              // A "round" = one user question + one assistant reply = 2 messages
+              // Check if the message count is divisible by (realtimeN * 2)
+              const msgCount = currentState.messages.length
+              if (msgCount > 0 && msgCount % (titleSettings.realtimeN * 2) === 0) {
+                get().generateAndSetTitle(cId, currentState.messages, titleSettings)
+              }
+            }
+          }
+        }).catch(() => {})
       }))
     }
 
     // 3. Save the cleanup function (for view switching cleanup)
-    // We store it in a non-reactive field on the store
     ;(get() as any)._liveCleanup = cleanup
 
     // 4. Optimistic: add user message locally (no conversationId yet for new conversations)
@@ -317,6 +365,56 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     if (cleanup) {
       cleanup()
       ;(get() as any)._liveCleanup = undefined
+    }
+  },
+
+  // ── Title actions ──
+  updateConversationTitle: async (id, title, titleEdited) => {
+    try {
+      const res = await window.moaAPI.updateConversationTitle(id, title, titleEdited)
+      if (res.success) {
+        const convs = ((res.conversations || []) as any[]).map(convFromRow)
+        set({ conversations: convs })
+      }
+    } catch (err) {
+      console.error('[Title] updateConversationTitle failed:', err)
+    }
+  },
+
+  generateAndSetTitle: async (id, messages, titleSettings) => {
+    if (!titleSettings.providerId || !titleSettings.modelId) return
+    const { titleLoading } = get()
+    if (titleLoading[id]) return // Already generating
+
+    set((state) => ({
+      titleLoading: { ...state.titleLoading, [id]: true }
+    }))
+
+    try {
+      const res = await window.moaAPI.generateTitle({
+        conversationId: id,
+        messages,
+        providerId: titleSettings.providerId,
+        modelId: titleSettings.modelId,
+        maxLength: titleSettings.maxLength || 50,
+        language: titleSettings.language || 'auto'
+      })
+
+      if (res.success && res.title) {
+        await get().updateConversationTitle(id, res.title, false)
+      } else if (res.error) {
+        console.error('[Title] generateAndSetTitle error:', res.error)
+        set({ error: `标题生成失败：${res.error}` })
+      }
+    } catch (err) {
+      console.error('[Title] generateAndSetTitle exception:', err)
+      set({ error: `标题生成异常：${String(err)}` })
+    } finally {
+      set((state) => {
+        const next = { ...state.titleLoading }
+        delete next[id]
+        return { titleLoading: next }
+      })
     }
   }
 }))

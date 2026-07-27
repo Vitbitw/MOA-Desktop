@@ -2,13 +2,13 @@ import React, { useEffect, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
 import { useConfigStore } from '../store/configStore'
 import { useConversationStore } from '../store/conversationStore'
-import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig } from '../../../shared/types'
+import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X } from 'lucide-react'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES } from '../../../shared/defaults'
 
-type SettingsSection = 'moa' | 'providers' | 'proxy' | 'display' | 'pricing' | 'currency'
+type SettingsSection = 'moa' | 'providers' | 'proxy' | 'display' | 'pricing' | 'currency' | 'title'
 
-export default function SettingsPanel() {
+export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const { settings, loaded, loadSettings, updateSetting } = useSettingsStore()
   const [activeSection, setActiveSection] = useState<SettingsSection>('moa')
 
@@ -28,6 +28,7 @@ export default function SettingsPanel() {
     { key: 'moa', label: 'MoA' },
     { key: 'providers', label: '厂商' },
     { key: 'proxy', label: '代理服务' },
+    { key: 'title', label: '对话标题' },
     { key: 'display', label: '显示设置' },
     { key: 'pricing', label: '定价覆盖' },
     { key: 'currency', label: '货币单位' }
@@ -35,7 +36,18 @@ export default function SettingsPanel() {
 
   return (
     <div className="flex-1 overflow-y-auto p-6">
-      <h2 className="text-lg font-bold text-foreground mb-4">设置</h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-bold text-foreground">设置</h2>
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+            title="返回对话"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        )}
+      </div>
 
       {/* Section tabs */}
       <div className="flex gap-1 border-b border-border mb-6 flex-wrap">
@@ -280,6 +292,9 @@ export default function SettingsPanel() {
           </SettingRow>
         </div>
       )}
+
+      {/* Title Settings Section */}
+      {activeSection === 'title' && <TitleSettingsSection />}
     </div>
   )
 }
@@ -654,6 +669,115 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ── Title Settings Section ──
+
+function TitleSettingsSection() {
+  const { settings, updateSetting } = useSettingsStore()
+  const providers = useConfigStore((s) => s.providers)
+  const titleCfg = settings.title
+
+  // Only show models from providers with an API key — title generation requires a working connection
+  const allModelOptions = providers
+    .filter((p) => p.apiKey)
+    .flatMap((p) =>
+    (p.models || []).map((m) => ({
+      label: `${p.name} · ${m.id}`,
+      value: `${p.id}:${m.id}`,
+      providerId: p.id,
+      modelId: m.id
+    }))
+  )
+
+  const setTitle = (partial: Partial<TitleSettings>) => {
+    updateSetting('title', { ...titleCfg, ...partial })
+  }
+
+  return (
+    <div className="space-y-5 max-w-xl">
+      <p className="text-sm text-muted-foreground">
+        配置 AI 自动为对话生成标题。需要选择一个已配置 API Key 的轻量模型来执行标题生成。
+      </p>
+
+      <SettingRow label="标题模型" hint="用于生成标题的轻量模型（建议选择便宜快速的模型）">
+        <select
+          value={titleCfg.providerId ? `${titleCfg.providerId}:${titleCfg.modelId}` : ''}
+          onChange={(e) => {
+            const [pid, mid] = e.target.value.split(':')
+            setTitle({ providerId: pid || '', modelId: mid || '' })
+          }}
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+        >
+          <option value="">未配置（不生成标题）</option>
+          {allModelOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </SettingRow>
+
+      <SettingRow label="生成模式" hint="何时自动生成初始标题">
+        <select
+          value={titleCfg.autoMode}
+          onChange={(e) => setTitle({ autoMode: e.target.value as TitleSettings['autoMode'] })}
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+        >
+          <option value="first_and_manual">首次回复后 + 手动</option>
+          <option value="first_reply">仅首次回复后</option>
+          <option value="first_message">首次消息后</option>
+          <option value="manual_only">仅手动</option>
+        </select>
+      </SettingRow>
+
+      <SettingRow label="实时更新" hint="对话进行中是否自动刷新标题">
+        <select
+          value={titleCfg.realtimeMode}
+          onChange={(e) => setTitle({ realtimeMode: e.target.value as TitleSettings['realtimeMode'] })}
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+        >
+          <option value="off">关闭</option>
+          <option value="every_reply">每次回复</option>
+          <option value="every_n_rounds">每 N 轮</option>
+        </select>
+      </SettingRow>
+
+      {titleCfg.realtimeMode === 'every_n_rounds' && (
+        <SettingRow label="轮数间隔" hint="每 N 轮对话后更新标题">
+          <input
+            type="number"
+            min={1}
+            max={50}
+            value={titleCfg.realtimeN}
+            onChange={(e) => setTitle({ realtimeN: Math.max(1, Number(e.target.value) || 5) })}
+            className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+          />
+        </SettingRow>
+      )}
+
+      <SettingRow label="最大长度" hint="生成标题的最大字符数">
+        <input
+          type="number"
+          min={10}
+          max={100}
+          value={titleCfg.maxLength}
+          onChange={(e) => setTitle({ maxLength: Math.max(10, Math.min(100, Number(e.target.value) || 50)) })}
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+        />
+      </SettingRow>
+
+      <SettingRow label="语言" hint="生成标题的语言偏好">
+        <select
+          value={titleCfg.language}
+          onChange={(e) => setTitle({ language: e.target.value as TitleSettings['language'] })}
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+        >
+          <option value="auto">跟随对话</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </SettingRow>
     </div>
   )
 }

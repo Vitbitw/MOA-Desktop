@@ -9,7 +9,18 @@ export const DEFAULT_SUB_OUTPUT_ESTIMATE = 500
 export const DEFAULT_AGG_OUTPUT_ESTIMATE = 800
 export const DEFAULT_QUEUE_MAX = 50
 
+export const DEFAULT_TITLE_SETTINGS = {
+  autoMode: 'first_and_manual' as const,
+  realtimeMode: 'every_n_rounds' as const,
+  realtimeN: 5,
+  providerId: '',
+  modelId: '',
+  maxLength: 50,
+  language: 'auto' as const
+}
+
 export const DEFAULT_SETTINGS: AppSettings = {
+  title: DEFAULT_TITLE_SETTINGS,
   proxy: {
     enabled: true,
     host: DEFAULT_HOST,

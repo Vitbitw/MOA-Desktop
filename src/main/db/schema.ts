@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   agg_config  TEXT,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
-  message_count INTEGER NOT NULL DEFAULT 0
+  message_count INTEGER NOT NULL DEFAULT 0,
+  title_edited INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (

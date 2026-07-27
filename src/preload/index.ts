@@ -28,8 +28,20 @@ contextBridge.exposeInMainWorld('moaAPI', {
   setMoaConfig: (config: unknown) => ipcRenderer.invoke('moa:setConfig', config),
 
   // MoA Send
-  sendMessage: (msg: { conversationId?: string; content: string; mode: string }) =>
+  sendMessage: (msg: { conversationId?: string; title?: string; content: string; mode: string }) =>
     ipcRenderer.invoke('moa:sendMessage', msg),
+
+  // Title
+  updateConversationTitle: (conversationId: string, title: string, titleEdited?: boolean) =>
+    ipcRenderer.invoke('db:updateConversationTitle', conversationId, title, titleEdited),
+  generateTitle: (data: {
+    conversationId: string
+    messages: Array<{ role: string; content: string }>
+    providerId: string
+    modelId: string
+    maxLength: number
+    language: 'auto' | 'zh' | 'en'
+  }) => ipcRenderer.invoke('title:generate', data),
 
   // App
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
@@ -66,6 +78,8 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.removeAllListeners(IPC_EVENT.MOA_ALL_DONE)
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_NEW_CONVERSATION)
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_COPY_PROXY_URL)
+    ipcRenderer.removeAllListeners(IPC_EVENT.TITLE_UPDATED)
+    ipcRenderer.removeAllListeners(IPC_EVENT.MENU_OPEN_SETTINGS)
   },
 
   // Menu event listeners
@@ -79,5 +93,18 @@ contextBridge.exposeInMainWorld('moaAPI', {
     const handler = () => callback()
     ipcRenderer.on(IPC_EVENT.MENU_COPY_PROXY_URL, handler)
     return () => ipcRenderer.removeListener(IPC_EVENT.MENU_COPY_PROXY_URL, handler)
+  },
+
+  onMenuOpenSettings: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC_EVENT.MENU_OPEN_SETTINGS, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.MENU_OPEN_SETTINGS, handler)
+  },
+
+  // Title event listeners
+  onTitleUpdated: (callback: (data: { conversationId: string; title: string; conversations: unknown[] }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; title: string; conversations: unknown[] }) => callback(data)
+    ipcRenderer.on(IPC_EVENT.TITLE_UPDATED, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.TITLE_UPDATED, handler)
   }
 })

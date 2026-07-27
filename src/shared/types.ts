@@ -65,6 +65,7 @@ export interface Conversation {
   createdAt: number
   updatedAt: number
   messageCount: number
+  titleEdited?: boolean
 }
 
 // ─── Token / Usage ───
@@ -103,8 +104,20 @@ export interface HealthStatus {
   providers: Array<{ name: string; status: string; model: string }>
 }
 
+// ─── Title Settings ───
+export interface TitleSettings {
+  autoMode: 'first_message' | 'first_reply' | 'manual_only' | 'first_and_manual'
+  realtimeMode: 'off' | 'every_reply' | 'every_n_rounds'
+  realtimeN: number
+  providerId: string
+  modelId: string
+  maxLength: number
+  language: 'auto' | 'zh' | 'en'
+}
+
 // ─── Settings ───
 export interface AppSettings {
+  title: TitleSettings
   proxy: {
     enabled: boolean
     host: string

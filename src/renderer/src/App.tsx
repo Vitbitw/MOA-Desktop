@@ -2,6 +2,7 @@ import React from 'react'
 import { useEffect, useState } from 'react'
 import { useConfigStore } from './store/configStore'
 import { useConversationStore, convFromRow } from './store/conversationStore'
+import { useSettingsStore } from './store/settingsStore'
 import Sidebar from './components/Sidebar'
 import ChatArea from './components/ChatArea'
 import InputBox from './components/InputBox'
@@ -12,8 +13,14 @@ import SettingsPanel from './components/SettingsPanel'
 function App() {
   const setProviders = useConfigStore((s) => s.setProviders)
   const setConversations = useConversationStore((s) => s.setConversations)
-  const [activeTab, setActiveTab] = useState<'chat' | 'settings'>('chat')
+  const [showSettings, setShowSettings] = useState(false)
   const [viewMode, setViewMode] = useState<'standard' | 'monitor'>('standard')
+
+  // Listen for menu "设置" (Ctrl+,)
+  useEffect(() => {
+    const unsub = window.moaAPI.onMenuOpenSettings(() => setShowSettings(true))
+    return unsub
+  }, [])
 
   // Task 7: cleanup live events when switching back to standard view
   useEffect(() => {
@@ -29,6 +36,8 @@ function App() {
     window.moaAPI.getConversations().then((res: { success: boolean; data: unknown }) => {
       if (res.success && Array.isArray(res.data)) setConversations((res.data as any[]).map(convFromRow))
     })
+    // Load settings on mount so Sidebar ✨ button can check title model config
+    useSettingsStore.getState().loadSettings()
   }, [])
 
   // Ctrl+K / Cmd+K → focus sidebar search
@@ -60,29 +69,58 @@ function App() {
     return unsub
   }, [])
 
+  // Title update event — refresh conversation list when title changes asynchronously
+  useEffect(() => {
+    const unsub = window.moaAPI.onTitleUpdated((data) => {
+      const convs = ((data.conversations || []) as any[]).map(convFromRow)
+      useConversationStore.getState().setConversations(convs)
+    })
+    return unsub
+  }, [])
+
   return (
     <ErrorBoundary>
       <div className="flex h-screen overflow-hidden bg-background">
-        <Sidebar
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-        />
+        <Sidebar />
         <main className="flex flex-col flex-1 min-w-0">
-          {activeTab === 'chat' && viewMode === 'monitor' ? (
+          {/* View mode toolbar — only when chat is showing */}
+          {!showSettings && (
+            <div className="flex items-center gap-1 px-4 py-2 border-b border-border bg-card/50 flex-shrink-0">
+              <button
+                onClick={() => setViewMode('standard')}
+                className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                  viewMode === 'standard'
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+              >
+                标准
+              </button>
+              <button
+                onClick={() => setViewMode('monitor')}
+                className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                  viewMode === 'monitor'
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+              >
+                监控
+              </button>
+            </div>
+          )}
+          {!showSettings && viewMode === 'monitor' ? (
             <>
               <MonitorView />
               <InputBox />
             </>
-          ) : activeTab === 'chat' ? (
+          ) : !showSettings ? (
             <>
               <ChatArea />
               <InputBox />
             </>
           ) : null}
-          {activeTab === 'settings' && (
-            <SettingsPanel />
+          {showSettings && (
+            <SettingsPanel onClose={() => setShowSettings(false)} />
           )}
         </main>
       </div>

@@ -23,8 +23,20 @@ interface MoaAPI {
   setMoaConfig: (config: unknown) => unknown
 
   // MoA Send
-  sendMessage: (msg: { conversationId?: string; content: string; mode: string }) =>
+  sendMessage: (msg: { conversationId?: string; title?: string; content: string; mode: string }) =>
     Promise<{ success: boolean; data?: unknown; error?: string }>
+
+  // Title
+  updateConversationTitle: (conversationId: string, title: string, titleEdited?: boolean) =>
+    Promise<{ success: boolean; conversations?: unknown[]; error?: string }>
+  generateTitle: (data: {
+    conversationId: string
+    messages: Array<{ role: string; content: string }>
+    providerId: string
+    modelId: string
+    maxLength: number
+    language: 'auto' | 'zh' | 'en'
+  }) => Promise<{ success: boolean; title?: string; error?: string }>
 
   // App
   getVersion: () => Promise<string>
@@ -39,6 +51,10 @@ interface MoaAPI {
   // Menu event listeners
   onMenuNewConversation: (callback: () => void) => () => void
   onMenuCopyProxyUrl: (callback: (url: string) => void) => () => void
+  onMenuOpenSettings: (callback: () => void) => () => void
+
+  // Title event listeners
+  onTitleUpdated: (callback: (data: { conversationId: string; title: string; conversations: unknown[] }) => void) => () => void
 }
 
 declare global {

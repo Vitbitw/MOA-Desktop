@@ -45,6 +45,13 @@ export class Database {
     this.db = new SQL.Database(buffer)
     this.db.exec(SCHEMA)
     this.initialized = true
+
+    // ── Migrations for existing databases ──
+    try {
+      this.db!.exec('ALTER TABLE conversations ADD COLUMN title_edited INTEGER NOT NULL DEFAULT 0')
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[] {

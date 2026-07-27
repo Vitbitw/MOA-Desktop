@@ -9,6 +9,7 @@ import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/se
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
+import { generateTitle } from './title/titleGenerator'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -52,6 +53,14 @@ function createApplicationMenu() {
           accelerator: 'CmdOrCtrl+N',
           click: () => {
             mainWindow?.webContents.send(IPC_EVENT.MENU_NEW_CONVERSATION)
+          }
+        },
+        { type: 'separator' as const },
+        {
+          label: '设置',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => {
+            mainWindow?.webContents.send(IPC_EVENT.MENU_OPEN_SETTINGS)
           }
         },
         { type: 'separator' as const },
@@ -293,6 +302,35 @@ function registerIpcHandlers() {
           'INSERT INTO conversations (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
           [convId, title, msg.mode, now, now]
         )
+
+        // ── Fire-and-forget: first_message auto title generation ──
+        ;(async () => {
+          try {
+            const settingsRow = db.queryOne<{ value: string }>("SELECT value FROM moa_config WHERE key = 'app_settings'")
+            if (!settingsRow?.value) return
+            const appSettings = JSON.parse(settingsRow.value)
+            const ts = appSettings?.title
+            if (!ts?.providerId || !ts?.modelId) return
+            if (ts.autoMode !== 'first_message' && ts.autoMode !== 'first_and_manual') return
+            const genTitle = await generateTitle({
+              messages: [{ role: 'user', content: msg.content }],
+              providerId: ts.providerId,
+              modelId: ts.modelId,
+              maxLength: ts.maxLength || 50,
+              language: ts.language || 'auto'
+            })
+            if (genTitle) {
+              db.exec('UPDATE conversations SET title = ? WHERE id = ?', [genTitle, convId])
+              const updatedConvs = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
+              const wins = BrowserWindow.getAllWindows()
+              for (const w of wins) {
+                w.webContents.send(IPC_EVENT.TITLE_UPDATED, { conversationId: convId, title: genTitle, conversations: updatedConvs })
+              }
+            }
+          } catch {
+            // silent — title generation failure is non-critical
+          }
+        })()
       }
 
       // Load conversation history BEFORE saving user message (for multi-turn context)
@@ -382,6 +420,47 @@ function registerIpcHandlers() {
       }
 
       return { success: true, data: { conversationId: convId, moaResult, conversations } }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // ── Title Generate ──
+  ipcMain.handle(IPC.TITLE_GENERATE, async (_e, data: {
+    conversationId: string
+    messages: Array<{ role: string; content: string }>
+    providerId: string
+    modelId: string
+    maxLength: number
+    language: 'auto' | 'zh' | 'en'
+  }) => {
+    try {
+      const title = await generateTitle({
+        messages: data.messages,
+        providerId: data.providerId,
+        modelId: data.modelId,
+        maxLength: data.maxLength,
+        language: data.language
+      })
+      if (title === null) {
+        return { success: false, error: '标题生成失败：模型返回空或未配置正确（请检查厂商 API Key 和模型 ID）' }
+      }
+      return { success: true, title }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // ── Update Conversation Title ──
+  ipcMain.handle(IPC.DB_UPDATE_CONVERSATION_TITLE, (_e, conversationId: string, title: string, titleEdited?: boolean) => {
+    try {
+      const db = getDatabase()
+      db.exec(
+        'UPDATE conversations SET title = ?, title_edited = ?, updated_at = ? WHERE id = ?',
+        [title, titleEdited ? 1 : 0, Date.now(), conversationId]
+      )
+      const conversations = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
+      return { success: true, conversations }
     } catch (err) {
       return { success: false, error: String(err) }
     }

@@ -23,6 +23,10 @@ export const IPC = {
   // MoA Execution
   MOA_SEND_MESSAGE: 'moa:sendMessage',
 
+  // Title
+  TITLE_GENERATE: 'title:generate',
+  DB_UPDATE_CONVERSATION_TITLE: 'db:updateConversationTitle',
+
   // App
   APP_GET_VERSION: 'app:getVersion',
 } as const
@@ -38,6 +42,10 @@ export const IPC_EVENT = {
   // Menu events
   MENU_NEW_CONVERSATION: 'menu:newConversation',
   MENU_COPY_PROXY_URL: 'menu:copyProxyUrl',
+  MENU_OPEN_SETTINGS: 'menu:openSettings',
+
+  // Title events
+  TITLE_UPDATED: 'title:updated',
 } as const
 
 export type IPCChannel = (typeof IPC)[keyof typeof IPC]
