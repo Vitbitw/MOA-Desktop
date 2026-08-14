@@ -133,6 +133,8 @@ export interface AppSettings {
     subModelShow: 'always' | 'hidden' | 'perConversation'
     defaultSubModelExpanded: boolean
     autoClearSubOutputs: boolean
+    usageOverlay: boolean
+    usageOverlayPos?: { x: number; y: number }
   }
   pricing: Record<string, PricingConfig>
   currency: 'USD' | 'CNY'
@@ -161,3 +163,10 @@ export interface AggregationChunk {
   text: string
   done: boolean
 }
+
+// ─── Usage Monitoring ───
+export type UsageRange = 'today' | 'week' | 'month' | 'all'
+export type UsageGroupBy = 'model' | 'provider' | 'mode'
+export interface UsageRow { key: string; requests: number; success: number; prompt: number; completion: number; cost: number }
+export interface UsageSummary { range: UsageRange; groupBy: UsageGroupBy; totals: { requests: number; success: number; prompt: number; completion: number; cost: number }; rows: UsageRow[] }
+export interface UsageToday { prompt: number; completion: number; cost: number; running: boolean }

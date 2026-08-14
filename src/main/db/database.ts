@@ -52,6 +52,11 @@ export class Database {
     } catch {
       // Column already exists — ignore
     }
+    try {
+      this.db!.exec('ALTER TABLE request_logs ADD COLUMN models TEXT')
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[] {

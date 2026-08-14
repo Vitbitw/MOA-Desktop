@@ -63,17 +63,17 @@ ${conversationText}
  * Generate a title from conversation messages by calling the configured lightweight model.
  * Returns null if generation fails (silent fallback).
  */
-export async function generateTitle(req: TitleGenerateRequest): Promise<string | null> {
+export async function generateTitle(req: TitleGenerateRequest): Promise<{ title: string | null; tokenUsage?: { prompt: number; completion: number } }> {
   const { providerId, modelId, messages, maxLength, language } = req
 
   // No model configured — silent fallback
-  if (!providerId || !modelId) return null
+  if (!providerId || !modelId) return { title: null }
 
   // Empty messages guard — don't waste an API call on nothing
-  if (!messages || messages.length === 0) return null
+  if (!messages || messages.length === 0) return { title: null }
 
   const resolved = resolveTitleModel(providerId)
-  if (!resolved) return null
+  if (!resolved) return { title: null }
 
   const prompt = buildTitlePrompt(messages, maxLength, language)
 
@@ -87,7 +87,7 @@ export async function generateTitle(req: TitleGenerateRequest): Promise<string |
 
   if (result.status !== 'success' || !result.content) {
     console.error(`[Title] API call failed:`, result.status, result.error || 'empty content')
-    return null
+    return { title: null }
   }
 
   // Sanitize: strip quotes, whitespace, clamp to maxLength
@@ -95,7 +95,7 @@ export async function generateTitle(req: TitleGenerateRequest): Promise<string |
   if (title.length > maxLength) {
     title = title.slice(0, maxLength)
   }
-  if (!title) return null
+  if (!title) return { title: null }
 
-  return title
+  return { title, tokenUsage: result.tokenUsage }
 }

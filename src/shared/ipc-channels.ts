@@ -29,6 +29,10 @@ export const IPC = {
 
   // App
   APP_GET_VERSION: 'app:getVersion',
+
+  // Usage Monitoring
+  USAGE_GET_SUMMARY: 'usage:getSummary',
+  USAGE_GET_TODAY: 'usage:getToday',
 } as const
 
 export const IPC_EVENT = {
@@ -44,8 +48,14 @@ export const IPC_EVENT = {
   MENU_COPY_PROXY_URL: 'menu:copyProxyUrl',
   MENU_OPEN_SETTINGS: 'menu:openSettings',
 
+  // 用量悬浮窗右键「打开用量页」→ 主窗口切换到用量视图
+  USAGE_OPEN: 'usage:open',
+
   // Title events
   TITLE_UPDATED: 'title:updated',
+
+  // Usage events
+  USAGE_UPDATED: 'usage:updated',
 } as const
 
 export type IPCChannel = (typeof IPC)[keyof typeof IPC]

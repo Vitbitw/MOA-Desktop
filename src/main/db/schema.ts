@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS request_logs (
   cost            REAL NOT NULL DEFAULT 0,
   duration_ms     INTEGER NOT NULL DEFAULT 0,
   success         INTEGER NOT NULL DEFAULT 1,
-  error_detail    TEXT
+  error_detail    TEXT,
+  models          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, timestamp);

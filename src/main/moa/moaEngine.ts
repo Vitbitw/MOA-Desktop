@@ -20,6 +20,7 @@ export interface MoaResponse {
   content: string
   subOutputs: SubModelOutput[]
   aggregatorContent?: string
+  aggregatorUsage?: { prompt: number; completion: number }
   success: boolean
   partialFailure?: boolean
   error?: string
@@ -63,7 +64,7 @@ async function callAggregator(
   aggInfo: { providerBaseUrl: string; apiKey: string; modelId: string },
   messages: Array<{ role: string; content: string }>,
   timeoutMs: number
-): Promise<{ content: string; success: boolean; error?: string }> {
+): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number } }> {
   try {
     const resp = await fetch(`${aggInfo.providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
@@ -85,7 +86,16 @@ async function callAggregator(
     }
 
     const data = await resp.json()
-    return { content: data.choices?.[0]?.message?.content || '', success: true }
+    // 解析 usage 用量（prompt/completion tokens），供用量监控使用
+    const usage = data.usage || {}
+    return {
+      content: data.choices?.[0]?.message?.content || '',
+      success: true,
+      usage: {
+        prompt: usage.prompt_tokens || 0,
+        completion: usage.completion_tokens || 0
+      }
+    }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     return { content: '', success: false, error: msg }
@@ -198,6 +208,7 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
             content: fallbackResult.content,
             subOutputs,
             aggregatorContent: fallbackResult.content,
+            aggregatorUsage: fallbackResult.usage,
             success: true,
             partialFailure: successfulCount < subOutputs.length
           }
@@ -222,6 +233,7 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
     content: aggResult.content,
     subOutputs,
     aggregatorContent: aggResult.content,
+    aggregatorUsage: aggResult.usage,
     success: true,
     partialFailure: successfulCount < subOutputs.length
   }
@@ -371,6 +383,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
             content: fallbackResult.content,
             subOutputs,
             aggregatorContent: fallbackResult.content,
+            aggregatorUsage: fallbackResult.usage,
             success: true,
             partialFailure: successfulCount < subOutputs.length
           }
@@ -398,6 +411,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
     content: aggResult.content,
     subOutputs,
     aggregatorContent: aggResult.content,
+    aggregatorUsage: aggResult.usage,
     success: true,
     partialFailure: successfulCount < subOutputs.length
   }
