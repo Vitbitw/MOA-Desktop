@@ -35,7 +35,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   display: {
     subModelShow: 'hidden',
     defaultSubModelExpanded: false,
-    autoClearSubOutputs: false
+    autoClearSubOutputs: false,
+    usageOverlay: false
   },
   pricing: {},
   currency: 'USD'
