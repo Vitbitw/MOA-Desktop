@@ -202,6 +202,13 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
               onChange={(v) => updateSetting('display', { ...settings.display, autoClearSubOutputs: v })}
             />
           </SettingRow>
+
+          <SettingRow label="桌面用量悬浮窗" hint="在桌面角落显示今日/总计用量数字徽章">
+            <ToggleSwitch
+              checked={settings.display.usageOverlay}
+              onChange={(v) => updateSetting('display', { ...settings.display, usageOverlay: v })}
+            />
+          </SettingRow>
         </div>
       )}
 

@@ -12,6 +12,14 @@ export default defineConfig({
     plugins: [react()],
     css: {
       postcss: './postcss.config.js'
+    },
+    build: {
+      rollupOptions: {
+        input: {
+          index: 'src/renderer/index.html',
+          usage: 'src/renderer/usage.html'
+        }
+      }
     }
   }
 })
