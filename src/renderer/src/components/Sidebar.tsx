@@ -2,9 +2,13 @@ import React, { useState } from 'react'
 import { useConversationStore } from '../store/conversationStore'
 import { useConfigStore } from '../store/configStore'
 import { useSettingsStore } from '../store/settingsStore'
-import { Search, Sun, Moon, Sparkles, RefreshCw, Plus } from 'lucide-react'
+import { Search, Sun, Moon, Sparkles, RefreshCw, Plus, BarChart3 } from 'lucide-react'
 
-export default function Sidebar() {
+interface SidebarProps {
+  onOpenUsage?: () => void
+}
+
+export default function Sidebar({ onOpenUsage }: SidebarProps) {
   const conversations = useConversationStore((s) => s.conversations)
   const providers = useConfigStore((s) => s.providers)
   const currentId = useConversationStore((s) => s.currentConversationId)
@@ -186,6 +190,19 @@ export default function Sidebar() {
             </div>
           ))}
         </div>
+
+      {/* 底部：用量入口 */}
+      {onOpenUsage && (
+        <div className="p-2 border-t border-border">
+          <button
+            onClick={onOpenUsage}
+            className="w-full flex items-center gap-2 px-2 py-1.5 text-xs rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
+            title="查看用量统计"
+          >
+            <BarChart3 className="w-4 h-4" /> 用量
+          </button>
+        </div>
+      )}
     </aside>
   )
 }

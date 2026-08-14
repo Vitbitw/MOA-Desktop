@@ -9,16 +9,24 @@ import InputBox from './components/InputBox'
 import ErrorBoundary from './components/ErrorBoundary'
 import MonitorView from './components/MonitorView'
 import SettingsPanel from './components/SettingsPanel'
+import UsageView from './components/UsageView'
+import UsageBar from './components/UsageBar'
 
 function App() {
   const setProviders = useConfigStore((s) => s.setProviders)
   const setConversations = useConversationStore((s) => s.setConversations)
   const [showSettings, setShowSettings] = useState(false)
-  const [viewMode, setViewMode] = useState<'standard' | 'monitor'>('standard')
+  const [viewMode, setViewMode] = useState<'standard' | 'monitor' | 'usage'>('standard')
 
   // Listen for menu "设置" (Ctrl+,)
   useEffect(() => {
     const unsub = window.moaAPI.onMenuOpenSettings(() => setShowSettings(true))
+    return unsub
+  }, [])
+
+  // 用量悬浮窗右键「打开用量页」→ 切换到用量视图
+  useEffect(() => {
+    const unsub = window.moaAPI.onUsageOpen(() => setViewMode('usage'))
     return unsub
   }, [])
 
@@ -81,7 +89,7 @@ function App() {
   return (
     <ErrorBoundary>
       <div className="flex h-screen overflow-hidden bg-background">
-        <Sidebar />
+        <Sidebar onOpenUsage={() => setViewMode('usage')} />
         <main className="flex flex-col flex-1 min-w-0">
           {/* View mode toolbar — only when chat is showing */}
           {!showSettings && (
@@ -106,15 +114,32 @@ function App() {
               >
                 监控
               </button>
+              <button
+                onClick={() => setViewMode('usage')}
+                className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                  viewMode === 'usage'
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+              >
+                用量
+              </button>
             </div>
           )}
           {!showSettings && viewMode === 'monitor' ? (
             <>
+              <UsageBar onOpenUsage={() => setViewMode('usage')} />
               <MonitorView />
+              <InputBox />
+            </>
+          ) : !showSettings && viewMode === 'usage' ? (
+            <>
+              <UsageView />
               <InputBox />
             </>
           ) : !showSettings ? (
             <>
+              <UsageBar onOpenUsage={() => setViewMode('usage')} />
               <ChatArea />
               <InputBox />
             </>

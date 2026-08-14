@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { IPC_EVENT } from '../shared/ipc-channels'
-import type { SubOutputUpdate, AggregationChunk } from '../shared/types'
+import { IPC, IPC_EVENT } from '../shared/ipc-channels'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
   // Config / Providers
@@ -46,6 +46,11 @@ contextBridge.exposeInMainWorld('moaAPI', {
   // App
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
 
+  // Usage Monitoring
+  getUsageSummary: (params: { range: UsageRange; groupBy: UsageGroupBy }) =>
+    ipcRenderer.invoke(IPC.USAGE_GET_SUMMARY, params),
+  getUsageToday: () => ipcRenderer.invoke(IPC.USAGE_GET_TODAY),
+
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: SubOutputUpdate) => callback(data)
@@ -80,6 +85,8 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_COPY_PROXY_URL)
     ipcRenderer.removeAllListeners(IPC_EVENT.TITLE_UPDATED)
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_OPEN_SETTINGS)
+    ipcRenderer.removeAllListeners(IPC_EVENT.USAGE_OPEN)
+    ipcRenderer.removeAllListeners(IPC_EVENT.USAGE_UPDATED)
   },
 
   // Menu event listeners
@@ -101,10 +108,24 @@ contextBridge.exposeInMainWorld('moaAPI', {
     return () => ipcRenderer.removeListener(IPC_EVENT.MENU_OPEN_SETTINGS, handler)
   },
 
+  // 用量悬浮窗右键「打开用量页」
+  onUsageOpen: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC_EVENT.USAGE_OPEN, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.USAGE_OPEN, handler)
+  },
+
   // Title event listeners
   onTitleUpdated: (callback: (data: { conversationId: string; title: string; conversations: unknown[] }) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; title: string; conversations: unknown[] }) => callback(data)
     ipcRenderer.on(IPC_EVENT.TITLE_UPDATED, handler)
     return () => ipcRenderer.removeListener(IPC_EVENT.TITLE_UPDATED, handler)
+  },
+
+  // Usage event listeners
+  onUsageUpdated: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC_EVENT.USAGE_UPDATED, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.USAGE_UPDATED, handler)
   }
 })

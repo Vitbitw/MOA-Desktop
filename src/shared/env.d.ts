@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday } from './types'
 
 interface MoaAPI {
   // Config / Providers
@@ -41,6 +41,11 @@ interface MoaAPI {
   // App
   getVersion: () => Promise<string>
 
+  // Usage Monitoring
+  getUsageSummary: (params: { range: UsageRange; groupBy: UsageGroupBy }) =>
+    Promise<{ success: boolean; data: UsageSummary; error?: string }>
+  getUsageToday: () => Promise<{ success: boolean; data: UsageToday; error?: string }>
+
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => () => void
   onAggregationStart: (callback: () => void) => () => void
@@ -53,8 +58,14 @@ interface MoaAPI {
   onMenuCopyProxyUrl: (callback: (url: string) => void) => () => void
   onMenuOpenSettings: (callback: () => void) => () => void
 
+  // 用量悬浮窗右键「打开用量页」
+  onUsageOpen: (callback: () => void) => () => void
+
   // Title event listeners
   onTitleUpdated: (callback: (data: { conversationId: string; title: string; conversations: unknown[] }) => void) => () => void
+
+  // Usage event listeners
+  onUsageUpdated: (callback: () => void) => () => void
 }
 
 declare global {
