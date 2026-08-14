@@ -641,7 +641,8 @@ function registerIpcHandlers() {
           if (groupBy === 'model') {
             key = m.modelId
           } else if (groupBy === 'provider') {
-            key = m.providerId ? (providerNameMap.get(m.providerId) || m.providerId) : m.modelId
+            // providerId 缺失或厂商已删除 → 兜底显示模型名，避免 UUID
+            key = m.providerId ? (providerNameMap.get(m.providerId) ?? m.modelId) : m.modelId
           } else {
             // 标题生成日志（source='title'）单独归组，避免污染「直通」模式
             key = row.source === 'title' ? '标题' : (MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct')

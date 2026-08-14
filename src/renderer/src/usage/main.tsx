@@ -1,18 +1,13 @@
 import React, { useEffect, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import './usage.css'
+import { formatCost, formatTokens } from '../lib/usageFormat'
 import type { UsageToday } from '../../../shared/types'
 
 // ── 桌面用量悬浮窗（极简数字徽章）──
 // 两行显示：今日 ↑/↓/$、总计 ↑/↓/$；running 时左上角显示蓝色脉冲点；
 // 整窗可拖动（-webkit-app-region: drag）；右键菜单由主进程提供。
 // 数据策略：主进程广播 USAGE_UPDATED（无参信号）后自行重新拉取数据。
-
-// tokens 缩写：>=1000 显示 x.xk
-function formatTokens(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
-  return String(n)
-}
 
 interface OverlayState {
   today: UsageToday | null
@@ -51,9 +46,7 @@ function UsageOverlay() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const rate = currency === 'CNY' ? 7.2 : 1
-  const symbol = currency === 'CNY' ? '¥' : '$'
-  const fmtCost = (c: number | undefined) => `${symbol}${((c ?? 0) * rate).toFixed(2)}`
+  const fmtCost = (c: number | undefined) => formatCost(c ?? 0, currency)
 
   return (
     <div
@@ -72,7 +65,7 @@ function UsageOverlay() {
         <span className="tabular-nums">↓{state.today ? formatTokens(state.today.completion) : '—'}</span>
       </div>
       <div className="text-right tabular-nums text-white/70">
-        {state.today ? fmtCost(state.today.cost) : `${symbol}—`}
+        {state.today ? fmtCost(state.today.cost) : (currency === 'CNY' ? '¥—' : '$—')}
       </div>
 
       {/* 总计 */}
@@ -82,7 +75,7 @@ function UsageOverlay() {
         <span className="tabular-nums">↓{state.total ? formatTokens(state.total.completion) : '—'}</span>
       </div>
       <div className="text-right tabular-nums text-white/70">
-        {state.total ? fmtCost(state.total.cost) : `${symbol}—`}
+        {state.total ? fmtCost(state.total.cost) : (currency === 'CNY' ? '¥—' : '$—')}
       </div>
     </div>
   )

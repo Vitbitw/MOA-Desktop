@@ -1,6 +1,7 @@
 import React from 'react'
 import { useEffect, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
+import { formatCost, formatTokens } from '../lib/usageFormat'
 import type { UsageRange, UsageGroupBy, UsageSummary } from '../../../shared/types'
 
 // ── moaAPI 用量接口（并行任务正在补全 env.d.ts，此处先做本地类型声明过渡）──
@@ -21,12 +22,6 @@ const GROUP_TABS: Array<{ value: UsageGroupBy; label: string }> = [
   { value: 'mode', label: '按模式' },
 ]
 
-// tokens 缩写：>=1000 显示 x.xk
-function formatTokens(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
-  return String(n)
-}
-
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-border bg-card px-4 py-3">
@@ -43,11 +38,6 @@ export default function UsageView() {
   const [summary, setSummary] = useState<UsageSummary | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-
-  // 货币：USD 原样显示，CNY ×7.2
-  const rate = currency === 'CNY' ? 7.2 : 1
-  const symbol = currency === 'CNY' ? '¥' : '$'
-  const formatCost = (cost: number) => `${symbol}${(cost * rate).toFixed(2)}`
 
   // range / groupBy 变化时重新拉取汇总
   useEffect(() => {
@@ -135,7 +125,7 @@ export default function UsageView() {
         <StatCard label="成功率" value={successRate} />
         <StatCard label="↑ 输入 tokens" value={totals ? formatTokens(totals.prompt) : '—'} />
         <StatCard label="↓ 输出 tokens" value={totals ? formatTokens(totals.completion) : '—'} />
-        <StatCard label="总成本" value={totals ? formatCost(totals.cost) : '—'} />
+        <StatCard label="总成本" value={totals ? formatCost(totals.cost, currency) : '—'} />
       </div>
 
       {/* 明细表格 */}
@@ -179,7 +169,7 @@ export default function UsageView() {
                       {unpriced ? (
                         <span className="text-muted-foreground">未定价</span>
                       ) : (
-                        formatCost(row.cost)
+                        formatCost(row.cost, currency)
                       )}
                     </td>
                     <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">

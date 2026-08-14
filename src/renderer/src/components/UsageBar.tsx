@@ -1,18 +1,13 @@
 import React from 'react'
 import { useEffect, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
+import { formatCost, formatTokens } from '../lib/usageFormat'
 import type { UsageToday } from '../../../shared/types'
 
 // ── moaAPI 用量接口（并行任务正在补全 env.d.ts，此处先做本地类型声明过渡）──
 const usageApi = window.moaAPI as unknown as {
   getUsageToday: () => Promise<{ success: boolean; data: UsageToday; error?: string }>
   onUsageUpdated: (cb: () => void) => () => void
-}
-
-// tokens 缩写：>=1000 显示 x.xk
-function formatTokens(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
-  return String(n)
 }
 
 interface Props {
@@ -40,9 +35,7 @@ export default function UsageBar({ onOpenUsage }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const rate = currency === 'CNY' ? 7.2 : 1
-  const symbol = currency === 'CNY' ? '¥' : '$'
-  const cost = today ? `${symbol}${(today.cost * rate).toFixed(2)}` : `${symbol}—`
+  const cost = today ? formatCost(today.cost, currency) : (currency === 'CNY' ? '¥—' : '$—')
 
   return (
     <button
