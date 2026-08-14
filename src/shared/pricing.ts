@@ -1,5 +1,5 @@
 // ─── 模型定价表 ───
-// 单位为 USD / 1K tokens，取 2025 年中的公开定价（各厂商官方定价页）。
+// 单位为 USD / 1M tokens，取 2025 年中的公开定价（各厂商官方定价页）。
 // pattern 为模型 ID 前缀，lookupPrice() 会先按完整 modelId 精确匹配，
 // 再按最长前缀匹配（如 'gpt-4o' 可匹配 'gpt-4o-2024-08-06'）。
 
@@ -23,6 +23,8 @@ export const DEFAULT_PRICING: PriceEntry[] = [
   { pattern: 'claude-3-haiku', input: 0.25, output: 1.25 },
 
   // ── DeepSeek ──
+  { pattern: 'deepseek-v4-flash', input: 0.14, output: 0.28 },
+  { pattern: 'deepseek-v4-pro', input: 0.435, output: 0.87 },
   { pattern: 'deepseek-chat', input: 0.27, output: 1.1 },
   { pattern: 'deepseek-reasoner', input: 0.55, output: 2.19 },
 

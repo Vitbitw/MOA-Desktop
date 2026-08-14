@@ -45,12 +45,13 @@ function getCustomPrice(modelId: string): Price | null {
 /**
  * 计算一次调用的费用（USD）。
  * 优先级：settings.pricing[modelId] > lookupPrice(modelId) > 0。
- * 金额 = (prompt * input + completion * output) / 1000，保留 6 位小数。
+ * 金额 = (prompt * input + completion * output) / 1_000_000，保留 6 位小数。
+ * 注意：价格单位为 USD / 1M tokens（与 DEFAULT_PRICING 及设置页一致）。
  */
 export function computeCost(modelId: string, promptTokens: number, completionTokens: number): number {
   const price = getCustomPrice(modelId) ?? lookupPrice(modelId)
   if (!price) return 0
-  const raw = (promptTokens * price.input + completionTokens * price.output) / 1000
+  const raw = (promptTokens * price.input + completionTokens * price.output) / 1_000_000
   return Math.round(raw * 1_000_000) / 1_000_000
 }
 

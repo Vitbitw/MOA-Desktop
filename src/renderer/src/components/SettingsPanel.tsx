@@ -216,7 +216,7 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
       {activeSection === 'pricing' && (
         <div className="max-w-xl">
           <p className="text-sm text-muted-foreground mb-4">
-            按模型 ID 设置价格覆盖（USD / 1K tokens）。留空则使用厂商默认价格。
+            按模型 ID 设置价格覆盖（USD / 1M tokens，输入/输出单价）。留空则使用厂商默认价格。
           </p>
           <table className="w-full text-sm">
             <thead>
