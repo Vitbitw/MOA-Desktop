@@ -42,6 +42,7 @@ export default function UsageView() {
   const [groupBy, setGroupBy] = useState<UsageGroupBy>('model')
   const [summary, setSummary] = useState<UsageSummary | null>(null)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   // 货币：USD 原样显示，CNY ×7.2
   const rate = currency === 'CNY' ? 7.2 : 1
@@ -52,12 +53,24 @@ export default function UsageView() {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
     usageApi
       .getUsageSummary({ range, groupBy })
       .then((res) => {
-        if (!cancelled && res.success && res.data) setSummary(res.data)
+        if (cancelled) return
+        if (res.success && res.data) {
+          setSummary(res.data)
+        } else {
+          setSummary(null)
+          setLoadError(res.error || '加载用量数据失败')
+        }
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) {
+          setSummary(null)
+          setLoadError('加载用量数据失败')
+        }
+      })
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
@@ -109,6 +122,13 @@ export default function UsageView() {
         </div>
       </div>
 
+      {/* 加载错误提示 */}
+      {loadError && (
+        <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+          {loadError}
+        </div>
+      )}
+
       {/* 汇总卡片 */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
         <StatCard label="请求数" value={totals ? String(totals.requests) : '—'} />
@@ -124,7 +144,7 @@ export default function UsageView() {
           <thead>
             <tr className="text-xs text-muted-foreground border-b border-border">
               <th className="text-left px-4 py-2 font-medium">归组键</th>
-              <th className="text-right px-4 py-2 font-medium">请求数</th>
+              <th className="text-right px-4 py-2 font-medium">调用次数</th>
               <th className="text-right px-4 py-2 font-medium">成功</th>
               <th className="text-right px-4 py-2 font-medium">↑ 输入</th>
               <th className="text-right px-4 py-2 font-medium">↓ 输出</th>
@@ -136,7 +156,11 @@ export default function UsageView() {
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={7} className="px-4 py-12 text-center text-sm text-muted-foreground">
-                  {loading ? '加载中…' : '暂无用量数据，发送消息后开始统计'}
+                  {loading
+                    ? '加载中…'
+                    : totals && totals.requests > 0
+                      ? '历史记录缺少模型明细，新的请求将自动统计'
+                      : '暂无用量数据，发送消息后开始统计'}
                 </td>
               </tr>
             ) : (

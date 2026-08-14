@@ -643,7 +643,8 @@ function registerIpcHandlers() {
           } else if (groupBy === 'provider') {
             key = m.providerId ? (providerNameMap.get(m.providerId) || m.providerId) : m.modelId
           } else {
-            key = MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct'
+            // 标题生成日志（source='title'）单独归组，避免污染「直通」模式
+            key = row.source === 'title' ? '标题' : (MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct')
           }
           const agg = rowMap.get(key) || { key, requests: 0, success: 0, prompt: 0, completion: 0, cost: 0 }
           agg.requests += 1
