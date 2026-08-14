@@ -165,8 +165,8 @@ export default function UsageView() {
               </tr>
             ) : (
               rows.map((row) => {
-                // cost=0 且 prompt/completion 全 0 → 未定价
-                const unpriced = row.cost === 0 && row.prompt === 0 && row.completion === 0
+                // 有 token 用量但 cost=0 → 未定价（模型不在价格表）
+                const unpriced = row.cost === 0 && (row.prompt > 0 || row.completion > 0)
                 const share = totalCost > 0 ? `${((row.cost / totalCost) * 100).toFixed(1)}%` : null
                 return (
                   <tr key={row.key} className="border-b border-border/50 last:border-b-0 hover:bg-accent/30">
