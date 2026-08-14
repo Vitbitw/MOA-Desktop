@@ -47,16 +47,20 @@ export class Database {
     this.initialized = true
 
     // ── Migrations for existing databases ──
+    // 注意：必须走 this.exec() 包装器（会触发 scheduleSave 落盘），
+    // 直接 this.db!.exec() 只改内存库，重启后列会丢失（已踩坑）。
     try {
-      this.db!.exec('ALTER TABLE conversations ADD COLUMN title_edited INTEGER NOT NULL DEFAULT 0')
+      this.exec('ALTER TABLE conversations ADD COLUMN title_edited INTEGER NOT NULL DEFAULT 0')
     } catch {
       // Column already exists — ignore
     }
     try {
-      this.db!.exec('ALTER TABLE request_logs ADD COLUMN models TEXT')
+      this.exec('ALTER TABLE request_logs ADD COLUMN models TEXT')
     } catch {
       // Column already exists — ignore
     }
+    // 迁移立即落盘，避免进程退出时丢失结构变更
+    this.save()
   }
 
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[] {

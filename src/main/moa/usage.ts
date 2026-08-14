@@ -8,6 +8,8 @@ import type { AppSettings } from '../../shared/types'
 
 export interface UsageEntry {
   modelId: string
+  /** 厂商 ID（用于按厂商分组；旧数据可能缺失） */
+  providerId?: string
   role: 'sub' | 'agg' | 'title'
   prompt: number
   completion: number
@@ -54,7 +56,7 @@ export function computeCost(modelId: string, promptTokens: number, completionTok
 
 /** 为每条用量记录计算 cost */
 export function buildUsageEntries(
-  entries: Array<{ modelId: string; role: UsageEntry['role']; prompt: number; completion: number }>
+  entries: Array<{ modelId: string; providerId?: string; role: UsageEntry['role']; prompt: number; completion: number }>
 ): UsageEntry[] {
   return entries.map((e) => ({
     ...e,

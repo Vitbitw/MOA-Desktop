@@ -398,6 +398,7 @@ function registerIpcHandlers() {
               if (genResult.tokenUsage) {
                 const titleEntries = buildUsageEntries([{
                   modelId: ts.modelId,
+                  providerId: ts.providerId,
                   role: 'title',
                   prompt: genResult.tokenUsage.prompt,
                   completion: genResult.tokenUsage.completion
@@ -492,14 +493,30 @@ function registerIpcHandlers() {
       const logId = crypto.randomUUID()
       const logDuration = Date.now() - now
       // 组装用量明细：成功且有 tokenUsage 的子模型（role='sub'）+ 聚合器（role='agg'，有则记）
-      const usageInputs: Array<{ modelId: string; role: 'sub' | 'agg' | 'title'; prompt: number; completion: number }> = []
+      // 注意：SubModelOutput.providerId 存的是 baseUrl（见 subModelCaller），不是厂商 ID；
+      // 厂商 ID 必须从 config.subModels 的 SubModelConfig.providerId 映射取。
+      const subProviderMap = new Map(config.subModels.map((sm) => [sm.modelId, sm.providerId]))
+      const usageInputs: Array<{ modelId: string; providerId?: string; role: 'sub' | 'agg' | 'title'; prompt: number; completion: number }> = []
       for (const o of (moaResult.subOutputs || [])) {
         if (o.status === 'success' && o.tokenUsage) {
-          usageInputs.push({ modelId: o.modelId, role: 'sub', prompt: o.tokenUsage.prompt, completion: o.tokenUsage.completion })
+          usageInputs.push({
+            modelId: o.modelId,
+            providerId: subProviderMap.get(o.modelId),
+            role: 'sub',
+            prompt: o.tokenUsage.prompt,
+            completion: o.tokenUsage.completion
+          })
         }
       }
       if (moaResult.aggregatorUsage) {
-        usageInputs.push({ modelId: config.aggregator?.primaryModelId || '', role: 'agg', prompt: moaResult.aggregatorUsage.prompt, completion: moaResult.aggregatorUsage.completion })
+        // fallback 聚合生效时 aggregatorModelId/ProviderId 是 fallback 的
+        usageInputs.push({
+          modelId: moaResult.aggregatorModelId || config.aggregator?.primaryModelId || '',
+          providerId: moaResult.aggregatorProviderId || config.aggregator?.primaryProviderId,
+          role: 'agg',
+          prompt: moaResult.aggregatorUsage.prompt,
+          completion: moaResult.aggregatorUsage.completion
+        })
       }
       const usageEntries = buildUsageEntries(usageInputs)
       const usageTotals = sumUsage(usageEntries)
@@ -589,6 +606,14 @@ function registerIpcHandlers() {
         ? getDatabase().query<RequestLogRow>('SELECT * FROM request_logs')
         : getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
 
+      // 厂商 ID → 厂商名称（getAllProviders 依赖 DB 已初始化，故在 handler 内调用）
+      const providerNameMap = new Map(getAllProviders().map((p) => [p.id, p.name] as const))
+      const MODE_LABELS: Record<string, string> = {
+        aggregate: '聚合',
+        compare: '对比',
+        direct: '直通'
+      }
+
       // 总量：行数 / 成功行数 / 各列累加
       const totals = { requests: 0, success: 0, prompt: 0, completion: 0, cost: 0 }
       // 分组明细：Map<key, UsageRow>
@@ -602,7 +627,7 @@ function registerIpcHandlers() {
         totals.cost += row.cost || 0
 
         // 解析 models 列；null/空/损坏则跳过明细（仅计入 totals）
-        let models: Array<{ modelId: string; prompt: number; completion: number; cost: number }> | null = null
+        let models: Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null = null
         try {
           models = row.models ? JSON.parse(row.models) : null
         } catch {
@@ -610,16 +635,15 @@ function registerIpcHandlers() {
         }
         if (!models || models.length === 0) continue
 
-        // 按 groupBy 归组：model→modelId；provider→由 modelId 推导（带 '/' 前缀取前半段，否则兜底 modelId）；mode→行 moa_mode
+        // 按 groupBy 归组：model→modelId；provider→真实厂商名（providerId 缺失时兜底 modelId）；mode→中文模式标签
         for (const m of models) {
           let key: string
           if (groupBy === 'model') {
             key = m.modelId
           } else if (groupBy === 'provider') {
-            const slash = m.modelId.indexOf('/')
-            key = slash > 0 ? m.modelId.slice(0, slash) : m.modelId
+            key = m.providerId ? (providerNameMap.get(m.providerId) || m.providerId) : m.modelId
           } else {
-            key = row.moa_mode || 'direct'
+            key = MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct'
           }
           const agg = rowMap.get(key) || { key, requests: 0, success: 0, prompt: 0, completion: 0, cost: 0 }
           agg.requests += 1

@@ -20,7 +20,11 @@ export interface MoaResponse {
   content: string
   subOutputs: SubModelOutput[]
   aggregatorContent?: string
+  /** 实际使用的聚合模型 usage（主聚合或 fallback 聚合） */
   aggregatorUsage?: { prompt: number; completion: number }
+  /** 实际使用的聚合模型身份（fallback 生效时不是 primary） */
+  aggregatorModelId?: string
+  aggregatorProviderId?: string
   success: boolean
   partialFailure?: boolean
   error?: string
@@ -209,6 +213,8 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
             subOutputs,
             aggregatorContent: fallbackResult.content,
             aggregatorUsage: fallbackResult.usage,
+            aggregatorModelId: req.aggregator.fallbackModelId,
+            aggregatorProviderId: req.aggregator.fallbackProviderId,
             success: true,
             partialFailure: successfulCount < subOutputs.length
           }
@@ -234,6 +240,8 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
     subOutputs,
     aggregatorContent: aggResult.content,
     aggregatorUsage: aggResult.usage,
+    aggregatorModelId: req.aggregator?.primaryModelId ?? '',
+    aggregatorProviderId: req.aggregator?.primaryProviderId ?? '',
     success: true,
     partialFailure: successfulCount < subOutputs.length
   }
@@ -384,6 +392,8 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
             subOutputs,
             aggregatorContent: fallbackResult.content,
             aggregatorUsage: fallbackResult.usage,
+            aggregatorModelId: req.aggregator.fallbackModelId,
+            aggregatorProviderId: req.aggregator.fallbackProviderId,
             success: true,
             partialFailure: successfulCount < subOutputs.length
           }
@@ -412,6 +422,8 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
     subOutputs,
     aggregatorContent: aggResult.content,
     aggregatorUsage: aggResult.usage,
+    aggregatorModelId: req.aggregator?.primaryModelId ?? '',
+    aggregatorProviderId: req.aggregator?.primaryProviderId ?? '',
     success: true,
     partialFailure: successfulCount < subOutputs.length
   }
