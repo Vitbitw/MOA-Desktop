@@ -13,7 +13,9 @@ import { generateTitle } from './title/titleGenerator'
 import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
 import { detectLocalEngines, probeCustomBaseUrl } from './local/engineDetector'
-import { upsertDetectedEngine, listLocalEngines, removeEngine } from './local/localManager'
+import { searchHfModels } from './local/hfHub'
+import { startDownload, cancelDownload } from './local/downloadManager'
+import { upsertDetectedEngine, listLocalEngines, removeEngine, listLocalModels, deleteLocalModel } from './local/localManager'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -728,6 +730,50 @@ function registerIpcHandlers() {
   ipcMain.handle(IPC.LOCAL_REMOVE_ENGINE, (_e, id: string) => {
     try {
       removeEngine(id)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_LIST_MODELS, () => {
+    try {
+      return { success: true, data: listLocalModels() }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_SEARCH_HF, async (_e, query: string) => {
+    try {
+      const data = await searchHfModels(query)
+      return { success: true, data }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_START_DOWNLOAD, async (_e, params: { repo: string; file: string; sizeBytes?: number; quantization?: string }) => {
+    try {
+      const result = await startDownload(params)
+      return { success: true, data: result }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_CANCEL_DOWNLOAD, (_e, jobId: string) => {
+    try {
+      cancelDownload(jobId)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_DELETE_MODEL, (_e, id: string) => {
+    try {
+      deleteLocalModel(id)
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }

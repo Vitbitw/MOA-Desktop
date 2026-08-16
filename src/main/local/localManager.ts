@@ -1,6 +1,8 @@
+import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { getDatabase } from '../db/database'
-import type { DetectedEngine, LocalEngine, LocalEngineStatus, LocalEngineType } from '../../shared/types'
+import { cancelDownloadByModel } from './downloadManager'
+import type { DetectedEngine, LocalEngine, LocalEngineStatus, LocalEngineType, LocalModel } from '../../shared/types'
 
 interface EngineRow {
   id: string; name: string; engine_type: string; base_url: string; binary_path: string | null
@@ -104,4 +106,48 @@ export function setEngineStatus(id: string, status: LocalEngineStatus): void {
 export function removeEngine(id: string): void {
   getDatabase().exec('DELETE FROM local_engines WHERE id = ?', [id])
   getDatabase().exec('DELETE FROM providers WHERE engine_id = ?', [id])
+}
+
+// ── Local Models CRUD（GGUF 模型库）──
+
+interface LocalModelRow {
+  id: string; name: string; model_id: string; gguf_path: string; size_bytes: number
+  downloaded_bytes: number; hf_repo: string; hf_file: string; quantization: string | null
+  status: string; created_at: number
+}
+
+function rowToLocalModel(row: LocalModelRow): LocalModel {
+  return {
+    id: row.id,
+    name: row.name,
+    modelId: row.model_id,
+    ggufPath: row.gguf_path,
+    sizeBytes: row.size_bytes,
+    downloadedBytes: row.downloaded_bytes,
+    hfRepo: row.hf_repo,
+    hfFile: row.hf_file,
+    quantization: row.quantization || undefined,
+    status: row.status as LocalModel['status'],
+    createdAt: row.created_at
+  }
+}
+
+export function listLocalModels(): LocalModel[] {
+  return getDatabase().query<LocalModelRow>('SELECT * FROM local_models ORDER BY created_at DESC').map(rowToLocalModel)
+}
+
+export function getLocalModelById(id: string): LocalModel | null {
+  const row = getDatabase().queryOne<LocalModelRow>('SELECT * FROM local_models WHERE id = ?', [id])
+  return row ? rowToLocalModel(row) : null
+}
+
+export function deleteLocalModel(id: string): void {
+  const model = getLocalModelById(id)
+  if (!model) return
+  // 若正在下载：取消活动任务（按 modelId 定位）
+  cancelDownloadByModel(model.modelId)
+  // 删除磁盘文件（.gguf 与 .part）
+  try { if (model.ggufPath && fs.existsSync(model.ggufPath)) fs.unlinkSync(model.ggufPath) } catch { /* 忽略 */ }
+  try { if (fs.existsSync(`${model.ggufPath}.part`)) fs.unlinkSync(`${model.ggufPath}.part`) } catch { /* 忽略 */ }
+  getDatabase().exec('DELETE FROM local_models WHERE id = ?', [id])
 }
