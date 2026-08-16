@@ -16,7 +16,7 @@ import { detectLocalEngines, probeCustomBaseUrl } from './local/engineDetector'
 import { searchHfModels } from './local/hfHub'
 import { startDownload, cancelDownload } from './local/downloadManager'
 import { upsertDetectedEngine, listLocalEngines, removeEngine, listLocalModels, deleteLocalModel } from './local/localManager'
-import { getRuntimeState, ensureRuntime } from './local/runtimeManager'
+import { getRuntimeState, ensureRuntime, startBundledEngine, stopBundledEngine } from './local/runtimeManager'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -797,6 +797,17 @@ function registerIpcHandlers() {
       return { success: false, error: String(err) }
     }
   })
+
+  ipcMain.handle(IPC.LOCAL_START_ENGINE, async (_e, localModelId: string) => {
+    // preload 形参 modelId 实际承载 LocalModel.id（UUID 主键），非推理名
+    const state = await startBundledEngine(localModelId)
+    return { success: state.status === 'running', data: state, error: state.error }
+  })
+
+  ipcMain.handle(IPC.LOCAL_STOP_ENGINE, async () => {
+    const state = await stopBundledEngine()
+    return { success: true, data: state }
+  })
 }
 
 app.whenReady().then(async () => {
@@ -869,6 +880,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  stopBundledEngine()
   stopProxyServer()
   getDatabase().flush()
 })

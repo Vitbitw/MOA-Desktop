@@ -1,11 +1,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { app, BrowserWindow } from 'electron'
 import { IPC_EVENT } from '../../shared/ipc-channels'
-import type { RuntimeState } from '../../shared/types'
+import type { DetectedEngine, LocalModel, RuntimeState } from '../../shared/types'
+import { getDatabase } from '../db/database'
+import { getLocalModelById, setEngineStatus, upsertDetectedEngine } from './localManager'
 
 const RELEASE_API = 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest'
 
@@ -20,6 +22,11 @@ export interface RuntimeAsset {
 }
 
 let state: RuntimeState = { status: 'not-installed', binaryPath: '' }
+
+/** 启动中标志（RuntimeStatus 无 'starting' 成员，用模块级 boolean 表达）。 */
+let starting = false
+/** 当前 llama-server 子进程（生命周期锚点）。 */
+let child: ReturnType<typeof spawn> | null = null
 
 /** 广播运行时状态到所有窗口（单一 RuntimeState 载荷，附 engineType 便于 UI 分派）。 */
 function broadcast(): void {
@@ -206,4 +213,140 @@ function findExecutableInDir(dir: string): string | null {
     return null
   }
   return walk(dir)
+}
+
+/** bundled 引擎行 id 的单一真相来源（R2：全应用唯一 bundled 实例）。禁止在 start 时存内存变量传给 stop。 */
+function getBundledEngineId(): string | null {
+  const row = getDatabase().queryOne<{ id: string }>(
+    'SELECT id FROM local_engines WHERE engine_type = ?', ['bundled']
+  )
+  return row?.id ?? null
+}
+
+/**
+ * 启动内置 llama-server（reject-if-busy）：
+ * 1) starting 标志在首个 await 之前同步置 true（防并发启动竞态）
+ * 2) findFreePort 拿动态端口（先 close 再 spawn）
+ * 3) spawn -m <ggufPath> --host 127.0.0.1 --port <port>
+ * 4) 裸根 /health 探测循环（超时 30s）→ 成功后 upsertDetectedEngine 注册 provider（baseUrl 含 /v1）
+ * 5) 失败/崩溃 → error 状态 + 广播，不 throw（handler 层不 catch）
+ */
+export async function startBundledEngine(localModelId: string): Promise<RuntimeState> {
+  // reject-if-busy：starting 标志 + running 状态双条件
+  if (starting || state.status === 'running') return { ...state }
+  const model = getLocalModelById(localModelId)
+  if (!model) {
+    state = { ...state, status: 'error', error: '本地模型不存在' }
+    broadcast()
+    return state
+  }
+  // 必须先置 starting 再 await（JS 单线程下第二次并发调用必被拦）
+  starting = true
+  try {
+    const bin = bundledBinaryPath()
+    if (!fs.existsSync(bin)) {
+      state = { ...state, status: 'error', error: '内置运行时未安装，请先完成运行时下载' }
+      broadcast()
+      return state
+    }
+    const port = await findFreePort()
+    state = { ...state, status: 'running', port }
+    broadcast()
+    // 启动子进程（-m 模型路径为必须参数，否则空载起服务聊不了天）
+    child = spawn(bin, ['-m', model.ggufPath, '--host', '127.0.0.1', '--port', String(port)], {
+      stdio: ['ignore', 'ignore', 'pipe']
+    })
+    // 引流 stderr：Windows 命名管道缓冲填满会阻塞子进程写日志 → 假死
+    child.stderr?.on('data', () => {})
+    // spawn 启动失败（EACCES/ENOENT/损坏二进制）走 'error' 而非 'exit'：无监听器 = uncaught exception = 主进程崩溃
+    child.once('error', (err) => {
+      child = null
+      state = { ...state, status: 'error', error: `llama-server 启动失败: ${err.message}` }
+      broadcast()
+    })
+    // 健康通过 + 注册完成前保持 false：启动期 exit 走「落 error 保留原因」，运行期 exit 才走优雅 stop
+    let startedOk = false
+    child.once('exit', (code) => {
+      child = null
+      if (startedOk) {
+        // 正常运行期意外退出 → 走优雅 stop（R16：禁 provider + 引擎置 stopped）
+        stopBundledEngine().catch(() => {})
+      } else if (state.status === 'running') {
+        // 启动期退出（坏 GGUF/端口占用等）→ 直接落 error 保留崩溃原因；不调 stop（stop 会覆盖成 ready 丢原因）
+        state = { ...state, status: 'error', error: `llama-server 异常退出（code ${code}）` }
+        broadcast()
+      }
+    })
+    // 健康探测：裸根 /health（chat API 在 /v1，探测必须用裸根，R15）
+    const rootUrl = `http://127.0.0.1:${port}`
+    const apiBaseUrl = `${rootUrl}/v1`
+    const deadline = Date.now() + 30_000
+    let healthy = false
+    while (Date.now() < deadline) {
+      if (child === null) break // spawn error 已设 error 状态，fail-fast 退出循环
+      try {
+        const resp = await fetch(`${rootUrl}/health`, { signal: AbortSignal.timeout(1_000) })
+        if (resp.ok) { healthy = true; break }
+      } catch { /* 未就绪，重试 */ }
+      await new Promise((r) => setTimeout(r, 300))
+    }
+    if (!healthy) {
+      // 判空：error/exit 监听已把 child 置 null（进程已死），此时 kill 会 null.kill() 抛 TypeError
+      if (child) {
+        child.kill()
+        child = null
+      }
+      // 启动期 exit 已落 error（崩溃原因保留），不额外覆盖为超时错误
+      if (state.status !== 'error') {
+        throw new Error('llama-server 启动超时（30s 内 /health 未就绪）')
+      }
+      return state
+    }
+    // 健康通过：此后 exit 才走优雅 stop（startedOk=true 之后无 await，注册段全同步，健康期 exit 不会半途插入）
+    startedOk = true
+    // 注册 provider：models 的 id 必须用 LocalModel.modelId（推理名，文件名去 .gguf），不是 UUID 主键
+    const detected: DetectedEngine = {
+      engineType: 'bundled',
+      name: '内置 llama.cpp',
+      baseUrl: apiBaseUrl,
+      port,
+      reachable: true,
+      models: [{ id: model.modelId, name: model.name, providerId: '' }]
+    }
+    upsertDetectedEngine(detected)
+    // belt-and-suspenders：upsertDetectedEngine 内部已按 reachable 写 status='running'，此处再确认一次（无害冗余，不要"优化"掉）
+    const engineId = getBundledEngineId()
+    if (engineId) setEngineStatus(engineId, 'running')
+    state = { ...state, status: 'running', port, backend: state.backend, error: undefined }
+    broadcast()
+    return state
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    state = { ...state, status: 'error', error: msg }
+    broadcast()
+    return state
+  } finally {
+    starting = false
+  }
+}
+
+/**
+ * 停止内置引擎（幂等）：
+ * - child===null 时**不得早退**——即使进程已死仍执行「引擎 status→stopped + provider→enabled=0」（R16）
+ * - post-stop 的 RuntimeState 定稿：status:'ready'、清 port（binaryPath 保留）
+ */
+export async function stopBundledEngine(): Promise<RuntimeState> {
+  if (child) {
+    child.kill()
+    child = null
+  }
+  // R16：bundled provider 行必须 enabled=0，否则 firstUsableProvider()/proxy 指向死端点
+  const engineId = getBundledEngineId()
+  if (engineId) {
+    try { setEngineStatus(engineId, 'stopped') } catch { /* 行可能不存在，忽略 */ }
+    try { getDatabase().exec('UPDATE providers SET enabled = 0 WHERE engine_id = ?', [engineId]) } catch { /* 同上 */ }
+  }
+  state = { ...state, status: 'ready', port: undefined, error: undefined }
+  broadcast()
+  return state
 }
