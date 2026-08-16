@@ -35,6 +35,8 @@ function resolveSubModels(subModels: SubModelConfig[]): Array<{
   providerBaseUrl: string
   apiKey: string
   modelId: string
+  isLocal: boolean
+  enabled: boolean
 }> {
   const providers = getAllProviders()
   return subModels.map((sm) => {
@@ -42,9 +44,11 @@ function resolveSubModels(subModels: SubModelConfig[]): Array<{
     return {
       providerBaseUrl: p?.baseUrl || '',
       apiKey: p?.apiKey || '',
-      modelId: sm.modelId
+      modelId: sm.modelId,
+      isLocal: p?.kind === 'local',
+      enabled: p?.enabled !== false
     }
-  }).filter((sm) => sm.providerBaseUrl && sm.apiKey)
+  }).filter((sm) => sm.providerBaseUrl && sm.enabled && (sm.isLocal || sm.apiKey))
 }
 
 /** Resolve aggregator model config to { baseUrl, apiKey, modelId } or null. */
@@ -55,10 +59,12 @@ function resolveAggregator(aggregator: AggregatorConfig): {
 } | null {
   const providers = getAllProviders()
   const p = providers.find((prov) => prov.id === aggregator.primaryProviderId)
-  if (!p?.apiKey) return null
+  if (!p) return null
+  if (!p.enabled) return null
+  if (p.kind !== 'local' && !p.apiKey) return null
   return {
     providerBaseUrl: p.baseUrl,
-    apiKey: p.apiKey,
+    apiKey: p.apiKey || '',
     modelId: aggregator.primaryModelId
   }
 }
@@ -70,12 +76,11 @@ async function callAggregator(
   timeoutMs: number
 ): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number } }> {
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (aggInfo.apiKey) headers.Authorization = `Bearer ${aggInfo.apiKey}`
     const resp = await fetch(`${aggInfo.providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${aggInfo.apiKey}`
-      },
+      headers,
       body: JSON.stringify({
         model: aggInfo.modelId,
         messages,

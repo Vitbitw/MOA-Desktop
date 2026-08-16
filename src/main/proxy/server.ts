@@ -7,11 +7,11 @@ import { executeMoA } from '../moa/moaEngine'
 
 let server: Server | null = null
 
-/** Find first enabled provider with an API key for direct passthrough. */
+/** Find first enabled provider (API key or local endpoint) for direct passthrough. */
 function firstUsableProvider(): { baseUrl: string; apiKey: string } | null {
   const providers = getAllProviders()
   for (const p of providers) {
-    if (p.enabled && p.apiKey) return { baseUrl: p.baseUrl, apiKey: p.apiKey }
+    if (p.enabled && (p.apiKey || p.kind === 'local')) return { baseUrl: p.baseUrl, apiKey: p.apiKey || '' }
   }
   return null
 }
@@ -41,8 +41,10 @@ export function createProxyServer(): Express {
     const provider = firstUsableProvider()
     if (!provider) { res.json({ object: 'list', data: [] }); return }
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
       const resp = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}/models`, {
-        headers: { Authorization: `Bearer ${provider.apiKey}` }
+        headers
       })
       res.json(await resp.json())
     } catch {
@@ -66,9 +68,11 @@ export function createProxyServer(): Express {
     // ── Direct mode ──
     if (config.mode === 'direct' || config.subModels.length === 0) {
       try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+        if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
         const upstream = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.apiKey}` },
+          headers,
           body: JSON.stringify({ ...req.body, model: req.body.model || '' })
         })
 
@@ -199,9 +203,11 @@ export function createProxyServer(): Express {
       const provider = firstUsableProvider()
       if (!provider) { res.status(503).json({ error: { message: 'No provider configured', type: 'moa_config_error' } }); return }
       try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+        if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
         const upstream = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}${endpoint}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.apiKey}` },
+          headers,
           body: JSON.stringify(req.body)
         })
         res.status(upstream.status).json(await upstream.json())

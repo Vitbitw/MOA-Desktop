@@ -50,21 +50,26 @@ export async function fetchAndCacheModels(providerId: string): Promise<ModelInfo
   const providers = getAllProviders()
   const provider = providers.find((p) => p.id === providerId)
   if (!provider) throw new Error(`Provider ${providerId} not found`)
-  if (!provider.apiKey) return []
+  const isLocal = provider.kind === 'local'
+  if (!isLocal && !provider.apiKey) return []
 
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
     const resp = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}/models`, {
-      headers: { Authorization: `Bearer ${provider.apiKey}` },
+      headers,
       signal: AbortSignal.timeout(10_000)
     })
     if (!resp.ok) return []
 
     const body = await resp.json()
-    const models: ModelInfo[] = (body.data || []).map((m: { id: string }) => ({
-      id: m.id,
-      name: m.id,
+    // 兼容两种返回：OpenAI 风格 { data: [{ id }] } 与 /api/tags 风格 { models: [{ name }] }
+    const rawList: Array<{ id: string; name?: string }> = Array.isArray(body.data) ? body.data : (Array.isArray(body.models) ? body.models : [])
+    const models: ModelInfo[] = rawList.map((m: { id: string; name?: string }) => ({
+      id: m.id || m.name || '',
+      name: m.id || m.name || '',
       providerId
-    }))
+    })).filter((m) => m.id)
 
     getDatabase().exec('UPDATE providers SET model_list = ? WHERE id = ?', [JSON.stringify(models), providerId])
     return models
