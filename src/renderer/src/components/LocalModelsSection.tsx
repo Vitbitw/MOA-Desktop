@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Plus, RefreshCw, Trash2, Download, Square, X } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Download, Square, X, Search, Ban } from 'lucide-react'
 import { useLocalModelStore } from '../store/localModelStore'
 import { useConfigStore } from '../store/configStore'
 import type { LocalEngine } from '../../../shared/types'
@@ -152,8 +152,183 @@ function EngineCard({ engine, onRemove }: { engine: LocalEngine; onRemove: () =>
   )
 }
 
+/** 文件大小格式化（B/KB/MB/GB）。 */
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '—'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let v = bytes
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
 /**
- * 本地模型 UI 区（引擎卡片 + 手动添加）。
+ * HF GGUF 搜索 + 下载触发区。
+ * 数据源 = store.searchResults（searchHf 是 void 型，结果落状态，不从返回值读）。
+ * 下载 = startDownload({ repo: result.id, file, sizeBytes })——后端 downloadManager 自带
+ *   量化名解析兜底（params.quantization 缺省时按文件名自动解析），UI 不传 quantization；
+ *   也禁止 import 主进程专属的量化解析工具（src/main/local/hfHub.ts，preload 未暴露）。
+ */
+function HfSearchPanel() {
+  const searchResults = useLocalModelStore((s) => s.searchResults)
+  const searching = useLocalModelStore((s) => s.searching)
+  const searchHf = useLocalModelStore((s) => s.searchHf)
+  const startDownload = useLocalModelStore((s) => s.startDownload)
+  const setError = useLocalModelStore((s) => s.setError)
+  const [query, setQuery] = useState('')
+  const [downloadingFiles, setDownloadingFiles] = useState<Record<string, boolean>>({})
+
+  const handleSearch = async () => {
+    if (!query.trim()) return
+    setError(null)
+    await searchHf(query.trim())
+  }
+
+  const handleDownload = async (repo: string, file: string, sizeBytes: number) => {
+    setError(null)
+    const key = `${repo}::${file}`
+    setDownloadingFiles((s) => ({ ...s, [key]: true }))
+    try {
+      await startDownload({ repo, file, sizeBytes })
+    } finally {
+      setDownloadingFiles((s) => ({ ...s, [key]: false }))
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium text-foreground">从 Hugging Face 下载模型</p>
+      <div className="flex gap-2">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') void handleSearch() }}
+          placeholder="搜索 GGUF 模型（如 Qwen2.5-7B）"
+          className="flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        />
+        <button
+          onClick={() => void handleSearch()}
+          disabled={searching || !query.trim()}
+          className="flex items-center gap-1 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-medium hover:opacity-90 disabled:opacity-50"
+        >
+          <Search className="w-3.5 h-3.5" />
+          {searching ? '搜索中...' : '搜索'}
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        {searchResults.map((r) => (
+          <div key={r.id} className="rounded-lg border border-border p-3 text-sm space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-foreground">{r.author}/{r.name}</span>
+              <span className="text-xs text-muted-foreground">{r.downloads.toLocaleString()} 下载 · {r.likes} 赞</span>
+            </div>
+            <div className="space-y-1">
+              {r.ggufFiles.map((f) => {
+                const key = `${r.id}::${f.filename}`
+                return (
+                  <div key={key} className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-muted-foreground truncate flex-1">{f.filename}</span>
+                    <span className="text-xs text-muted-foreground flex-shrink-0">{formatBytes(f.sizeBytes)}</span>
+                    <button
+                      onClick={() => void handleDownload(r.id, f.filename, f.sizeBytes)}
+                      disabled={downloadingFiles[key]}
+                      className="flex items-center gap-1 px-2 py-1 bg-primary text-primary-foreground rounded-md text-xs hover:opacity-90 disabled:opacity-50 flex-shrink-0"
+                    >
+                      <Download className="w-3 h-3" />
+                      {downloadingFiles[key] ? '开始中...' : '下载'}
+                    </button>
+                  </div>
+                )
+              })}
+              {r.ggufFiles.length === 0 && (
+                <p className="text-xs text-muted-foreground">该仓库暂无 GGUF 文件</p>
+              )}
+            </div>
+          </div>
+        ))}
+        {searchResults.length === 0 && !searching && (
+          <p className="text-xs text-muted-foreground">搜索 GGUF 模型仓库后在此显示结果</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 下载进度区。
+ * 骨架 = models 中 status==='downloading' 的行（面板重开立即有行，不依赖事件）。
+ * 覆盖 = downloads map 按 (repo, file) 匹配实时 percent/speedBps。
+ *   join 键 = (repo, file) ↔ (hfRepo, hfFile)——绝不能拿 LocalModel.id 或 modelId 匹配：
+ *   modelId 是文件名去 .gguf，跨 repo 同名文件会串线（如两仓库都有 model.gguf）。
+ * 取消 = 仅当 progress entry 存在时渲染取消按钮（jobId 只活在 downloads entry 里，骨架行无 jobId）。
+ * downloads map 只增不删（6a 设计）→ 只匹配 status==='downloading' 的 entry，终态自动过滤。
+ */
+function DownloadList() {
+  const models = useLocalModelStore((s) => s.models)
+  const downloads = useLocalModelStore((s) => s.downloads)
+  const cancelDownload = useLocalModelStore((s) => s.cancelDownload)
+  const [cancelling, setCancelling] = useState<string | null>(null)
+
+  const skeleton = models.filter((m) => m.status === 'downloading')
+
+  const handleCancel = async (jobId: string) => {
+    setCancelling(jobId)
+    try { await cancelDownload(jobId) } finally { setCancelling(null) }
+  }
+
+  if (skeleton.length === 0) return null
+
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium text-foreground">下载进度</p>
+      <div className="space-y-2">
+        {skeleton.map((m) => {
+          // join 键 = (repo, file) ↔ (hfRepo, hfFile)；只匹配进行中 entry
+          const entry = Object.values(downloads).find(
+            (p) => p.repo === m.hfRepo && p.file === m.hfFile && p.status === 'downloading'
+          )
+          // 事件到达前退化为 downloadedBytes/sizeBytes（0.5s 节流窗口）
+          const percent = entry?.percent ?? (m.sizeBytes > 0 ? Math.min(100, Math.round((m.downloadedBytes / m.sizeBytes) * 100)) : 0)
+          return (
+            <div key={m.id} className="rounded-lg border border-border p-3 text-sm space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-foreground truncate">{m.name}</span>
+                {entry && (
+                  <button
+                    onClick={() => void handleCancel(entry.jobId)}
+                    disabled={cancelling === entry.jobId}
+                    className="flex items-center gap-1 px-2 py-1 border border-border rounded-md text-xs text-muted-foreground hover:text-destructive hover:border-destructive/50 disabled:opacity-50 flex-shrink-0"
+                  >
+                    <Ban className="w-3 h-3" />
+                    {cancelling === entry.jobId ? '取消中...' : '取消'}
+                  </button>
+                )}
+              </div>
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full transition-all"
+                  style={{ width: `${Math.min(100, percent)}%` }}
+                />
+              </div>
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>{percent}%</span>
+                {entry ? (
+                  <span>{formatBytes(entry.speedBps)}/s</span>
+                ) : (
+                  <span>{formatBytes(m.downloadedBytes)} / {formatBytes(m.sizeBytes)}</span>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 本地模型 UI 区（引擎卡片 + 手动添加 + HF 搜索 + 下载进度）。
  * 挂载生命周期：init() 订阅事件 + 初始三路加载；卸载 dispose() 解绑。
  * R-C 刷新：单一 useEffect 盯 runtime.status 变化 → loadEngines() + getProviders() 刷 providers
  *   （stop → R16 把 provider enabled=0 直写 DB，UI 不刷不可见；运行崩溃 exit → stop → 同样覆盖）。
@@ -289,6 +464,10 @@ export default function LocalModelsSection() {
           </button>
         </div>
       )}
+
+      <HfSearchPanel />
+
+      <DownloadList />
     </div>
   )
 }
