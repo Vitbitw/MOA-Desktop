@@ -1,13 +1,14 @@
 import crypto from 'node:crypto'
 import { getDatabase } from '../db/database'
 import { getProviderKey, saveProviderKey, removeProviderKey } from '../store/key-store'
-import type { Provider, ModelInfo } from '../../shared/types'
+import type { Provider, ModelInfo, ProviderKind } from '../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES } from '../../shared/defaults'
 
 export function getAllProviders(): Provider[] {
   const rows = getDatabase().query<{
     id: string; name: string; base_url: string; model_list: string; enabled: number; created_at: number
-  }>('SELECT * FROM providers ORDER BY name')
+    kind: string; engine_id: string | null
+  }>('SELECT id, name, base_url, model_list, enabled, created_at, kind, engine_id FROM providers ORDER BY name')
 
   return rows.map((row) => ({
     id: row.id,
@@ -15,7 +16,9 @@ export function getAllProviders(): Provider[] {
     baseUrl: row.base_url,
     apiKey: getProviderKey(row.id) || '',
     models: JSON.parse(row.model_list || '[]') as ModelInfo[],
-    enabled: row.enabled === 1
+    enabled: row.enabled === 1,
+    kind: (row.kind || 'api') as ProviderKind,
+    engineId: row.engine_id || undefined
   }))
 }
 
