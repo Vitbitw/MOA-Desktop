@@ -16,6 +16,7 @@ import { detectLocalEngines, probeCustomBaseUrl } from './local/engineDetector'
 import { searchHfModels } from './local/hfHub'
 import { startDownload, cancelDownload } from './local/downloadManager'
 import { upsertDetectedEngine, listLocalEngines, removeEngine, listLocalModels, deleteLocalModel } from './local/localManager'
+import { getRuntimeState, ensureRuntime } from './local/runtimeManager'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -775,6 +776,23 @@ function registerIpcHandlers() {
     try {
       deleteLocalModel(id)
       return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_GET_RUNTIME, () => {
+    try {
+      return { success: true, data: getRuntimeState() }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_ENSURE_RUNTIME, async (_e, backend?: string) => {
+    try {
+      const state = await ensureRuntime(backend || 'cpu')
+      return { success: true, data: state }
     } catch (err) {
       return { success: false, error: String(err) }
     }

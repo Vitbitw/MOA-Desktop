@@ -43,6 +43,9 @@
     "directories": {
       "output": "dist"
     },
+    "extraResources": [
+      { "from": "runtime/", "to": "runtime/", "filter": ["llama-server*"] }
+    ],
     "win": {
       "target": [
         "nsis"
