@@ -12,6 +12,8 @@ import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
 import { generateTitle } from './title/titleGenerator'
 import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
+import { detectLocalEngines, probeCustomBaseUrl } from './local/engineDetector'
+import { upsertDetectedEngine, listLocalEngines, removeEngine } from './local/localManager'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -692,6 +694,45 @@ function registerIpcHandlers() {
       return { success: false, error: String(err) }
     }
   })
+
+  // ── Local Model Deployment ──
+  ipcMain.handle(IPC.LOCAL_DETECT_ENGINES, async () => {
+    try {
+      const detected = await detectLocalEngines()
+      for (const d of detected) upsertDetectedEngine(d)
+      return { success: true, data: detected }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_LIST_ENGINES, () => {
+    try {
+      return { success: true, data: listLocalEngines() }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_ADD_MANUAL_ENGINE, async (_e, baseUrl: string) => {
+    try {
+      const detected = await probeCustomBaseUrl(baseUrl)
+      if (!detected) return { success: false, error: '无法连接该地址的 /models 端点' }
+      const { id, created } = upsertDetectedEngine(detected)
+      return { success: true, data: { id, created, detected } }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_REMOVE_ENGINE, (_e, id: string) => {
+    try {
+      removeEngine(id)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
 }
 
 app.whenReady().then(async () => {
@@ -726,6 +767,14 @@ app.whenReady().then(async () => {
 
   // Create window
   createWindow()
+
+  // 后台探测本地引擎（不阻塞启动，失败静默）
+  detectLocalEngines().then((detected) => {
+    for (const d of detected) {
+      try { upsertDetectedEngine(d) } catch { /* 静默 */ }
+    }
+    mainWindow?.webContents.send(IPC_EVENT.LOCAL_ENGINE_STATUS_CHANGED, detected)
+  }).catch(() => { /* 静默 */ })
 
   // 用量悬浮窗：注册「打开用量页」回调；若设置已启用则创建
   setOpenUsageHandler(() => {

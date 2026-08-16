@@ -8,10 +8,10 @@ import { executeMoA } from '../moa/moaEngine'
 let server: Server | null = null
 
 /** Find first enabled provider (API key or local endpoint) for direct passthrough. */
-function firstUsableProvider(): { baseUrl: string; apiKey: string } | null {
+function firstUsableProvider(): { baseUrl: string; apiKey: string; isLocal: boolean } | null {
   const providers = getAllProviders()
   for (const p of providers) {
-    if (p.enabled && (p.apiKey || p.kind === 'local')) return { baseUrl: p.baseUrl, apiKey: p.apiKey || '' }
+    if (p.enabled && (p.apiKey || p.kind === 'local')) return { baseUrl: p.baseUrl, apiKey: p.apiKey || '', isLocal: p.kind === 'local' }
   }
   return null
 }
@@ -57,7 +57,7 @@ export function createProxyServer(): Express {
     const provider = firstUsableProvider()
     if (!provider) {
       res.status(503).json({
-        error: { message: 'No enabled provider with API key configured.', type: 'moa_config_error' }
+        error: { message: 'No enabled provider configured.', type: 'moa_config_error' }
       })
       return
     }
@@ -205,7 +205,9 @@ export function createProxyServer(): Express {
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
-        const upstream = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}${endpoint}`, {
+        // R15：本地 provider 的 baseUrl 已含 /v1，避免双 /v1
+        const endpointPath = provider.isLocal ? endpoint.replace(/^\/v1/, '') : endpoint
+        const upstream = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}${endpointPath}`, {
           method: 'POST',
           headers,
           body: JSON.stringify(req.body)

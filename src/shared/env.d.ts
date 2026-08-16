@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, DetectedEngine, LocalEngine, LocalModel, RuntimeState } from './types'
 
 interface MoaAPI {
   // Config / Providers
@@ -66,6 +66,23 @@ interface MoaAPI {
 
   // Usage event listeners
   onUsageUpdated: (callback: () => void) => () => void
+
+  // Local Model Deployment
+  detectLocalEngines: () => Promise<{ success: boolean; data: DetectedEngine[]; error?: string }>
+  listLocalEngines: () => Promise<{ success: boolean; data: LocalEngine[]; error?: string }>
+  addManualEngine: (baseUrl: string) => Promise<{ success: boolean; data?: unknown; error?: string }>
+  removeLocalEngine: (id: string) => Promise<{ success: boolean; error?: string }>
+  listLocalModels: () => Promise<{ success: boolean; data: LocalModel[]; error?: string }>
+  searchHf: (query: string) => Promise<{ success: boolean; data: unknown; error?: string }>
+  startDownload: (params: { repo: string; file: string; sizeBytes?: number; quantization?: string }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+  cancelDownload: (jobId: string) => Promise<{ success: boolean; error?: string }>
+  deleteLocalModel: (id: string) => Promise<{ success: boolean; error?: string }>
+  startEngine: (modelId: string) => Promise<{ success: boolean; data?: unknown; error?: string }>
+  stopEngine: () => Promise<{ success: boolean; error?: string }>
+  getRuntimeState: () => Promise<{ success: boolean; data: RuntimeState; error?: string }>
+  ensureRuntime: (backend?: string) => Promise<{ success: boolean; data: RuntimeState; error?: string }>
+  onEngineStatusChanged: (callback: (data: unknown) => void) => () => void
+  onDownloadProgress: (callback: (data: unknown) => void) => () => void
 }
 
 declare global {
