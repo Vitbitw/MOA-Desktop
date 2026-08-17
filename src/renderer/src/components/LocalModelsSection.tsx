@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Plus, RefreshCw, Trash2, Download, Square, X, Search, Ban } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Download, Square, X, Search, Ban, Play } from 'lucide-react'
 import { useLocalModelStore } from '../store/localModelStore'
 import { useConfigStore } from '../store/configStore'
 import type { LocalEngine } from '../../../shared/types'
@@ -62,9 +62,9 @@ function RuntimeCard() {
         </div>
       )}
 
-      {/* ready：提示启动入口在模型列表（6d 接入） */}
+      {/* ready：提示启动入口在下方本地模型库 */}
       {runtime?.status === 'ready' && (
-        <p className="text-xs text-muted-foreground">已就绪。在模型列表中选择模型后启动（后续任务接入）</p>
+        <p className="text-xs text-muted-foreground">已就绪。在下方本地模型库中选择模型后启动</p>
       )}
 
       {/* running：端口 + 停止按钮 */}
@@ -328,7 +328,95 @@ function DownloadList() {
 }
 
 /**
- * 本地模型 UI 区（引擎卡片 + 手动添加 + HF 搜索 + 下载进度）。
+ * 本地模型列表区（已下载 GGUF 库）。
+ * 数据源 = store.models（local_models 库）；运行中信号活在 runtime（RuntimeState），不在模型行——
+ *   startEngine 成功后模型行保持 'downloaded'，禁止启动时改模型行状态。
+ * 启动链路 = handleStart(m.id) → 动作内发起引擎启动——wire 实参 = LocalModel.id（UUID 主键），绝不传推理名！
+ * 删除 = deleteLocalModel(id) 仅用于 downloaded/error 行；downloading 行走上方进度区取消（cancelDownload）。
+ * 启动 gating：仅 runtime.status === 'ready' 可点；其余分态禁用 + hint。
+ */
+function ModelList() {
+  const models = useLocalModelStore((s) => s.models)
+  const runtime = useLocalModelStore((s) => s.runtime)
+  const startEngine = useLocalModelStore((s) => s.startEngine)
+  const deleteLocalModel = useLocalModelStore((s) => s.deleteLocalModel)
+  const setError = useLocalModelStore((s) => s.setError)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  // 仅 ready 可启动；not-installed/downloading/running/error 均禁用 + 分态 hint
+  const canStart = runtime?.status === 'ready'
+  const startHint =
+    runtime?.status === 'not-installed' ? '先下载运行时'
+    : runtime?.status === 'downloading' ? '运行时下载中…'
+    : runtime?.status === 'running' ? '引擎运行中，先停止'
+    : runtime?.status === 'error' ? '运行时错误，请重试'
+    : '运行时未就绪'
+
+  const handleStart = async (id: string) => {
+    setError(null)
+    setBusyId(id)
+    try { await startEngine(id) } finally { setBusyId(null) }
+  }
+
+  const handleDelete = async (id: string) => {
+    setError(null)
+    setBusyId(id)
+    try { await deleteLocalModel(id) } finally { setBusyId(null) }
+  }
+
+  if (models.length === 0) return null
+
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium text-foreground">本地模型库</p>
+      <div className="space-y-2">
+        {models.map((m) => (
+          <div key={m.id} className="rounded-lg border border-border p-3 text-sm space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-medium text-foreground truncate">{m.name}</div>
+                <div className="text-xs text-muted-foreground truncate">
+                  {m.quantization ? `${m.quantization} · ` : ''}{formatBytes(m.sizeBytes)} · {m.hfRepo}/{m.hfFile}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                {m.status === 'downloaded' && (
+                  <button
+                    onClick={() => void handleStart(m.id)}
+                    disabled={!canStart || busyId === m.id}
+                    title={canStart ? '启动引擎加载此模型' : startHint}
+                    className="flex items-center gap-1 px-2 py-1 bg-primary text-primary-foreground rounded-md text-xs hover:opacity-90 disabled:opacity-50"
+                  >
+                    <Play className="w-3 h-3" />
+                    {busyId === m.id ? '启动中...' : '启动'}
+                  </button>
+                )}
+                {m.status !== 'downloading' && (
+                  <button
+                    onClick={() => void handleDelete(m.id)}
+                    disabled={busyId === m.id}
+                    className="p-1.5 text-muted-foreground hover:text-destructive rounded-md hover:bg-accent/50 transition-colors"
+                    title="删除模型"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {m.status === 'downloaded' && '已就绪'}
+              {m.status === 'downloading' && '下载中（见上方下载进度）'}
+              {m.status === 'error' && '下载失败（可在上方搜索后重新下载）'}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 本地模型 UI 区（引擎卡片 + 手动添加 + HF 搜索 + 下载进度 + 本地模型库）。
  * 挂载生命周期：init() 订阅事件 + 初始三路加载；卸载 dispose() 解绑。
  * R-C 刷新：单一 useEffect 盯 runtime.status 变化 → loadEngines() + getProviders() 刷 providers
  *   （stop → R16 把 provider enabled=0 直写 DB，UI 不刷不可见；运行崩溃 exit → stop → 同样覆盖）。
@@ -468,6 +556,8 @@ export default function LocalModelsSection() {
       <HfSearchPanel />
 
       <DownloadList />
+
+      <ModelList />
     </div>
   )
 }

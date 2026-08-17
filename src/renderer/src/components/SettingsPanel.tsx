@@ -5,8 +5,9 @@ import { useConversationStore } from '../store/conversationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES } from '../../../shared/defaults'
+import LocalModelsSection from './LocalModelsSection'
 
-type SettingsSection = 'moa' | 'providers' | 'proxy' | 'display' | 'pricing' | 'currency' | 'title'
+type SettingsSection = 'moa' | 'providers' | 'proxy' | 'display' | 'pricing' | 'currency' | 'title' | 'local'
 
 export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const { settings, loaded, loadSettings, updateSetting } = useSettingsStore()
@@ -27,6 +28,7 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const sections: { key: SettingsSection; label: string }[] = [
     { key: 'moa', label: 'MoA' },
     { key: 'providers', label: '厂商' },
+    { key: 'local', label: '本地模型' },
     { key: 'proxy', label: '代理服务' },
     { key: 'title', label: '对话标题' },
     { key: 'display', label: '显示设置' },
@@ -302,6 +304,7 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
 
       {/* Title Settings Section */}
       {activeSection === 'title' && <TitleSettingsSection />}
+      {activeSection === 'local' && <LocalModelsSection />}
     </div>
   )
 }
