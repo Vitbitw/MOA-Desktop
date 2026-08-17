@@ -14,6 +14,8 @@
 - **📚 对话历史** — SQLite 持久化存储，搜索、删除、重命名
 - **🌙 暗色主题** — 跟随系统偏好，手动切换可持久化
 - **🔑 API Key 加密** — 使用 electron-store + OS 原生 safeStorage
+- **🧩 本地模型部署** — 内置 llama.cpp 运行时下载、Hugging Face GGUF 搜索下载、模型管理（启动/删除）
+- **🔓 本地推理引擎接入** — 自动探测 LM Studio / Ollama / llama-server，手动添加自定义端点，无需 API Key
 
 ## 技术架构
 
@@ -25,7 +27,7 @@ src/
 │   │   └── server.ts  # /v1/chat/completions, /health, passthrough
 │   ├── db/            # sql.js 持久化
 │   │   ├── database.ts # WASM SQLite 封装 + 自动保存
-│   │   └── schema.ts   # 5 表定义
+│   │   └── schema.ts   # 7 表定义
 │   ├── moa/           # MoA 聚合引擎
 │   │   ├── moaEngine.ts       # 编排器
 │   │   ├── subModelCaller.ts  # 并行子模型调用
@@ -33,13 +35,20 @@ src/
 │   │   └── moaConfig.ts       # 配置持久化
 │   ├── providers/     # 厂商管理
 │   │   └── providerManager.ts # CRUD + 模板 + 模型缓存
-│   └── store/         # 加密 Key 存储 (electron-store)
+│   ├── store/         # 加密 Key 存储 (electron-store)
 │       └── key-store.ts
+│   └── local/         # 本地模型部署
+│       ├── paths.ts           # 路径工具（models 目录）
+│       ├── engineDetector.ts  # 引擎探测（LM Studio / Ollama / llama-server）
+│       ├── localManager.ts    # 本地引擎 + provider 同步
+│       ├── hfHub.ts           # Hugging Face GGUF 搜索
+│       ├── downloadManager.ts # 模型下载 / 进度 / 取消
+│       └── runtimeManager.ts  # 内置运行时下载 / 启动 / 停止
 ├── preload/
-│   └── index.ts       # 12 IPC 桥接 (contextBridge)
+│   └── index.ts       # 32 IPC 调用 + 12 事件订阅 (contextBridge)
 ├── renderer/          # React 18 UI
 │   ├── src/
-│   │   ├── components/  # 8 个 UI 组件
+│   │   ├── components/  # 12 个 UI 组件
 │   │   ├── store/       # Zustand 状态管理
 │   │   └── lib/         # 工具函数
 │   └── index.html
