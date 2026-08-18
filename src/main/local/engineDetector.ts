@@ -71,7 +71,12 @@ export async function probeCustomBaseUrl(baseUrl: string): Promise<DetectedEngin
   }
   return {
     engineType: 'manual',
-    name: (() => { try { return new URL(normalized).hostname || normalized } catch { return normalized } })(),
+    name: (() => {
+      try {
+        const u = new URL(normalized)
+        return `${u.hostname}${u.port ? ':' + u.port : ''}` || normalized
+      } catch { return normalized }
+    })(),
     baseUrl: withV1,
     port: 0,
     reachable: true,

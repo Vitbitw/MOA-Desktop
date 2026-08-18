@@ -25,6 +25,8 @@ let state: RuntimeState = { status: 'not-installed', binaryPath: '' }
 
 /** 启动中标志（RuntimeStatus 无 'starting' 成员，用模块级 boolean 表达）。 */
 let starting = false
+/** 停止请求标志：stop 入口置位、start 入口清零；健康循环每个 await 后二次判（stop-during-start 竞态短路）。 */
+let stopRequested = false
 /** 当前 llama-server 子进程（生命周期锚点）。 */
 let child: ReturnType<typeof spawn> | null = null
 
@@ -46,13 +48,18 @@ export function getRuntimeState(): RuntimeState {
 }
 
 /**
- * 二进制路径的唯一真相（5b 下载目标目录必须调用 path.dirname(bundledBinaryPath())，不许另算）。
- * packaged：process.resourcesPath/runtime/<llama-server[.exe]>（对应 package.json extraResources，5b 补）
+ * 二进制路径的唯一真相（查找语义，非下载目标）：
+ * packaged：先探测 resourcesPath/runtime/<llama-server[.exe]>（extraResources 随包分发，存在则用），
+ *           不存在则回退 userData/runtime/<llama-server[.exe]>（下载兜底落点）
  * dev：userData/runtime/<llama-server[.exe]>（GitHub 下载兜底落点）
+ * 下载目标恒为 RUNTIME_DIR()（ensureRuntime 内不另算）；本函数不得再当下载目标。
  */
 export function bundledBinaryPath(): string {
   const fileName = process.platform === 'win32' ? 'llama-server.exe' : 'llama-server'
-  if (app.isPackaged) return path.join(process.resourcesPath, 'runtime', fileName)
+  if (app.isPackaged) {
+    const packaged = path.join(process.resourcesPath, 'runtime', fileName)
+    if (fs.existsSync(packaged)) return packaged
+  }
   return path.join(RUNTIME_DIR(), fileName)
 }
 
@@ -100,9 +107,10 @@ export async function listRuntimeAssets(): Promise<RuntimeAsset[]> {
   return assets
 }
 
-/** 下载并解压 llama-server 二进制到 bundledBinaryPath() 所在目录（单一真相，不许另算路径）。 */
+/** 下载并解压 llama-server 二进制到 RUNTIME_DIR()（下载目标唯一真相；bundledBinaryPath 仅查找，packaged 预装存在即 ready）。 */
 export async function ensureRuntime(backend = 'cpu'): Promise<RuntimeState> {
   if (state.status === 'downloading') return state
+  // 查找语义：packaged 预装存在（size>0）即 ready，无需下载
   const bin = bundledBinaryPath()
   // 仅 size>0 才算 ready：防上次失败遗留 0 字节/半截二进制被误判
   if (fs.existsSync(bin) && fs.statSync(bin).size > 0) {
@@ -122,7 +130,8 @@ export async function ensureRuntime(backend = 'cpu'): Promise<RuntimeState> {
         ? '未找到匹配平台的 llama-server 资产'
         : '当前平台暂不支持内置运行时自动下载，请手动添加本地引擎')
     }
-    const dir = path.dirname(bin)
+    // 不变式：下载落点恒为 userData/runtime，任何写路径不得指向 resourcesPath（UAC）
+    const dir = RUNTIME_DIR()
     fs.mkdirSync(dir, { recursive: true })
     const zipPath = path.join(dir, asset.name)
     const resp = await fetch(asset.url, {
@@ -162,11 +171,13 @@ export async function ensureRuntime(backend = 'cpu'): Promise<RuntimeState> {
 
     const found = findExecutableInDir(dir)
     if (!found) throw new Error('压缩包内未找到 llama-server 可执行文件')
+    // 落点恒为 RUNTIME_DIR()（不以 bin 为目标：packaged 预装 0 字节残留时 bin 可能指向 resourcesPath）
+    const target = path.join(dir, process.platform === 'win32' ? 'llama-server.exe' : 'llama-server')
     // Windows rename 不覆盖已存在目标（EPERM）：先清陈旧 0 字节/半截 bin 再移动
-    try { fs.unlinkSync(bin) } catch { /* 陈旧目标或不存在，忽略 */ }
-    fs.renameSync(found, bin)
+    try { fs.unlinkSync(target) } catch { /* 陈旧目标或不存在，忽略 */ }
+    fs.renameSync(found, target)
 
-    state = { ...state, status: 'ready', binaryPath: bin, progress: 100 }
+    state = { ...state, status: 'ready', binaryPath: target, progress: 100 }
     broadcast()
     return state
   } catch (err) {
@@ -232,6 +243,8 @@ function getBundledEngineId(): string | null {
  * 5) 失败/崩溃 → error 状态 + 广播，不 throw（handler 层不 catch）
  */
 export async function startBundledEngine(localModelId: string): Promise<RuntimeState> {
+  // 新一轮启动清零 stopRequested（防陈旧标志锁死后续启动；stop-during-start 竞态短路依赖它）
+  stopRequested = false
   // reject-if-busy：starting 标志 + running 状态双条件
   if (starting || state.status === 'running') return { ...state }
   const model = getLocalModelById(localModelId)
@@ -250,23 +263,30 @@ export async function startBundledEngine(localModelId: string): Promise<RuntimeS
       return state
     }
     const port = await findFreePort()
+    // stop-during-start 竞态：findFreePort 窗口内 stop 已置 stopRequested + state=ready，
+    // 必须在此短路（running 写回之前），否则 stop 的 ready 被 running 覆盖
+    if (stopRequested) return state
     state = { ...state, status: 'running', port }
     broadcast()
     // 启动子进程（-m 模型路径为必须参数，否则空载起服务聊不了天）
     child = spawn(bin, ['-m', model.ggufPath, '--host', '127.0.0.1', '--port', String(port)], {
       stdio: ['ignore', 'ignore', 'pipe']
     })
+    // stale exit 校验锚点：stop→start 快速切换后旧进程 exit 不得误杀/清空新 child
+    const pid = child.pid
     // 引流 stderr：Windows 命名管道缓冲填满会阻塞子进程写日志 → 假死
     child.stderr?.on('data', () => {})
     // spawn 启动失败（EACCES/ENOENT/损坏二进制）走 'error' 而非 'exit'：无监听器 = uncaught exception = 主进程崩溃
     child.once('error', (err) => {
       child = null
-      state = { ...state, status: 'error', error: `llama-server 启动失败: ${err.message}` }
+      state = { ...state, status: 'error', error: `llama-server 启动失败: ${err.message}`, port: undefined }
       broadcast()
     })
     // 健康通过 + 注册完成前保持 false：启动期 exit 走「落 error 保留原因」，运行期 exit 才走优雅 stop
     let startedOk = false
     child.once('exit', (code) => {
+      // stale exit 校验：pid 不匹配（child 已指向新进程）时静默返回，不动新 child
+      if (child?.pid !== pid) return
       child = null
       if (startedOk) {
         // 正常运行期意外退出 → 走优雅 stop（R16：禁 provider + 引擎置 stopped）
@@ -283,14 +303,25 @@ export async function startBundledEngine(localModelId: string): Promise<RuntimeS
     const deadline = Date.now() + 30_000
     let healthy = false
     while (Date.now() < deadline) {
-      if (child === null) break // spawn error 已设 error 状态，fail-fast 退出循环
+      // stop-during-start 竞态：每个 await 后二次判（此处覆盖上一轮 sleep 之后）
+      if (child === null || stopRequested) { healthy = false; break }
       try {
         const resp = await fetch(`${rootUrl}/health`, { signal: AbortSignal.timeout(1_000) })
         if (resp.ok) { healthy = true; break }
       } catch { /* 未就绪，重试 */ }
+      // await fetch 后二次判：stop 落在 fetch 窗口时短路
+      if (child === null || stopRequested) { healthy = false; break }
       await new Promise((r) => setTimeout(r, 300))
     }
     if (!healthy) {
+      // stop-during-start 短路（必须早于下方超时 throw）：stop 落在健康循环 await 窗口时
+      // state 已被 stop 置 ready，不短路则下方会因 state!=='error' throw → catch 覆盖成 error
+      if (stopRequested) {
+        // post-stop 定稿（与 stopBundledEngine 一致）：ready + 清 port/error，绝不广播 running/error
+        state = { ...state, status: 'ready', port: undefined, error: undefined }
+        broadcast()
+        return state
+      }
       // 判空：error/exit 监听已把 child 置 null（进程已死），此时 kill 会 null.kill() 抛 TypeError
       if (child) {
         child.kill()
@@ -304,6 +335,12 @@ export async function startBundledEngine(localModelId: string): Promise<RuntimeS
     }
     // 健康通过：此后 exit 才走优雅 stop（startedOk=true 之后无 await，注册段全同步，健康期 exit 不会半途插入）
     startedOk = true
+    // 健康通过段短路：stop 落在最后一次 fetch 成功与注册之间时，不得 upsert 注册/广播 running
+    if (stopRequested) {
+      state = { ...state, status: 'ready', port: undefined, error: undefined }
+      broadcast()
+      return state
+    }
     // 注册 provider：models 的 id 必须用 LocalModel.modelId（推理名，文件名去 .gguf），不是 UUID 主键
     const detected: DetectedEngine = {
       engineType: 'bundled',
@@ -322,7 +359,7 @@ export async function startBundledEngine(localModelId: string): Promise<RuntimeS
     return state
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    state = { ...state, status: 'error', error: msg }
+    state = { ...state, status: 'error', error: msg, port: undefined }
     broadcast()
     return state
   } finally {
@@ -336,6 +373,8 @@ export async function startBundledEngine(localModelId: string): Promise<RuntimeS
  * - post-stop 的 RuntimeState 定稿：status:'ready'、清 port（binaryPath 保留）
  */
 export async function stopBundledEngine(): Promise<RuntimeState> {
+  // 入口置位（在 if (child) 之前）：stop-during-start 竞态短路——健康循环/注册段据此放弃尾段
+  stopRequested = true
   if (child) {
     child.kill()
     child = null
