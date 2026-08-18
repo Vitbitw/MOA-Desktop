@@ -59,6 +59,17 @@ export class Database {
     } catch {
       // Column already exists — ignore
     }
+    // ── 本地模型部署迁移（2026-08）──
+    try {
+      this.exec('ALTER TABLE providers ADD COLUMN kind TEXT NOT NULL DEFAULT \'api\'')
+    } catch {
+      // 列已存在，忽略
+    }
+    try {
+      this.exec('ALTER TABLE providers ADD COLUMN engine_id TEXT')
+    } catch {
+      // 列已存在，忽略
+    }
     // 迁移立即落盘，避免进程退出时丢失结构变更
     this.save()
   }

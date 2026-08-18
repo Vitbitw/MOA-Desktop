@@ -18,11 +18,15 @@ function resolveTitleModel(providerId: string): { baseUrl: string; apiKey: strin
     console.error(`[Title] Provider ${providerId} not found`)
     return null
   }
-  if (!p.apiKey) {
+  if (!p.enabled) {
+    console.error(`[Title] Provider ${p.name} disabled`)
+    return null
+  }
+  if (p.kind !== 'local' && !p.apiKey) {
     console.error(`[Title] Provider ${p.name} has no API key`)
     return null
   }
-  return { baseUrl: p.baseUrl, apiKey: p.apiKey }
+  return { baseUrl: p.baseUrl, apiKey: p.apiKey || '' }
 }
 
 /**

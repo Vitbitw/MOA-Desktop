@@ -12,6 +12,11 @@ import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
 import { generateTitle } from './title/titleGenerator'
 import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
+import { detectLocalEngines, probeCustomBaseUrl } from './local/engineDetector'
+import { searchHfModels } from './local/hfHub'
+import { startDownload, cancelDownload } from './local/downloadManager'
+import { upsertDetectedEngine, listLocalEngines, removeEngine, listLocalModels, deleteLocalModel } from './local/localManager'
+import { getRuntimeState, ensureRuntime, startBundledEngine, stopBundledEngine } from './local/runtimeManager'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -692,6 +697,117 @@ function registerIpcHandlers() {
       return { success: false, error: String(err) }
     }
   })
+
+  // ── Local Model Deployment ──
+  ipcMain.handle(IPC.LOCAL_DETECT_ENGINES, async () => {
+    try {
+      const detected = await detectLocalEngines()
+      for (const d of detected) upsertDetectedEngine(d)
+      return { success: true, data: detected }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_LIST_ENGINES, () => {
+    try {
+      return { success: true, data: listLocalEngines() }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_ADD_MANUAL_ENGINE, async (_e, baseUrl: string) => {
+    try {
+      const detected = await probeCustomBaseUrl(baseUrl)
+      if (!detected) return { success: false, error: '无法连接该地址的 /models 端点' }
+      const { id, created } = upsertDetectedEngine(detected)
+      return { success: true, data: { id, created, detected } }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_REMOVE_ENGINE, (_e, id: string) => {
+    try {
+      removeEngine(id)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_LIST_MODELS, () => {
+    try {
+      return { success: true, data: listLocalModels() }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_SEARCH_HF, async (_e, query: string) => {
+    try {
+      const data = await searchHfModels(query)
+      return { success: true, data }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_START_DOWNLOAD, async (_e, params: { repo: string; file: string; sizeBytes?: number; quantization?: string }) => {
+    try {
+      const result = await startDownload(params)
+      return { success: true, data: result }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_CANCEL_DOWNLOAD, (_e, jobId: string) => {
+    try {
+      cancelDownload(jobId)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_DELETE_MODEL, (_e, id: string) => {
+    try {
+      deleteLocalModel(id)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_GET_RUNTIME, () => {
+    try {
+      return { success: true, data: getRuntimeState() }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_ENSURE_RUNTIME, async (_e, backend?: string) => {
+    try {
+      const state = await ensureRuntime(backend || 'cpu')
+      return { success: true, data: state }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_START_ENGINE, async (_e, localModelId: string) => {
+    // preload 形参 modelId 实际承载 LocalModel.id（UUID 主键），非推理名
+    const state = await startBundledEngine(localModelId)
+    return { success: state.status === 'running', data: state, error: state.error }
+  })
+
+  ipcMain.handle(IPC.LOCAL_STOP_ENGINE, async () => {
+    const state = await stopBundledEngine()
+    return { success: true, data: state }
+  })
 }
 
 app.whenReady().then(async () => {
@@ -727,6 +843,14 @@ app.whenReady().then(async () => {
   // Create window
   createWindow()
 
+  // 后台探测本地引擎（不阻塞启动，失败静默）
+  detectLocalEngines().then((detected) => {
+    for (const d of detected) {
+      try { upsertDetectedEngine(d) } catch { /* 静默 */ }
+    }
+    mainWindow?.webContents.send(IPC_EVENT.LOCAL_ENGINE_STATUS_CHANGED, detected)
+  }).catch(() => { /* 静默 */ })
+
   // 用量悬浮窗：注册「打开用量页」回调；若设置已启用则创建
   setOpenUsageHandler(() => {
     mainWindow?.show()
@@ -756,6 +880,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  stopBundledEngine()
   stopProxyServer()
   getDatabase().flush()
 })

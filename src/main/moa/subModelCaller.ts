@@ -27,12 +27,11 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
   }
 
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`
     const resp = await fetch(`${providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
-      },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs)
     })

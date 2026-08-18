@@ -33,6 +33,21 @@ export const IPC = {
   // Usage Monitoring
   USAGE_GET_SUMMARY: 'usage:getSummary',
   USAGE_GET_TODAY: 'usage:getToday',
+
+  // Local Model Deployment
+  LOCAL_DETECT_ENGINES: 'local:detectEngines',
+  LOCAL_LIST_ENGINES: 'local:listEngines',
+  LOCAL_ADD_MANUAL_ENGINE: 'local:addManualEngine',
+  LOCAL_REMOVE_ENGINE: 'local:removeEngine',
+  LOCAL_LIST_MODELS: 'local:listModels',
+  LOCAL_SEARCH_HF: 'local:searchHf',
+  LOCAL_START_DOWNLOAD: 'local:startDownload',
+  LOCAL_CANCEL_DOWNLOAD: 'local:cancelDownload',
+  LOCAL_DELETE_MODEL: 'local:deleteModel',
+  LOCAL_START_ENGINE: 'local:startEngine',
+  LOCAL_STOP_ENGINE: 'local:stopEngine',
+  LOCAL_GET_RUNTIME: 'local:getRuntime',
+  LOCAL_ENSURE_RUNTIME: 'local:ensureRuntime',
 } as const
 
 export const IPC_EVENT = {
@@ -56,6 +71,10 @@ export const IPC_EVENT = {
 
   // Usage events
   USAGE_UPDATED: 'usage:updated',
+
+  // Local model events
+  LOCAL_ENGINE_STATUS_CHANGED: 'local:engineStatusChanged',
+  LOCAL_DOWNLOAD_PROGRESS: 'local:downloadProgress',
 } as const
 
 export type IPCChannel = (typeof IPC)[keyof typeof IPC]
