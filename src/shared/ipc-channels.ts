@@ -48,6 +48,8 @@ export const IPC = {
   LOCAL_STOP_ENGINE: 'local:stopEngine',
   LOCAL_GET_RUNTIME: 'local:getRuntime',
   LOCAL_ENSURE_RUNTIME: 'local:ensureRuntime',
+  LOCAL_GET_LAUNCH_CONFIG: 'local:getLaunchConfig',
+  LOCAL_SET_LAUNCH_CONFIG: 'local:setLaunchConfig',
 } as const
 
 export const IPC_EVENT = {

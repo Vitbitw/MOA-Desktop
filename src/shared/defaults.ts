@@ -32,6 +32,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
     recording: 'full',
     transparency: 'default'
   },
+  network: {
+    enabled: false,
+    proxyUrl: ''
+  },
   display: {
     subModelShow: 'hidden',
     defaultSubModelExpanded: false,

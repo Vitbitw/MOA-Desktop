@@ -81,6 +81,8 @@ interface MoaAPI {
   stopEngine: () => Promise<{ success: boolean; error?: string }>
   getRuntimeState: () => Promise<{ success: boolean; data: RuntimeState; error?: string }>
   ensureRuntime: (backend?: string) => Promise<{ success: boolean; data: RuntimeState; error?: string }>
+  getLaunchConfig: (modelId: string) => Promise<{ success: boolean; data?: unknown; error?: string }>
+  setLaunchConfig: (modelId: string, config: unknown) => Promise<{ success: boolean; error?: string }>
   onEngineStatusChanged: (callback: (data: unknown) => void) => () => void
   onDownloadProgress: (callback: (data: unknown) => void) => () => void
 }

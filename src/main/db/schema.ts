@@ -87,3 +87,8 @@ CREATE TABLE IF NOT EXISTS local_models (
 
 CREATE INDEX IF NOT EXISTS idx_local_models_status ON local_models(status);
 `
+
+/** ALTER TABLE 迁移语句（幂等，列已存在时 catch 忽略） */
+export const MIGRATIONS = [
+  'ALTER TABLE local_models ADD COLUMN launch_config TEXT'
+]

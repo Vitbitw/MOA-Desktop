@@ -1,4 +1,5 @@
 import type { SubModelOutput } from '../../shared/types'
+import { fetchProxy } from '../local/fetchProxy'
 
 export interface SubModelCallOptions {
   providerBaseUrl: string
@@ -29,7 +30,8 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-    const resp = await fetch(`${providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    // P2-7：统一走 fetchProxy（本地引擎回环直连、云端 provider 可走网络代理）
+    const resp = await fetchProxy(`${providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),

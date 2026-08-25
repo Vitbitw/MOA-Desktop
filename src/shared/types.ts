@@ -63,6 +63,38 @@ export interface DetectedEngine {
 // 注意：LocalModel 禁止 downloadJobId 字段（无 DB 列支撑）
 export type LocalModelStatus = 'downloading' | 'downloaded' | 'error'
 
+/** 模型启动参数（llama-server CLI flags） */
+export interface LaunchConfig {
+  /** GPU 层卸载数量 (-ngl)，默认 99（全部卸载） */
+  gpuLayers: number
+  /** 上下文长度 (-c)，默认 32768 */
+  contextLength: number
+  /** 张量拆分比例 (-ts)，双卡如 "1,0.3"；单卡留空 */
+  tensorSplit?: string
+  /** K cache 量化类型 (--cache-type-k)，默认 "q8_0" */
+  cacheTypeK: string
+  /** V cache 量化类型 (--cache-type-v)，默认 "q8_0" */
+  cacheTypeV: string
+  /** Flash Attention (-fa)，默认 true */
+  flashAttention: boolean
+  /** 启用 Jinja 聊天模板 (--jinja)，默认 true */
+  jinja: boolean
+  /** CPU 线程数 (-t)，0 = 自动 */
+  threads: number
+  /** 额外参数（原样追加） */
+  extraArgs?: string
+}
+
+export const DEFAULT_LAUNCH_CONFIG: LaunchConfig = {
+  gpuLayers: 99,
+  contextLength: 32768,
+  cacheTypeK: 'q8_0',
+  cacheTypeV: 'q8_0',
+  flashAttention: true,
+  jinja: true,
+  threads: 0,
+}
+
 export interface LocalModel {
   id: string
   /** 显示名（repo 名 + 文件名） */
@@ -78,6 +110,8 @@ export interface LocalModel {
   quantization?: string
   status: LocalModelStatus
   createdAt: number
+  /** 启动参数（JSON），null = 用默认值 */
+  launchConfig?: LaunchConfig | null
 }
 
 // ─── Download job（渲染端进度展示用，主进程内存态）───
@@ -105,6 +139,8 @@ export interface RuntimeState {
   progress?: number
   error?: string
   backend?: string
+  /** 当前正在由 bundled 引擎加载运行的 LocalModel.id（用于 UI 禁用删除等） */
+  runningModelId?: string
 }
 
 // ─── Hugging Face 搜索返回（全仓统一类型，hfHub.ts 直接 import 它）───
@@ -227,6 +263,13 @@ export interface AppSettings {
     proxyKey: string
     recording: 'full' | 'stats'
     transparency: 'default' | 'extended'
+  }
+  /** 网络代理：所有主进程外发请求（运行时下载/HF 搜索/引擎探测）走此代理 */
+  network: {
+    /** 是否启用网络代理 */
+    enabled: boolean
+    /** 代理地址，如 http://127.0.0.1:7897 */
+    proxyUrl: string
   }
   display: {
     subModelShow: 'always' | 'hidden' | 'perConversation'

@@ -70,6 +70,12 @@ export class Database {
     } catch {
       // 列已存在，忽略
     }
+    // ── launch_config 列迁移（2026-08）──
+    try {
+      this.exec('ALTER TABLE local_models ADD COLUMN launch_config TEXT')
+    } catch {
+      // 列已存在，忽略
+    }
     // 迁移立即落盘，避免进程退出时丢失结构变更
     this.save()
   }
@@ -112,7 +118,10 @@ export class Database {
     this.ensureInit()
     try {
       const data = this.db!.export()
-      fs.writeFileSync(this.dbPath, Buffer.from(data))
+      // 原子写：先写临时文件再 rename，避免写盘中途崩溃/被杀损坏主 DB
+      const tmpPath = `${this.dbPath}.tmp`
+      fs.writeFileSync(tmpPath, Buffer.from(data))
+      fs.renameSync(tmpPath, this.dbPath)
     } catch (err) {
       console.error('[DB] Save failed:', err)
     }

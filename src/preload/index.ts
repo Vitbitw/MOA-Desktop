@@ -130,28 +130,30 @@ contextBridge.exposeInMainWorld('moaAPI', {
   },
 
   // Local Model Deployment
-  detectLocalEngines: () => ipcRenderer.invoke('local:detectEngines'),
-  listLocalEngines: () => ipcRenderer.invoke('local:listEngines'),
-  addManualEngine: (baseUrl: string) => ipcRenderer.invoke('local:addManualEngine', baseUrl),
-  removeLocalEngine: (id: string) => ipcRenderer.invoke('local:removeEngine', id),
-  listLocalModels: () => ipcRenderer.invoke('local:listModels'),
-  searchHf: (query: string) => ipcRenderer.invoke('local:searchHf', query),
+  detectLocalEngines: () => ipcRenderer.invoke(IPC.LOCAL_DETECT_ENGINES),
+  listLocalEngines: () => ipcRenderer.invoke(IPC.LOCAL_LIST_ENGINES),
+  addManualEngine: (baseUrl: string) => ipcRenderer.invoke(IPC.LOCAL_ADD_MANUAL_ENGINE, baseUrl),
+  removeLocalEngine: (id: string) => ipcRenderer.invoke(IPC.LOCAL_REMOVE_ENGINE, id),
+  listLocalModels: () => ipcRenderer.invoke(IPC.LOCAL_LIST_MODELS),
+  searchHf: (query: string) => ipcRenderer.invoke(IPC.LOCAL_SEARCH_HF, query),
   startDownload: (params: { repo: string; file: string; sizeBytes?: number; quantization?: string }) =>
-    ipcRenderer.invoke('local:startDownload', params),
-  cancelDownload: (jobId: string) => ipcRenderer.invoke('local:cancelDownload', jobId),
-  deleteLocalModel: (id: string) => ipcRenderer.invoke('local:deleteModel', id),
-  startEngine: (modelId: string) => ipcRenderer.invoke('local:startEngine', modelId),
-  stopEngine: () => ipcRenderer.invoke('local:stopEngine'),
-  getRuntimeState: () => ipcRenderer.invoke('local:getRuntime'),
-  ensureRuntime: (backend?: string) => ipcRenderer.invoke('local:ensureRuntime', backend),
+    ipcRenderer.invoke(IPC.LOCAL_START_DOWNLOAD, params),
+  cancelDownload: (jobId: string) => ipcRenderer.invoke(IPC.LOCAL_CANCEL_DOWNLOAD, jobId),
+  deleteLocalModel: (id: string) => ipcRenderer.invoke(IPC.LOCAL_DELETE_MODEL, id),
+  startEngine: (modelId: string) => ipcRenderer.invoke(IPC.LOCAL_START_ENGINE, modelId),
+  stopEngine: () => ipcRenderer.invoke(IPC.LOCAL_STOP_ENGINE),
+  getRuntimeState: () => ipcRenderer.invoke(IPC.LOCAL_GET_RUNTIME),
+  ensureRuntime: (backend?: string) => ipcRenderer.invoke(IPC.LOCAL_ENSURE_RUNTIME, backend),
+  getLaunchConfig: (modelId: string) => ipcRenderer.invoke(IPC.LOCAL_GET_LAUNCH_CONFIG, modelId),
+  setLaunchConfig: (modelId: string, config: unknown) => ipcRenderer.invoke(IPC.LOCAL_SET_LAUNCH_CONFIG, modelId, config),
   onEngineStatusChanged: (callback: (data: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
-    ipcRenderer.on('local:engineStatusChanged', handler)
-    return () => ipcRenderer.removeListener('local:engineStatusChanged', handler)
+    ipcRenderer.on(IPC_EVENT.LOCAL_ENGINE_STATUS_CHANGED, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.LOCAL_ENGINE_STATUS_CHANGED, handler)
   },
   onDownloadProgress: (callback: (data: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
-    ipcRenderer.on('local:downloadProgress', handler)
-    return () => ipcRenderer.removeListener('local:downloadProgress', handler)
+    ipcRenderer.on(IPC_EVENT.LOCAL_DOWNLOAD_PROGRESS, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.LOCAL_DOWNLOAD_PROGRESS, handler)
   }
 })

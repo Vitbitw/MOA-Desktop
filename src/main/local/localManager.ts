@@ -1,8 +1,9 @@
 import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { getDatabase } from '../db/database'
-import { cancelDownloadByModel } from './downloadManager'
-import type { DetectedEngine, LocalEngine, LocalEngineStatus, LocalEngineType, LocalModel } from '../../shared/types'
+import { cancelDownloadByRowId } from './downloadManager'
+import type { DetectedEngine, LocalEngine, LocalEngineStatus, LocalEngineType, LocalModel, LaunchConfig } from '../../shared/types'
+import { DEFAULT_LAUNCH_CONFIG } from '../../shared/types'
 
 interface EngineRow {
   id: string; name: string; engine_type: string; base_url: string; binary_path: string | null
@@ -113,10 +114,14 @@ export function removeEngine(id: string): void {
 interface LocalModelRow {
   id: string; name: string; model_id: string; gguf_path: string; size_bytes: number
   downloaded_bytes: number; hf_repo: string; hf_file: string; quantization: string | null
-  status: string; created_at: number
+  status: string; created_at: number; launch_config: string | null
 }
 
 function rowToLocalModel(row: LocalModelRow): LocalModel {
+  let launchConfig: LaunchConfig | null = null
+  if (row.launch_config) {
+    try { launchConfig = JSON.parse(row.launch_config) as LaunchConfig } catch { /* 解析失败用默认 */ }
+  }
   return {
     id: row.id,
     name: row.name,
@@ -128,7 +133,8 @@ function rowToLocalModel(row: LocalModelRow): LocalModel {
     hfFile: row.hf_file,
     quantization: row.quantization || undefined,
     status: row.status as LocalModel['status'],
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    launchConfig
   }
 }
 
@@ -141,12 +147,33 @@ export function getLocalModelById(id: string): LocalModel | null {
   return row ? rowToLocalModel(row) : null
 }
 
+/** 设置模型的启动参数（覆盖已有配置） */
+export function setLaunchConfig(modelId: string, config: LaunchConfig): void {
+  getDatabase().exec(
+    'UPDATE local_models SET launch_config = ? WHERE id = ?',
+    [JSON.stringify(config), modelId]
+  )
+}
+
+/** 获取模型的启动参数，无配置时返回默认值 */
+export function getLaunchConfig(modelId: string): LaunchConfig {
+  const row = getDatabase().queryOne<{ launch_config: string | null }>(
+    'SELECT launch_config FROM local_models WHERE id = ?', [modelId]
+  )
+  if (row?.launch_config) {
+    try { return { ...DEFAULT_LAUNCH_CONFIG, ...JSON.parse(row.launch_config) as LaunchConfig } } catch { /* 用默认 */ }
+  }
+  return { ...DEFAULT_LAUNCH_CONFIG }
+}
+
 export function deleteLocalModel(id: string): void {
   const model = getLocalModelById(id)
   if (!model) return
-  // 若正在下载：取消活动任务（按 modelId 定位）
-  cancelDownloadByModel(model.modelId)
-  // 删除磁盘文件（.gguf 与 .part）
+  // 若正在下载:按 DB 行 id 取消活动任务(精确锚点,跨 repo 同名文件不误伤)
+  cancelDownloadByRowId(id)
+  // 删除磁盘文件（.gguf 与 .part）。
+  // 注:若下载流尚在关闭中,.part unlink 可能 EBUSY 失败——下载任务的 catch 分支
+  // 会在流关闭后再次 unlink,最终一致。
   try { if (model.ggufPath && fs.existsSync(model.ggufPath)) fs.unlinkSync(model.ggufPath) } catch { /* 忽略 */ }
   try { if (fs.existsSync(`${model.ggufPath}.part`)) fs.unlinkSync(`${model.ggufPath}.part`) } catch { /* 忽略 */ }
   getDatabase().exec('DELETE FROM local_models WHERE id = ?', [id])

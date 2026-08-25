@@ -44,7 +44,13 @@
       "output": "dist"
     },
     "extraResources": [
-      { "from": "runtime/", "to": "runtime/", "filter": ["llama-server*"] }
+      {
+        "from": "runtime/",
+        "to": "runtime/",
+        "filter": [
+          "llama-server*"
+        ]
+      }
     ],
     "win": {
       "target": [

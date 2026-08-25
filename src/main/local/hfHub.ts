@@ -1,11 +1,12 @@
 import type { HfSearchResult } from '../../shared/types'
+import { fetchProxy } from './fetchProxy'
 
 const HF_API = 'https://huggingface.co/api'
 
 /** 搜索 GGUF 模型仓库。 */
 export async function searchHfModels(query: string, limit = 20): Promise<HfSearchResult[]> {
   const url = `${HF_API}/models?search=${encodeURIComponent(query)}&filter=gguf&limit=${limit}`
-  const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) })
+  const resp = await fetchProxy(url, { signal: AbortSignal.timeout(15_000) })
   if (!resp.ok) throw new Error(`HF 搜索失败: HTTP ${resp.status}`)
   const body = (await resp.json()) as Array<{
     id: string; downloads?: number; likes?: number; siblings?: Array<{ rfilename: string; size?: number }>
@@ -29,7 +30,7 @@ export async function searchHfModels(query: string, limit = 20): Promise<HfSearc
 /** 枚举单个 repo 的 GGUF 文件（tree API，recursive）。 */
 export async function listRepoGgufFiles(repo: string): Promise<Array<{ filename: string; sizeBytes: number }>> {
   const url = `${HF_API}/models/${repo}/tree/main?recursive=true`
-  const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) })
+  const resp = await fetchProxy(url, { signal: AbortSignal.timeout(15_000) })
   if (!resp.ok) throw new Error(`HF 文件列表失败: HTTP ${resp.status}`)
   const body = (await resp.json()) as Array<{ path?: string; size?: number; type?: string }>
   return (body || [])
@@ -42,8 +43,9 @@ export function buildDownloadUrl(repo: string, filename: string): string {
   return `https://huggingface.co/${repo}/resolve/main/${filename.split('/').map(encodeURIComponent).join('/')}`
 }
 
-/** 从文件名解析量化名（Q4_K_M / Q8_0 / F16 等）。 */
+/** 从文件名解析量化名（Q4_K_M / Q8_0 / F16 等；兼容小写文件名，i 忽略大小写）。 */
 export function parseQuantization(filename: string): string | undefined {
-  const m = filename.match(/(Q\d+_[A-Z0-9]+|F16|F32|IQ\d+_[A-Z0-9]+)/i)
+  // [A-Z0-9_] 需含下划线：否则 q4_k_m 会被截断成 Q4_K（_ 不在字符类内导致提前停止）
+  const m = filename.match(/(Q\d+_[A-Z0-9_]+|F16|F32|IQ\d+_[A-Z0-9_]+)/i)
   return m?.[0]?.toUpperCase()
 }

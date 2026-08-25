@@ -14,9 +14,11 @@ import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
 import { detectLocalEngines, probeCustomBaseUrl } from './local/engineDetector'
 import { searchHfModels } from './local/hfHub'
-import { startDownload, cancelDownload } from './local/downloadManager'
+import { startDownload, cancelDownload, cleanupOrphanPartFiles } from './local/downloadManager'
 import { upsertDetectedEngine, listLocalEngines, removeEngine, listLocalModels, deleteLocalModel } from './local/localManager'
 import { getRuntimeState, ensureRuntime, startBundledEngine, stopBundledEngine } from './local/runtimeManager'
+import { getLaunchConfig, setLaunchConfig } from './local/localManager'
+import { invalidateProxyCache } from './local/fetchProxy'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -313,6 +315,11 @@ function registerIpcHandlers() {
         'INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES (\'app_settings\', ?, ?)',
         [JSON.stringify(current), Date.now()]
       )
+
+      // ── 网络代理变更 → 清除代理缓存 ──
+      if (key === 'network') {
+        invalidateProxyCache()
+      }
 
       // ── 桌面用量悬浮窗开关联动 ──
       if (key === 'display') {
@@ -774,6 +781,11 @@ function registerIpcHandlers() {
 
   ipcMain.handle(IPC.LOCAL_DELETE_MODEL, (_e, id: string) => {
     try {
+      // P1-2：正在由 bundled 引擎加载运行的模型禁止删除（文件被进程占用 + 删除后 DB/文件/引擎状态不一致）
+      const rt = getRuntimeState()
+      if (rt.status === 'running' && rt.runningModelId === id) {
+        return { success: false, error: '模型正在运行，请先停止引擎后再删除' }
+      }
       deleteLocalModel(id)
       return { success: true }
     } catch (err) {
@@ -808,6 +820,24 @@ function registerIpcHandlers() {
     const state = await stopBundledEngine()
     return { success: true, data: state }
   })
+
+  ipcMain.handle(IPC.LOCAL_GET_LAUNCH_CONFIG, async (_e, modelId: string) => {
+    try {
+      const config = getLaunchConfig(modelId)
+      return { success: true, data: config }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.LOCAL_SET_LAUNCH_CONFIG, async (_e, modelId: string, config: unknown) => {
+    try {
+      setLaunchConfig(modelId, config as import('../shared/types').LaunchConfig)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
 }
 
 app.whenReady().then(async () => {
@@ -841,6 +871,11 @@ app.whenReady().then(async () => {
   createApplicationMenu()
 
   // Create window
+  // 清理孤儿 .part 文件须在 createWindow 之前完成——渲染进程加载后可能立刻发起下载，
+  // 若清理在后且慢于下载登记，理论上有把新下载误判为 stale 的窗口（审查修复：时序）
+  try { cleanupOrphanPartFiles() } catch (err) {
+    console.error('[Main] 清理孤儿 .part 文件失败:', err)
+  }
   createWindow()
 
   // 后台探测本地引擎（不阻塞启动，失败静默）

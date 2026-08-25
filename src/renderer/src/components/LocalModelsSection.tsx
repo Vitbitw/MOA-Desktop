@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react'
-import { Plus, RefreshCw, Trash2, Download, Square, X, Search, Ban, Play } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Download, Square, X, Search, Ban, Play, Settings2, ChevronDown, ChevronUp } from 'lucide-react'
 import { useLocalModelStore } from '../store/localModelStore'
 import { useConfigStore } from '../store/configStore'
-import type { LocalEngine } from '../../../shared/types'
+import type { LocalEngine, LaunchConfig } from '../../../shared/types'
+import { DEFAULT_LAUNCH_CONFIG } from '../../../shared/types'
 
 /**
  * 内置运行时卡（llama.cpp / bundled）。
@@ -21,7 +22,7 @@ function RuntimeCard() {
   const handleEnsure = async () => {
     setError(null)
     setBusy(true)
-    try { await ensureRuntime() } finally { setBusy(false) }
+    try { await ensureRuntime('vulkan') } finally { setBusy(false) }
   }
 
   const handleStop = async () => {
@@ -45,7 +46,7 @@ function RuntimeCard() {
           className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-md text-xs font-medium hover:opacity-90 disabled:opacity-50"
         >
           <Download className="w-3.5 h-3.5" />
-          {busy ? '处理中...' : '下载运行时'}
+          {busy ? '处理中...' : '下载运行时 (Vulkan)'}
         </button>
       )}
 
@@ -327,13 +328,162 @@ function DownloadList() {
   )
 }
 
+/** 启动参数编辑器（可折叠） */
+function LaunchConfigEditor({ modelId }: { modelId: string }) {
+  const getLaunchConfig = useLocalModelStore((s) => s.getLaunchConfig)
+  const setLaunchConfig = useLocalModelStore((s) => s.setLaunchConfig)
+  const setError = useLocalModelStore((s) => s.setError)
+  const [expanded, setExpanded] = useState(false)
+  const [config, setConfig] = useState<LaunchConfig>({ ...DEFAULT_LAUNCH_CONFIG })
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    if (!expanded || loaded) return
+    void getLaunchConfig(modelId).then((c) => { setConfig(c); setLoaded(true) })
+  }, [expanded, loaded, modelId, getLaunchConfig])
+
+  const update = (patch: Partial<LaunchConfig>) => setConfig((c) => ({ ...c, ...patch }))
+
+  const handleSave = async () => {
+    setError(null)
+    await setLaunchConfig(modelId, config)
+    setExpanded(false)
+  }
+
+  const handleReset = () => setConfig({ ...DEFAULT_LAUNCH_CONFIG })
+
+  if (!expanded) {
+    return (
+      <button
+        onClick={() => setExpanded(true)}
+        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <Settings2 className="w-3 h-3" />
+        启动参数
+      </button>
+    )
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-muted/30 p-2.5 space-y-2 text-xs">
+      <div className="flex items-center justify-between">
+        <span className="font-medium text-foreground">启动参数</span>
+        <button onClick={() => setExpanded(false)} className="p-0.5 text-muted-foreground hover:text-foreground">
+          <ChevronUp className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      {/* GPU 层数 */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-muted-foreground whitespace-nowrap">GPU 层卸载 (-ngl)</label>
+        <input
+          type="number" min={0} max={999}
+          value={config.gpuLayers}
+          onChange={(e) => update({ gpuLayers: Number(e.target.value) || 0 })}
+          className="w-20 rounded border border-input bg-background px-2 py-0.5 text-right text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+      {/* 上下文长度 */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-muted-foreground whitespace-nowrap">上下文长度 (-c)</label>
+        <select
+          value={config.contextLength}
+          onChange={(e) => update({ contextLength: Number(e.target.value) })}
+          className="w-28 rounded border border-input bg-background px-2 py-0.5 text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        >
+          <option value={4096}>4K</option>
+          <option value={8192}>8K</option>
+          <option value={16384}>16K</option>
+          <option value={32768}>32K</option>
+          <option value={65536}>64K</option>
+          <option value={131072}>128K</option>
+          <option value={262144}>262K</option>
+        </select>
+      </div>
+      {/* KV cache 量化 */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-muted-foreground whitespace-nowrap">KV Cache 量化</label>
+        <div className="flex gap-1">
+          <select
+            value={config.cacheTypeK}
+            onChange={(e) => update({ cacheTypeK: e.target.value, cacheTypeV: e.target.value })}
+            className="rounded border border-input bg-background px-2 py-0.5 text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          >
+            <option value="f16">fp16 (无损)</option>
+            <option value="q8_0">q8_0 (近无损)</option>
+            <option value="q4_0">q4_0 (省显存)</option>
+          </select>
+        </div>
+      </div>
+      {/* 张量拆分 */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-muted-foreground whitespace-nowrap">张量拆分 (-ts)</label>
+        <input
+          type="text" placeholder="如 1,0.3 (留空=单卡)"
+          value={config.tensorSplit || ''}
+          onChange={(e) => update({ tensorSplit: e.target.value || undefined })}
+          className="w-32 rounded border border-input bg-background px-2 py-0.5 text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+      {/* CPU 线程 */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-muted-foreground whitespace-nowrap">CPU 线程 (-t, 0=自动)</label>
+        <input
+          type="number" min={0} max={128}
+          value={config.threads}
+          onChange={(e) => update({ threads: Number(e.target.value) || 0 })}
+          className="w-20 rounded border border-input bg-background px-2 py-0.5 text-right text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+      {/* 开关组 */}
+      <div className="flex items-center gap-4">
+        <label className="flex items-center gap-1 cursor-pointer">
+          <input
+            type="checkbox" checked={config.flashAttention}
+            onChange={(e) => update({ flashAttention: e.target.checked })}
+            className="rounded accent-primary"
+          />
+          <span className="text-muted-foreground">Flash Attention</span>
+        </label>
+        <label className="flex items-center gap-1 cursor-pointer">
+          <input
+            type="checkbox" checked={config.jinja}
+            onChange={(e) => update({ jinja: e.target.checked })}
+            className="rounded accent-primary"
+          />
+          <span className="text-muted-foreground">Jinja 模板</span>
+        </label>
+      </div>
+      {/* 额外参数 */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-muted-foreground whitespace-nowrap">额外参数</label>
+        <input
+          type="text" placeholder="如 --mlock --no-mmap"
+          value={config.extraArgs || ''}
+          onChange={(e) => update({ extraArgs: e.target.value || undefined })}
+          className="flex-1 rounded border border-input bg-background px-2 py-0.5 text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+      {/* 操作按钮 */}
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          onClick={() => void handleSave()}
+          className="px-2.5 py-1 bg-primary text-primary-foreground rounded-md text-xs font-medium hover:opacity-90"
+        >
+          保存
+        </button>
+        <button
+          onClick={handleReset}
+          className="px-2.5 py-1 border border-border rounded-md text-xs text-muted-foreground hover:text-foreground"
+        >
+          恢复默认
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /**
  * 本地模型列表区（已下载 GGUF 库）。
- * 数据源 = store.models（local_models 库）；运行中信号活在 runtime（RuntimeState），不在模型行——
- *   startEngine 成功后模型行保持 'downloaded'，禁止启动时改模型行状态。
- * 启动链路 = handleStart(m.id) → 动作内发起引擎启动——wire 实参 = LocalModel.id（UUID 主键），绝不传推理名！
- * 删除 = deleteLocalModel(id) 仅用于 downloaded/error 行；downloading 行走上方进度区取消（cancelDownload）。
- * 启动 gating：仅 runtime.status === 'ready' 可点；其余分态禁用 + hint。
  */
 function ModelList() {
   const models = useLocalModelStore((s) => s.models)
@@ -343,7 +493,6 @@ function ModelList() {
   const setError = useLocalModelStore((s) => s.setError)
   const [busyId, setBusyId] = useState<string | null>(null)
 
-  // 仅 ready 可启动；not-installed/downloading/running/error 均禁用 + 分态 hint
   const canStart = runtime?.status === 'ready'
   const startHint =
     runtime?.status === 'not-installed' ? '先下载运行时'
@@ -351,7 +500,6 @@ function ModelList() {
     : runtime?.status === 'running' ? '引擎运行中，先停止'
     : runtime?.status === 'error' ? '运行时错误，请重试'
     : '运行时未就绪'
-
   const handleStart = async (id: string) => {
     setError(null)
     setBusyId(id)
@@ -370,7 +518,10 @@ function ModelList() {
     <div className="space-y-2">
       <p className="text-sm font-medium text-foreground">本地模型库</p>
       <div className="space-y-2">
-        {models.map((m) => (
+        {models.map((m) => {
+          // P1-2：正在由 bundled 引擎加载的模型禁止删除（IPC 侧同样拦截）
+          const isRunningThis = runtime?.status === 'running' && runtime.runningModelId === m.id
+          return (
           <div key={m.id} className="rounded-lg border border-border p-3 text-sm space-y-1.5">
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
@@ -394,9 +545,9 @@ function ModelList() {
                 {m.status !== 'downloading' && (
                   <button
                     onClick={() => void handleDelete(m.id)}
-                    disabled={busyId === m.id}
-                    className="p-1.5 text-muted-foreground hover:text-destructive rounded-md hover:bg-accent/50 transition-colors"
-                    title="删除模型"
+                    disabled={busyId === m.id || isRunningThis}
+                    className="p-1.5 text-muted-foreground hover:text-destructive rounded-md hover:bg-accent/50 transition-colors disabled:opacity-40 disabled:hover:text-muted-foreground disabled:hover:bg-transparent"
+                    title={isRunningThis ? '模型正在运行，请先停止引擎' : '删除模型'}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -404,12 +555,14 @@ function ModelList() {
               </div>
             </div>
             <div className="text-xs text-muted-foreground">
-              {m.status === 'downloaded' && '已就绪'}
+              {m.status === 'downloaded' && (isRunningThis ? '运行中（需先停止引擎才能删除）' : '已就绪')}
               {m.status === 'downloading' && '下载中（见上方下载进度）'}
               {m.status === 'error' && '下载失败（可在上方搜索后重新下载）'}
             </div>
+            {m.status === 'downloaded' && <LaunchConfigEditor modelId={m.id} />}
           </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )

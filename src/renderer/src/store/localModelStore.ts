@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { LocalEngine, LocalModel, DownloadProgress, HfSearchResult, RuntimeState } from '../../../shared/types'
+import type { LocalEngine, LocalModel, DownloadProgress, HfSearchResult, RuntimeState, LaunchConfig } from '../../../shared/types'
+import { DEFAULT_LAUNCH_CONFIG } from '../../../shared/types'
 
 interface LocalModelState {
   engines: LocalEngine[]
@@ -28,6 +29,8 @@ interface LocalModelState {
   startEngine: (modelId: string) => Promise<void>
   stopEngine: () => Promise<void>
   ensureRuntime: (backend?: string) => Promise<void>
+  getLaunchConfig: (modelId: string) => Promise<LaunchConfig>
+  setLaunchConfig: (modelId: string, config: LaunchConfig) => Promise<void>
   setError: (msg: string | null) => void
 }
 
@@ -240,6 +243,23 @@ export const useLocalModelStore = create<LocalModelState>((set, get) => ({
       const res = await window.moaAPI.ensureRuntime(backend)
       if (res.success) set({ runtime: res.data })
       else set({ error: String(res.error || '运行时就绪失败') })
+    } catch (err) {
+      set({ error: String(err) })
+    }
+  },
+
+  getLaunchConfig: async (modelId: string) => {
+    try {
+      const res = await window.moaAPI.getLaunchConfig(modelId)
+      if (res.success) return res.data as LaunchConfig
+    } catch { /* 用默认 */ }
+    return { ...DEFAULT_LAUNCH_CONFIG }
+  },
+
+  setLaunchConfig: async (modelId: string, config: LaunchConfig) => {
+    try {
+      const res = await window.moaAPI.setLaunchConfig(modelId, config)
+      if (!res.success) set({ error: String(res.error || '保存启动配置失败') })
     } catch (err) {
       set({ error: String(err) })
     }

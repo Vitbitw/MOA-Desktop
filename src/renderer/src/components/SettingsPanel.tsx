@@ -7,7 +7,7 @@ import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings } f
 import { BUILT_IN_PROVIDER_TEMPLATES } from '../../../shared/defaults'
 import LocalModelsSection from './LocalModelsSection'
 
-type SettingsSection = 'moa' | 'providers' | 'proxy' | 'display' | 'pricing' | 'currency' | 'title' | 'local'
+type SettingsSection = 'moa' | 'providers' | 'proxy' | 'network' | 'display' | 'pricing' | 'currency' | 'title' | 'local'
 
 export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const { settings, loaded, loadSettings, updateSetting } = useSettingsStore()
@@ -30,6 +30,7 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
     { key: 'providers', label: '厂商' },
     { key: 'local', label: '本地模型' },
     { key: 'proxy', label: '代理服务' },
+    { key: 'network', label: '网络代理' },
     { key: 'title', label: '对话标题' },
     { key: 'display', label: '显示设置' },
     { key: 'pricing', label: '定价覆盖' },
@@ -167,6 +168,30 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
                 </select>
               </SettingRow>
             </>
+          )}
+        </div>
+      )}
+
+      {/* Network Proxy Section */}
+      {activeSection === 'network' && (
+        <div className="space-y-5 max-w-xl">
+          <SettingRow label="启用网络代理" hint="通过代理服务器访问外部网络（运行时下载、HuggingFace 搜索等）">
+            <ToggleSwitch
+              checked={settings.network?.enabled ?? false}
+              onChange={(v) => updateSetting('network', { ...settings.network, enabled: v, proxyUrl: settings.network?.proxyUrl ?? '' })}
+            />
+          </SettingRow>
+
+          {settings.network?.enabled && (
+            <SettingRow label="代理地址" hint="如 http://127.0.0.1:7897">
+              <input
+                type="text"
+                value={settings.network?.proxyUrl ?? ''}
+                onChange={(e) => updateSetting('network', { ...settings.network, enabled: true, proxyUrl: e.target.value })}
+                placeholder="http://127.0.0.1:7897"
+                className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground"
+              />
+            </SettingRow>
           )}
         </div>
       )}

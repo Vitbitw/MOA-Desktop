@@ -3,6 +3,7 @@ import { getDatabase } from '../db/database'
 import { getProviderKey, saveProviderKey, removeProviderKey } from '../store/key-store'
 import type { Provider, ModelInfo, ProviderKind } from '../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES } from '../../shared/defaults'
+import { fetchProxy } from '../local/fetchProxy'
 
 export function getAllProviders(): Provider[] {
   const rows = getDatabase().query<{
@@ -56,7 +57,8 @@ export async function fetchAndCacheModels(providerId: string): Promise<ModelInfo
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
-    const resp = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}/models`, {
+    // P2-7：统一走 fetchProxy（本地引擎回环直连、云端 provider 可走网络代理）
+    const resp = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}/models`, {
       headers,
       signal: AbortSignal.timeout(10_000)
     })
