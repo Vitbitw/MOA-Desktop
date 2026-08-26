@@ -22,7 +22,7 @@ function resolveTitleModel(providerId: string): { baseUrl: string; apiKey: strin
     console.error(`[Title] Provider ${p.name} disabled`)
     return null
   }
-  if (p.kind !== 'local' && !p.apiKey) {
+  if (!p.apiKey) {
     console.error(`[Title] Provider ${p.name} has no API key`)
     return null
   }

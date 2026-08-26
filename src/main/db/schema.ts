@@ -5,9 +5,7 @@ CREATE TABLE IF NOT EXISTS providers (
   base_url    TEXT NOT NULL,
   model_list  TEXT NOT NULL DEFAULT '[]',
   enabled     INTEGER NOT NULL DEFAULT 1,
-  created_at  INTEGER NOT NULL,
-  kind        TEXT NOT NULL DEFAULT 'api',
-  engine_id   TEXT
+  created_at  INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -58,37 +56,4 @@ CREATE TABLE IF NOT EXISTS moa_config (
   value TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS local_engines (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  engine_type TEXT NOT NULL,
-  base_url    TEXT NOT NULL,
-  binary_path TEXT,
-  port        INTEGER,
-  status      TEXT NOT NULL DEFAULT 'stopped',
-  version     TEXT,
-  created_at  INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS local_models (
-  id               TEXT PRIMARY KEY,
-  name             TEXT NOT NULL,
-  model_id         TEXT NOT NULL,
-  gguf_path        TEXT NOT NULL,
-  size_bytes       INTEGER NOT NULL DEFAULT 0,
-  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
-  hf_repo          TEXT NOT NULL,
-  hf_file          TEXT NOT NULL,
-  quantization     TEXT,
-  status           TEXT NOT NULL DEFAULT 'downloaded',
-  created_at       INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_local_models_status ON local_models(status);
 `
-
-/** ALTER TABLE 迁移语句（幂等，列已存在时 catch 忽略） */
-export const MIGRATIONS = [
-  'ALTER TABLE local_models ADD COLUMN launch_config TEXT'
-]

@@ -12,12 +12,6 @@ import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
 import { generateTitle } from './title/titleGenerator'
 import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
-import { detectLocalEngines, probeCustomBaseUrl } from './local/engineDetector'
-import { searchHfModels } from './local/hfHub'
-import { startDownload, cancelDownload, cleanupOrphanPartFiles } from './local/downloadManager'
-import { upsertDetectedEngine, listLocalEngines, removeEngine, listLocalModels, deleteLocalModel } from './local/localManager'
-import { getRuntimeState, ensureRuntime, startBundledEngine, stopBundledEngine } from './local/runtimeManager'
-import { getLaunchConfig, setLaunchConfig } from './local/localManager'
 import { invalidateProxyCache } from './local/fetchProxy'
 
 let mainWindow: BrowserWindow | null = null
@@ -705,140 +699,7 @@ function registerIpcHandlers() {
     }
   })
 
-  // ── Local Model Deployment ──
-  ipcMain.handle(IPC.LOCAL_DETECT_ENGINES, async () => {
-    try {
-      const detected = await detectLocalEngines()
-      for (const d of detected) upsertDetectedEngine(d)
-      return { success: true, data: detected }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_LIST_ENGINES, () => {
-    try {
-      return { success: true, data: listLocalEngines() }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_ADD_MANUAL_ENGINE, async (_e, baseUrl: string) => {
-    try {
-      const detected = await probeCustomBaseUrl(baseUrl)
-      if (!detected) return { success: false, error: '无法连接该地址的 /models 端点' }
-      const { id, created } = upsertDetectedEngine(detected)
-      return { success: true, data: { id, created, detected } }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_REMOVE_ENGINE, (_e, id: string) => {
-    try {
-      removeEngine(id)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_LIST_MODELS, () => {
-    try {
-      return { success: true, data: listLocalModels() }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_SEARCH_HF, async (_e, query: string) => {
-    try {
-      const data = await searchHfModels(query)
-      return { success: true, data }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_START_DOWNLOAD, async (_e, params: { repo: string; file: string; sizeBytes?: number; quantization?: string }) => {
-    try {
-      const result = await startDownload(params)
-      return { success: true, data: result }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_CANCEL_DOWNLOAD, (_e, jobId: string) => {
-    try {
-      cancelDownload(jobId)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_DELETE_MODEL, (_e, id: string) => {
-    try {
-      // P1-2：正在由 bundled 引擎加载运行的模型禁止删除（文件被进程占用 + 删除后 DB/文件/引擎状态不一致）
-      const rt = getRuntimeState()
-      if (rt.status === 'running' && rt.runningModelId === id) {
-        return { success: false, error: '模型正在运行，请先停止引擎后再删除' }
-      }
-      deleteLocalModel(id)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_GET_RUNTIME, () => {
-    try {
-      return { success: true, data: getRuntimeState() }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_ENSURE_RUNTIME, async (_e, backend?: string) => {
-    try {
-      const state = await ensureRuntime(backend || 'cpu')
-      return { success: true, data: state }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_START_ENGINE, async (_e, localModelId: string) => {
-    // preload 形参 modelId 实际承载 LocalModel.id（UUID 主键），非推理名
-    const state = await startBundledEngine(localModelId)
-    return { success: state.status === 'running', data: state, error: state.error }
-  })
-
-  ipcMain.handle(IPC.LOCAL_STOP_ENGINE, async () => {
-    const state = await stopBundledEngine()
-    return { success: true, data: state }
-  })
-
-  ipcMain.handle(IPC.LOCAL_GET_LAUNCH_CONFIG, async (_e, modelId: string) => {
-    try {
-      const config = getLaunchConfig(modelId)
-      return { success: true, data: config }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.LOCAL_SET_LAUNCH_CONFIG, async (_e, modelId: string, config: unknown) => {
-    try {
-      setLaunchConfig(modelId, config as import('../shared/types').LaunchConfig)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-}
+  }
 
 app.whenReady().then(async () => {
   // Init database
@@ -871,20 +732,7 @@ app.whenReady().then(async () => {
   createApplicationMenu()
 
   // Create window
-  // 清理孤儿 .part 文件须在 createWindow 之前完成——渲染进程加载后可能立刻发起下载，
-  // 若清理在后且慢于下载登记，理论上有把新下载误判为 stale 的窗口（审查修复：时序）
-  try { cleanupOrphanPartFiles() } catch (err) {
-    console.error('[Main] 清理孤儿 .part 文件失败:', err)
-  }
   createWindow()
-
-  // 后台探测本地引擎（不阻塞启动，失败静默）
-  detectLocalEngines().then((detected) => {
-    for (const d of detected) {
-      try { upsertDetectedEngine(d) } catch { /* 静默 */ }
-    }
-    mainWindow?.webContents.send(IPC_EVENT.LOCAL_ENGINE_STATUS_CHANGED, detected)
-  }).catch(() => { /* 静默 */ })
 
   // 用量悬浮窗：注册「打开用量页」回调；若设置已启用则创建
   setOpenUsageHandler(() => {
@@ -915,7 +763,6 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
-  stopBundledEngine()
   stopProxyServer()
   getDatabase().flush()
 })

@@ -9,33 +9,31 @@ import { fetchProxy } from '../local/fetchProxy'
 
 let server: Server | null = null
 
-/** 可参与直连路由的 provider（enabled 且有 key，或本地引擎行）。 */
+/** 可参与直连路由的 provider（enabled 且有 API key）。 */
 function usableProviders(): Provider[] {
-  return getAllProviders().filter((p) => p.enabled && (p.apiKey || p.kind === 'local'))
+  return getAllProviders().filter((p) => p.enabled && p.apiKey)
 }
 
-/** Find first enabled provider (API key or local endpoint) for direct passthrough. */
-function firstUsableProvider(): { baseUrl: string; apiKey: string; isLocal: boolean; models: Provider['models'] } | null {
+/** Find first enabled provider for direct passthrough. */
+function firstUsableProvider(): { baseUrl: string; apiKey: string; models: Provider['models'] } | null {
   const p = usableProviders()[0]
   if (!p) return null
-  return { baseUrl: p.baseUrl, apiKey: p.apiKey || '', isLocal: p.kind === 'local', models: p.models }
+  return { baseUrl: p.baseUrl, apiKey: p.apiKey, models: p.models }
 }
 
 /**
  * 按请求的 model 名选择 provider（直连模式智能路由）。
- * 多 provider 共存（云端 + 本地）时，第三方客户端经代理请求本地模型名，
- * 必须路由到本地引擎而非「第一个 enabled」的云端——否则本地部署不可达。
  * 返回 null 表示无精确匹配，调用方回落 firstUsableProvider。
  */
-function findProviderForModel(model: string): { baseUrl: string; apiKey: string; isLocal: boolean; models: Provider['models'] } | null {
+function findProviderForModel(model: string): { baseUrl: string; apiKey: string; models: Provider['models'] } | null {
   if (!model) return null
   const p = usableProviders().find((prov) => prov.models.some((m) => m.id === model))
   if (!p) return null
-  return { baseUrl: p.baseUrl, apiKey: p.apiKey || '', isLocal: p.kind === 'local', models: p.models }
+  return { baseUrl: p.baseUrl, apiKey: p.apiKey, models: p.models }
 }
 
 /** 直连模式选路由：优先按 model 精确匹配，回落第一个可用 provider。 */
-function routeForRequest(model: string | undefined): { baseUrl: string; apiKey: string; isLocal: boolean; models: Provider['models'] } | null {
+function routeForRequest(model: string | undefined): { baseUrl: string; apiKey: string; models: Provider['models'] } | null {
   return (model && findProviderForModel(model)) || firstUsableProvider()
 }
 
@@ -90,13 +88,12 @@ export function createProxyServer(): Express {
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
-        // model 归一：本地引擎单模型服务对 model 名敏感（空串/未知名可能 404）——
-        // 请求名不在该 provider 模型列表时回落到其第一个模型；云端透传原名
+        // 请求名不在该 provider 模型列表时回落到其第一个模型；否则透传原名
         let upstreamModel = requestedModel || ''
-        if (provider.isLocal && !provider.models.some((m) => m.id === upstreamModel)) {
+        if (!provider.models.some((m) => m.id === upstreamModel)) {
           upstreamModel = provider.models[0]?.id || upstreamModel
         }
-        // P2-7：上游请求统一走 fetchProxy（本地引擎回环地址自动直连，云端 provider 可走网络代理）
+        // 上游请求统一走 fetchProxy（本地回环地址自动直连，云端 provider 可走网络代理）
         const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
           method: 'POST',
           headers,
@@ -258,9 +255,7 @@ export function createProxyServer(): Express {
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
-        // R15：本地 provider 的 baseUrl 已含 /v1，避免双 /v1
-        const endpointPath = provider.isLocal ? endpoint.replace(/^\/v1/, '') : endpoint
-        const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}${endpointPath}`, {
+        const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}${endpoint}`, {
           method: 'POST',
           headers,
           body: JSON.stringify(req.body)

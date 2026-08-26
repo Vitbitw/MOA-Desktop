@@ -35,7 +35,6 @@ function resolveSubModels(subModels: SubModelConfig[]): Array<{
   providerBaseUrl: string
   apiKey: string
   modelId: string
-  isLocal: boolean
   enabled: boolean
 }> {
   const providers = getAllProviders()
@@ -45,10 +44,9 @@ function resolveSubModels(subModels: SubModelConfig[]): Array<{
       providerBaseUrl: p?.baseUrl || '',
       apiKey: p?.apiKey || '',
       modelId: sm.modelId,
-      isLocal: p?.kind === 'local',
       enabled: p?.enabled !== false
     }
-  }).filter((sm) => sm.providerBaseUrl && sm.enabled && (sm.isLocal || sm.apiKey))
+  }).filter((sm) => sm.providerBaseUrl && sm.enabled && sm.apiKey)
 }
 
 /** Resolve aggregator model config to { baseUrl, apiKey, modelId } or null. */
@@ -61,7 +59,7 @@ function resolveAggregator(aggregator: AggregatorConfig): {
   const p = providers.find((prov) => prov.id === aggregator.primaryProviderId)
   if (!p) return null
   if (!p.enabled) return null
-  if (p.kind !== 'local' && !p.apiKey) return null
+  if (!p.apiKey) return null
   return {
     providerBaseUrl: p.baseUrl,
     apiKey: p.apiKey || '',
