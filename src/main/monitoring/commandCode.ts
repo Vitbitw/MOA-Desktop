@@ -24,7 +24,6 @@ const API_BASE = 'https://api.commandcode.ai'
 const SESSION_TOKEN_NAME = '__Secure-commandcode_prod_.session_token'
 /** 登录窗使用的独立 session partition（隔离登录态，不污染主窗口会话） */
 const LOGIN_PARTITION = 'persist:commandcode'
-const REQUEST_TIMEOUT_MS = 15_000
 
 let loginWin: BrowserWindow | null = null
 
@@ -187,15 +186,10 @@ async function ccGet(path: string, opts: { token?: string; apiKey?: string }): P
   if (opts.token) headers['Cookie'] = `${SESSION_TOKEN_NAME}=${opts.token}`
   if (opts.apiKey) headers['Authorization'] = `Bearer ${opts.apiKey}`
 
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
-  try {
-    const resp = await fetchProxy(`${API_BASE}${path}`, { headers, signal: ctrl.signal })
-    const body = await resp.json().catch(() => null)
-    return { status: resp.status, body }
-  } finally {
-    clearTimeout(timer)
-  }
+  // 超时与重试统一由 fetchProxy 处理（配置见「云端用量监控」页的 API 请求设置）
+  const resp = await fetchProxy(`${API_BASE}${path}`, { headers })
+  const body = await resp.json().catch(() => null)
+  return { status: resp.status, body }
 }
 
 // ─── 防御性解析 ───

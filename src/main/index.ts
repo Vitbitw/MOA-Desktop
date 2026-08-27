@@ -14,6 +14,7 @@ import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
 import { invalidateProxyCache } from './local/fetchProxy'
 import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
+import { loginToMimo, refreshMimoUsage } from './monitoring/mimo'
 import { saveUsageCredential } from './store/key-store'
 import type { RemoteUsageSource } from '../shared/types'
 
@@ -734,7 +735,10 @@ function registerIpcHandlers() {
 
   ipcMain.handle(IPC.MONITOR_LOGIN, async (_e, source: RemoteUsageSource) => {
     try {
-      const result = await loginToCommandCode(source, mainWindow)
+      const result =
+        source.type === 'mimo'
+          ? await loginToMimo(source, mainWindow)
+          : await loginToCommandCode(source, mainWindow)
       return { success: true, data: result }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -761,7 +765,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
     try {
-      const result = await refreshCommandCodeUsage(source)
+      const result = source.type === 'mimo' ? await refreshMimoUsage(source) : await refreshCommandCodeUsage(source)
       if (result.ok) {
         return { success: true, data: result.data }
       }

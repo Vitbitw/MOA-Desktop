@@ -19,7 +19,7 @@ export const DEFAULT_TITLE_SETTINGS = {
   language: 'auto' as const
 }
 
-/** 云端用量监控默认配置：预置一个启用的 Command Code 源 */
+/** 云端用量监控默认配置：预置启用的 Command Code 与 Xiaomi MiMo 源 */
 export const DEFAULT_MONITORING: MonitoringSettings = {
   sources: [
     {
@@ -27,6 +27,13 @@ export const DEFAULT_MONITORING: MonitoringSettings = {
       type: 'commandcode',
       name: 'Command Code 云端',
       studioUrl: 'https://commandcode.ai/studio',
+      enabled: true
+    },
+    {
+      id: 'mimo',
+      type: 'mimo',
+      name: 'Xiaomi MiMo',
+      studioUrl: 'https://platform.xiaomimimo.com/console/plan-manage',
       enabled: true
     }
   ],
@@ -48,7 +55,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   network: {
     enabled: false,
-    proxyUrl: ''
+    proxyUrl: '',
+    timeoutMs: 15_000,
+    retryCount: 2
   },
   display: {
     subModelShow: 'hidden',

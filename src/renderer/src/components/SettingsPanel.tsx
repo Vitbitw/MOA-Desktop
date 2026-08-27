@@ -191,6 +191,40 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
               />
             </SettingRow>
           )}
+
+          <SettingRow label="请求超时" hint="单次外发 API 请求等待上限（秒），0 = 不限制；超时或网络错误后自动重试">
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={Math.round((settings.network?.timeoutMs ?? 15_000) / 1000)}
+              onChange={(e) => {
+                const sec = Number(e.target.value)
+                updateSetting('network', {
+                  ...settings.network,
+                  timeoutMs: Number.isFinite(sec) && sec >= 0 ? Math.round(sec * 1000) : 0
+                })
+              }}
+              className="w-28 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            />
+          </SettingRow>
+
+          <SettingRow label="重试次数" hint="超时/网络错误后的自动重试次数（不含首次请求）。POST 类请求不按状态码重试，避免重复计费">
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={settings.network?.retryCount ?? 2}
+              onChange={(e) => {
+                const n = Number(e.target.value)
+                updateSetting('network', {
+                  ...settings.network,
+                  retryCount: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+                })
+              }}
+              className="w-28 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            />
+          </SettingRow>
         </div>
       )}
 

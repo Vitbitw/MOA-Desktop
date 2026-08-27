@@ -423,31 +423,141 @@ async function fetchOnce(
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+/** 幂等方法下可安全重试的状态码：429、5xx（服务端瞬时故障） */
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504])
+
+/** GET/HEAD/OPTIONS 幂等，可对 5xx 状态码自动重试；POST 等非幂等请求只对「未收到响应」的错误重试，避免重复计费 */
+function isIdempotentMethod(method?: string): boolean {
+  const m = (method ?? 'GET').toUpperCase()
+  return m === 'GET' || m === 'HEAD' || m === 'OPTIONS'
+}
+
+/** 读取 DB 中 network.timeoutMs / network.retryCount（同步，sql.js 内存库） */
+function getApiRequestConfig(): { timeoutMs: number; retryCount: number } {
+  const DEFAULT_TIMEOUT_MS = 15_000
+  const DEFAULT_RETRY_COUNT = 2
+  try {
+    const row = getDatabase().queryOne<{ value: string }>(
+      "SELECT value FROM moa_config WHERE key = 'app_settings'"
+    )
+    if (!row?.value) return { timeoutMs: DEFAULT_TIMEOUT_MS, retryCount: DEFAULT_RETRY_COUNT }
+    const settings = JSON.parse(row.value)
+    const network = settings?.network
+    const timeoutMs =
+      typeof network?.timeoutMs === 'number' && Number.isFinite(network.timeoutMs) && network.timeoutMs >= 0
+        ? network.timeoutMs
+        : DEFAULT_TIMEOUT_MS
+    const retryCount =
+      typeof network?.retryCount === 'number' && Number.isFinite(network.retryCount) && network.retryCount >= 0
+        ? Math.floor(network.retryCount)
+        : DEFAULT_RETRY_COUNT
+    return { timeoutMs, retryCount }
+  } catch {
+    return { timeoutMs: DEFAULT_TIMEOUT_MS, retryCount: DEFAULT_RETRY_COUNT }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 /**
- * 代理感知 fetch,自动跟随重定向(最多 5 跳)。
- *
- * 关键:直连模式 undici 原生跟随重定向,但手写代理路径不会——
- * HF `resolve` 下载链与 GitHub `browser_download_url` 均为 302 → CDN,
+ * 单次尝试：跟随重定向（最多 maxRedirects 跳），不做超时/重试。
+ * 直连模式 undici 原生跟随重定向，但手写代理路径不会——
+ * HF `resolve` 下载链与 GitHub `browser_download_url` 均为 302 → CDN，
  * 不跟随则代理模式下下载全部失败(302 被当失败状态)。此处统一在封装层补齐。
+ */
+async function fetchFollowRedirects(
+  url: string | URL,
+  init?: RequestInit,
+  maxRedirects = 5
+): Promise<Response> {
+  let current: string | URL = url
+  let lastResp: Response | null = null
+  for (let hops = 0; hops <= maxRedirects; hops++) {
+    const resp = await fetchOnce(current, init)
+    lastResp = resp
+    if (REDIRECT_STATUSES.has(resp.status)) {
+      const loc = resp.headers.get('location')
+      if (loc) {
+        // 释放重定向响应体再跳转
+        try { await resp.body?.cancel() } catch { /* ignore */ }
+        current = new URL(loc, current).toString()
+        continue
+      }
+    }
+    return resp
+  }
+  // 重定向跳数超限：返回最后一个 3xx 响应（语义与旧实现一致，交由上层处理）
+  return lastResp!
+}
+
+/**
+ * 代理感知 fetch，自动跟随重定向（最多 5 跳）并支持超时 + 自动重试。
+ *
+ * 超时重试语义（配置见 app_settings.network，UI 在「云端用量监控」页）：
+ *  - 超时：单次尝试的等待时长上限（timeoutMs，默认 15s，0 = 不限制），覆盖连接 + 首字节
+ *  - 重试：timeoutMs/网络错误/代理失败 → 自动重试（重试次数 = retryCount，默认 2）
+ *  - GET/HEAD 额外对 429/5xx 响应重试；POST 等非幂等请求不按状态码重试（避免重复计费）
+ *  - 调用方若自带 signal（如 AbortSignal.timeout），则视为调用方自行管理超时预算，
+ *    本层不再套用全局 timeoutMs 硬超时；调用方主动取消 → 立即抛错、不重试
  */
 export async function fetchProxy(
   url: string | URL,
   init?: RequestInit,
   maxRedirects = 5
 ): Promise<Response> {
-  const resp = await fetchOnce(url, init)
-  if (maxRedirects > 0 && REDIRECT_STATUSES.has(resp.status)) {
-    const loc = resp.headers.get('location')
-    if (loc) {
-      // 释放重定向响应体再跳转
-      try { await resp.body?.cancel() } catch { /* ignore */ }
-      const next = new URL(loc, url).toString()
-      // 同一 init(signal/headers 含 Range)透传到目标地址,断点续传语义保持
-      return fetchProxy(next, init, maxRedirects - 1)
+  const { timeoutMs, retryCount } = getApiRequestConfig()
+  const callerSignal = init?.signal
+  const maxAttempts = Math.max(1, retryCount + 1)
+
+  let lastError: Error | null = null
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (callerSignal?.aborted) throw new Error('The operation was aborted')
+    // 重试前短暂退避（300ms 起指数增长，封顶 1.5s）
+    if (attempt > 1) await sleep(Math.min(1500, 300 * 2 ** (attempt - 2)))
+
+    const attemptCtrl = new AbortController()
+    let timedOut = false
+    const onCallerAbort = () => attemptCtrl.abort()
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true })
+
+    // 调用方自带信号 → 不叠加全局硬超时（尊重其自身的超时预算）
+    let timer: ReturnType<typeof setTimeout> | undefined
+    if (!callerSignal && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true
+        attemptCtrl.abort()
+      }, timeoutMs)
+    }
+
+    try {
+      const resp = await fetchFollowRedirects(url, { ...init, signal: attemptCtrl.signal }, maxRedirects)
+      if (
+        isIdempotentMethod(init?.method) &&
+        RETRYABLE_STATUSES.has(resp.status) &&
+        attempt < maxAttempts
+      ) {
+        try { await resp.body?.cancel() } catch { /* ignore */ }
+        console.warn(`[Network] HTTP ${resp.status}，将重试（第 ${attempt}/${maxAttempts} 次尝试）: ${String(url)}`)
+        continue
+      }
+      return resp
+    } catch (err) {
+      // 调用方主动取消（含其自带 timeout 到期）→ 原样抛出、不重试
+      if (callerSignal?.aborted) throw err instanceof Error ? err : new Error(String(err))
+      lastError = err instanceof Error ? err : new Error(String(err))
+      if (attempt < maxAttempts) {
+        console.warn(`[Network] ${timedOut ? '请求超时' : '请求失败'}，将重试（第 ${attempt}/${maxAttempts} 次尝试）: ${lastError.message}`)
+      }
+    } finally {
+      clearTimeout(timer)
+      callerSignal?.removeEventListener('abort', onCallerAbort)
     }
   }
-  return resp
+
+  throw lastError ?? new Error(`请求失败: ${String(url)}`)
 }
 
 /**

@@ -5,6 +5,7 @@ import { formatCost } from '../lib/usageFormat'
 import { ExternalLink, KeyRound, Loader2, LogOut, RefreshCw } from 'lucide-react'
 import type {
   CommandCodeUsage,
+  MimoUsage,
   MonitorStatus,
   MonitorErrorCode,
   RemoteUsageSource,
@@ -80,13 +81,12 @@ function StatCard({ label, value }: { label: string; value: string }) {
   )
 }
 
-// ─── 主组件 ───
+// ─── 面板：Command Code 云端用量 ───
 
-export default function CloudMonitorView() {
+function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const settings = useSettingsStore((s) => s.settings)
   const currency = settings.currency
-  const source: RemoteUsageSource | undefined = settings.monitoring?.sources?.find((s) => s.enabled)
-  const sourceId = source?.id ?? ''
+  const sourceId = source.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(null)
   const [usage, setUsage] = useState<CommandCodeUsage | null>(null)
@@ -126,7 +126,7 @@ export default function CloudMonitorView() {
     try {
       const res = await window.moaAPI.monitorRefresh(source)
       if (res.success && res.data) {
-        setUsage(res.data)
+        setUsage(res.data as CommandCodeUsage)
         setLastFetchedAt(res.data.fetchedAt)
       } else {
         const code = res.code ?? 'unknown'
@@ -226,23 +226,13 @@ export default function CloudMonitorView() {
   }
 
   // ── 渲染 ──
-  if (!source) {
-    return (
-      <div className="flex-1 overflow-y-auto p-4">
-        <div className="rounded-lg border border-border bg-card px-6 py-12 text-center text-sm text-muted-foreground">
-          未配置云端用量监控源，请先在设置中添加
-        </div>
-      </div>
-    )
-  }
-
   const windowsAvailable = usage?.sourcesAvailable.windows ?? false
   const summary = usage?.summary
   const credits = usage?.credits
   const models = usage?.models ?? []
 
   return (
-    <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+    <div className="flex flex-col gap-4">
       {/* 顶部：源信息 + 操作 */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
@@ -460,6 +450,345 @@ export default function CloudMonitorView() {
             </div>
           </section>
         </>
+      )}
+    </div>
+  )
+}
+
+// ─── 面板：Xiaomi MiMo 云端用量 ───
+
+const MIMO_PLAN_LABELS: Record<string, string> = {
+  plan_total_token: '套餐积分',
+  compensation_total_token: '补偿积分'
+}
+
+/** Credit 原值（1e8 = 1 亿）转「亿 Credits」展示 */
+function fmtYi(v: number): string {
+  return `${(v / 1e8).toFixed(2)} 亿`
+}
+
+function MimoPanel({ source }: { source: RemoteUsageSource }) {
+  const settings = useSettingsStore((s) => s.settings)
+  const sourceId = source.id
+
+  const [status, setStatus] = useState<MonitorStatus | null>(null)
+  const [usage, setUsage] = useState<MimoUsage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
+  const [loggingIn, setLoggingIn] = useState(false)
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // 始终指向最新的 refresh，避免定时器闭包持旧函数
+  const refreshRef = useRef<() => Promise<void>>(async () => {})
+  useEffect(() => {
+    refreshRef.current = refresh
+  })
+
+  const loggedIn = status?.loggedIn ?? false
+
+  // ── 数据加载 ──
+  const loadStatus = async () => {
+    try {
+      const res = await window.moaAPI.getMonitorStatus(sourceId)
+      if (res.success && res.data) setStatus(res.data)
+    } catch {
+      // 状态读取失败不阻塞页面
+    }
+  }
+
+  const refresh = async () => {
+    if (loading) return
+    setLoading(true)
+    setError(null)
+    setErrorCode(null)
+    try {
+      const res = await window.moaAPI.monitorRefresh(source)
+      if (res.success && res.data) {
+        setUsage(res.data as MimoUsage)
+        setLastFetchedAt(res.data.fetchedAt)
+      } else {
+        const code = res.code ?? 'unknown'
+        setErrorCode(code)
+        if (code === 'not_authenticated') {
+          setStatus((s) => (s ? { ...s, loggedIn: false } : s))
+          setError('登录状态已失效，请重新登录')
+        } else if (code === 'session_expired') {
+          setError('登录已过期（Cookie 约 24h 有效），请重新登录')
+        } else {
+          setError(res.error || '拉取用量数据失败')
+          if (code === 'network') {
+            setError('拉取用量数据失败（网络不通）。若处于受限网络，请在「设置 → 网络代理」中开启代理后重试')
+          }
+        }
+      }
+    } catch (err) {
+      setErrorCode('network')
+      setError(err instanceof Error ? err.message : '拉取用量数据失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 挂载：读取状态；已登录则拉一次数据
+  useEffect(() => {
+    loadStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId])
+
+  useEffect(() => {
+    if (status?.loggedIn && usage == null) {
+      refresh()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.loggedIn, usage == null])
+
+  // 自动刷新定时器（经 refreshRef 调用最新 refresh）
+  useEffect(() => {
+    const minutes = settings.monitoring?.autoRefreshMinutes ?? 0
+    if (!autoRefresh || !loggedIn || minutes <= 0) return
+    timerRef.current = setInterval(() => {
+      refreshRef.current()
+    }, minutes * 60_000)
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRefresh, loggedIn, settings.monitoring?.autoRefreshMinutes])
+
+  // ── 动作 ──
+  const handleLogin = async () => {
+    setLoggingIn(true)
+    try {
+      const res = await window.moaAPI.monitorLogin(source)
+      const inner = res.data
+      if (res.success && inner?.success) {
+        setError(null)
+        setErrorCode(null)
+        await loadStatus()
+        refresh()
+      }
+      // cancelled → 用户关闭登录窗，静默
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '登录失败')
+    } finally {
+      setLoggingIn(false)
+    }
+  }
+
+  const handleLogout = async () => {
+    try {
+      await window.moaAPI.monitorLogout(sourceId)
+    } catch {
+      // 忽略
+    }
+    setStatus({ loggedIn: false, hasApiKey: false })
+    setUsage(null)
+    setError(null)
+    setErrorCode(null)
+  }
+
+  // ── 渲染 ──
+  const balance = usage?.balance
+  const tokenPlan = usage?.tokenPlan
+  const balSym = balance?.currency === 'USD' ? '$' : '¥'
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* 顶部：源信息 + 操作 */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-base font-bold text-foreground flex items-center gap-2">
+            {source.name}
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${loggedIn ? 'bg-green-500' : 'bg-muted'}`}
+              title={loggedIn ? '已登录' : '未登录'}
+            />
+          </h2>
+          <a
+            href={source.studioUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => {
+              e.preventDefault()
+              window.open(source.studioUrl, '_blank', 'noopener')
+            }}
+            className="text-xs text-muted-foreground inline-flex items-center gap-1 hover:text-foreground mt-0.5"
+          >
+            {source.studioUrl} <ExternalLink className="w-3 h-3" />
+          </a>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {lastFetchedAt && (
+            <span className="text-xs text-muted-foreground">上次刷新 {fmtTime(lastFetchedAt)}</span>
+          )}
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+              className="accent-primary"
+            />
+            自动刷新（{settings.monitoring?.autoRefreshMinutes ?? 10} 分钟）
+          </label>
+          <button
+            onClick={refresh}
+            disabled={loading || !loggedIn}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border bg-card text-foreground hover:bg-accent disabled:opacity-50 transition-colors"
+          >
+            {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            刷新
+          </button>
+          {loggedIn ? (
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/40 transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" /> 退出登录
+            </button>
+          ) : (
+            <button
+              onClick={handleLogin}
+              disabled={loggingIn}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            >
+              {loggingIn && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              登录 Xiaomi MiMo
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 错误提示 */}
+      {error && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive flex items-center justify-between gap-3">
+          <span>{error}</span>
+          {(errorCode === 'session_expired' || errorCode === 'not_authenticated') && (
+            <button onClick={handleLogin} className="underline whitespace-nowrap">
+              重新登录
+            </button>
+          )}
+          {errorCode === 'network' && (
+            <button onClick={refresh} className="underline whitespace-nowrap">
+              重试
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 未登录空态 */}
+      {!loggedIn && (
+        <div className="rounded-lg border border-border bg-card px-6 py-14 flex flex-col items-center gap-3">
+          <p className="text-sm text-muted-foreground">
+            尚未登录 Xiaomi MiMo。登录后将展示账户余额与 Token Plan 套餐用量。
+          </p>
+          <button
+            onClick={handleLogin}
+            disabled={loggingIn}
+            className="flex items-center gap-2 px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          >
+            {loggingIn && <Loader2 className="w-4 h-4 animate-spin" />}
+            登录
+          </button>
+        </div>
+      )}
+
+      {/* 已登录：数据区 */}
+      {loggedIn && loading && !usage && (
+        <div className="flex-1 flex items-center justify-center py-20 text-sm text-muted-foreground">
+          <Loader2 className="w-4 h-4 animate-spin mr-2" /> 正在拉取用量数据…
+        </div>
+      )}
+
+      {loggedIn && usage && (
+        <>
+          {/* 账户余额 */}
+          <section>
+            <h3 className="text-xs font-semibold text-muted-foreground mb-2">账户余额</h3>
+            {balance ? (
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <div className="rounded-lg border border-border bg-card px-4 py-3">
+                  <div className="text-xs text-muted-foreground mb-1">总余额</div>
+                  <div className="text-2xl font-bold tabular-nums text-foreground">
+                    {balSym}
+                    {balance.balance.toFixed(2)}
+                  </div>
+                </div>
+                <StatCard label="现金余额" value={`${balSym}${balance.cashBalance.toFixed(2)}`} />
+                <StatCard label="赠送余额" value={`${balSym}${balance.giftBalance.toFixed(2)}`} />
+                <StatCard label="冻结金额" value={`${balSym}${balance.frozenBalance.toFixed(2)}`} />
+                <StatCard label="透支额度" value={`${balSym}${balance.overdraftLimit.toFixed(2)}`} />
+                <StatCard label="剩余透支额度" value={`${balSym}${balance.remainingOverdraftLimit.toFixed(2)}`} />
+              </div>
+            ) : (
+              <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+                暂无余额数据
+              </div>
+            )}
+          </section>
+
+          {/* Token Plan 套餐 */}
+          <section>
+            <h3 className="text-xs font-semibold text-muted-foreground mb-2">Token Plan 套餐</h3>
+            <div className="rounded-lg border border-border bg-card divide-y divide-border overflow-hidden">
+              {tokenPlan && tokenPlan.items.length > 0 ? (
+                tokenPlan.items.map((it) => {
+                  const label = MIMO_PLAN_LABELS[it.name] ?? it.name
+                  const pct = Math.min(100, it.percent)
+                  return (
+                    <div key={it.name} className="px-4 py-3">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-sm font-medium text-foreground">{label}</span>
+                        <span className="text-xs text-muted-foreground tabular-nums">{Math.round(pct)}% 已用</span>
+                      </div>
+                      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                        <div className={`h-full rounded-full ${barColor(pct)}`} style={{ width: `${pct}%` }} />
+                      </div>
+                      <div className="mt-1.5 text-xs text-muted-foreground tabular-nums">
+                        已用 {fmtYi(it.used)} / 总量 {fmtYi(it.limit)} · 剩余 {fmtYi(Math.max(it.limit - it.used, 0))} Credits
+                      </div>
+                    </div>
+                  )
+                })
+              ) : (
+                <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+                  暂无 Token Plan 数据（可能未订阅套餐或接口暂无返回）
+                </div>
+              )}
+            </div>
+          </section>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── 云监控容器：按启用的监控源渲染对应面板 ───
+
+export default function CloudMonitorView() {
+  const settings = useSettingsStore((s) => s.settings)
+  const sources = settings.monitoring?.sources?.filter((s) => s.enabled) ?? []
+
+  if (sources.length === 0) {
+    return (
+      <div className="flex-1 overflow-y-auto p-4">
+        <div className="rounded-lg border border-border bg-card px-6 py-12 text-center text-sm text-muted-foreground">
+          未配置云端用量监控源，请先在设置中添加
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-6">
+      {sources.map((src) =>
+        src.type === 'mimo' ? (
+          <MimoPanel key={src.id} source={src} />
+        ) : (
+          <CommandCodePanel key={src.id} source={src} />
+        )
       )}
     </div>
   )

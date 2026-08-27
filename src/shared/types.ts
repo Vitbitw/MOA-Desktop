@@ -107,6 +107,10 @@ export interface AppSettings {
     enabled: boolean
     /** 代理地址，如 http://127.0.0.1:7897 */
     proxyUrl: string
+    /** 单次外发请求超时（毫秒），0 = 不超时。仅对未自带超时信号(AbortSignal.timeout)的调用生效 */
+    timeoutMs: number
+    /** 超时/网络错误后的最大重试次数（不含首次请求） */
+    retryCount: number
   }
   display: {
     subModelShow: 'always' | 'hidden' | 'perConversation'
@@ -152,9 +156,9 @@ export interface UsageRow { key: string; requests: number; success: number; prom
 export interface UsageSummary { range: UsageRange; groupBy: UsageGroupBy; totals: { requests: number; success: number; prompt: number; completion: number; cost: number }; rows: UsageRow[] }
 export interface UsageToday { prompt: number; completion: number; cost: number; running: boolean }
 
-// ─── Cloud Usage Monitoring (Command Code) ───
-/** 云端用量监控源类型（当前仅支持 Command Code，后续可扩展） */
-export type RemoteUsageSourceType = 'commandcode'
+// ─── Cloud Usage Monitoring (Command Code / Xiaomi MiMo) ───
+/** 云端用量监控源类型（当前支持 Command Code 与 Xiaomi MiMo，后续可扩展） */
+export type RemoteUsageSourceType = 'commandcode' | 'mimo'
 
 /** 一个云端用量监控源（如 Command Code Studio 账号） */
 export interface RemoteUsageSource {
@@ -205,3 +209,42 @@ export interface MonitorStatus {
 
 /** monitor:refresh 失败时的错误码 */
 export type MonitorErrorCode = 'not_authenticated' | 'session_expired' | 'network' | 'unknown'
+
+// ─── Xiaomi MiMo 用量 ───
+
+/** MiMo 账户余额（CNY，/api/v1/balance data 结构） */
+export interface MimoBalance {
+  currency: string
+  balance: number
+  cashBalance: number
+  giftBalance: number
+  frozenBalance: number
+  overdraftLimit: number
+  remainingOverdraftLimit: number
+}
+
+/** MiMo Token Plan 用量条目（如 plan_total_token / compensation_total_token） */
+export interface MimoTokenPlanItem {
+  name: string
+  used: number
+  limit: number
+  /** 已用百分比 0-100 */
+  percent: number
+}
+
+export interface MimoTokenPlan {
+  /** 总体已用百分比 0-100 */
+  percent: number
+  items: MimoTokenPlanItem[]
+}
+
+/** MiMo 用量归一化数据。区块可选：对应端点失败时 absent（见 sourcesAvailable） */
+export interface MimoUsage {
+  fetchedAt: number
+  sourcesAvailable: { balance: boolean; tokenPlan: boolean }
+  balance?: MimoBalance
+  tokenPlan?: MimoTokenPlan
+}
+
+/** 任意监控源的归一化用量（monitor:refresh 返回值，按 source.type 区分结构） */
+export type MonitorUsage = CommandCodeUsage | MimoUsage

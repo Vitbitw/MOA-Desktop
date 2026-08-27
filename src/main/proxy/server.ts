@@ -13,6 +13,10 @@ import { DEFAULT_MAX_CONCURRENCY } from '../../shared/defaults'
 
 let server: Server | null = null
 
+/** 上游转发请求的超时预算（30 分钟）。带信号调用可避免 fetchProxy 的全局 timeoutMs
+ * 误伤非流式慢速上游（模型思考 >15s 时首字节迟迟不回）；30 分钟为兜底上限。 */
+const UPSTREAM_TIMEOUT_MS = 30 * 60_000
+
 // ── 并发计数与限流 ──
 // 此前 /health 的 activeRequests/queueLength 硬编码 0，maxConcurrency 设置从未生效。
 let activeRequests = 0
@@ -293,10 +297,12 @@ export function createProxyServer(): Express {
           upstreamModel = provider.models[0]?.id || upstreamModel
         }
         // 上游请求统一走 fetchProxy（本地回环地址自动直连，云端 provider 可走网络代理）
+        // 自带超时信号：fetchProxy 不再套用全局 timeoutMs，避免误伤非流式慢速上游
         const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ ...req.body, model: upstreamModel })
+          body: JSON.stringify({ ...req.body, model: upstreamModel }),
+          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
         })
 
         if (!upstream.ok) {
@@ -552,7 +558,8 @@ export function createProxyServer(): Express {
         const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}${endpoint}`, {
           method: 'POST',
           headers,
-          body: JSON.stringify(req.body)
+          body: JSON.stringify(req.body),
+          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
         })
         // passthrough 端点响应体格式各异，不易统一解析 usage；仅记录请求计数与状态
         logProxyRequest({
