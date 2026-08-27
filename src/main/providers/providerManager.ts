@@ -28,6 +28,18 @@ export function addProvider(
   const template = BUILT_IN_PROVIDER_TEMPLATES.find((t) => t.name === name)
   const url = template?.baseUrl || baseUrl
 
+  // 非内置模板时校验 URL 合法性（内置模板直接信任）
+  if (!template) {
+    try {
+      const u = new URL(url)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        throw new Error('仅支持 http/https 协议')
+      }
+    } catch (err) {
+      throw new Error(`API 地址无效: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   const id = crypto.randomUUID()
   getDatabase().exec(
     'INSERT INTO providers (id, name, base_url, model_list, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)',

@@ -28,36 +28,40 @@ export function getUsageWindow(): BrowserWindow | null {
   return usageWin
 }
 
-/** 保存悬浮窗位置到 app_settings（与 SETTINGS_SET handler 相同的持久化方式） */
-function saveUsageOverlayPos(pos: { x: number; y: number }): void {
+/** 读取当前 app_settings（DB 最新值，避免读到旧快照）。 */
+function readAppSettings(): Record<string, unknown> {
   try {
     const db = getDatabase()
     const row = db.queryOne<{ value: string }>("SELECT value FROM moa_config WHERE key = 'app_settings'")
-    const current = row?.value ? JSON.parse(row.value) : {}
-    const display = { ...(current.display || {}), usageOverlayPos: pos }
+    return row?.value ? JSON.parse(row.value) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 原子 patch app_settings 的 display 段（读最新 → 合并 → 写回），避免与 SETTINGS_SET 并发互相覆盖。 */
+function patchDisplay(patch: Record<string, unknown>): void {
+  try {
+    const db = getDatabase()
+    const current = readAppSettings()
+    const display = { ...(current.display as Record<string, unknown> | undefined), ...patch }
     db.exec(
       "INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES ('app_settings', ?, ?)",
       [JSON.stringify({ ...current, display }), Date.now()]
     )
   } catch (err) {
-    console.error('[UsageOverlay] 保存悬浮窗位置失败:', err)
+    console.error('[UsageOverlay] 保存设置失败:', err)
   }
+}
+
+/** 保存悬浮窗位置到 app_settings（与 SETTINGS_SET handler 相同的持久化方式） */
+function saveUsageOverlayPos(pos: { x: number; y: number }): void {
+  patchDisplay({ usageOverlayPos: pos })
 }
 
 /** 设置 usageOverlay=false（隐藏悬浮窗时同步，用户可通过设置开关恢复） */
 function saveUsageOverlayDisabled(): void {
-  try {
-    const db = getDatabase()
-    const row = db.queryOne<{ value: string }>("SELECT value FROM moa_config WHERE key = 'app_settings'")
-    const current = row?.value ? JSON.parse(row.value) : {}
-    const display = { ...(current.display || {}), usageOverlay: false }
-    db.exec(
-      "INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES ('app_settings', ?, ?)",
-      [JSON.stringify({ ...current, display }), Date.now()]
-    )
-  } catch (err) {
-    console.error('[UsageOverlay] 保存隐藏状态失败:', err)
-  }
+  patchDisplay({ usageOverlay: false })
 }
 
 /** 悬浮窗是否完整落在某个显示器的 workArea 内（越界判断） */

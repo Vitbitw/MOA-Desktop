@@ -316,9 +316,23 @@ function fetchViaHttpProxy(
     const headers: Record<string, string> = { ...(init?.headers as Record<string, string> || {}) }
     if (!headers['User-Agent']) headers['User-Agent'] = 'moa-desktop'
 
+    // ── 透传 method/body：此前写死 GET 且不带 body，HTTP 明文代理路径下
+    // POST /chat/completions 会退化成无 body 的 GET，上游必然 4xx/5xx ──
+    const method = (init?.method || 'GET').toUpperCase()
+    let bodyBuffer: Buffer | null = null
+    if (init?.body != null) {
+      if (typeof init.body === 'string') bodyBuffer = Buffer.from(init.body, 'utf-8')
+      else if (init.body instanceof Uint8Array) bodyBuffer = Buffer.from(init.body)
+      else if (init.body instanceof ArrayBuffer) bodyBuffer = Buffer.from(new Uint8Array(init.body))
+      // ReadableStream body（如流式上传）不在此路径处理——退化为无 body 请求
+      if (bodyBuffer) {
+        headers['Content-Length'] = String(bodyBuffer.length)
+      }
+    }
+
     const req = http.request({
       host: proxy.host, port: proxy.port,
-      method: 'GET', path: urlStr, headers, timeout: 30_000
+      method, path: urlStr, headers, timeout: 30_000
     }, (res) => {
       const readable = Readable.from(res)
       const respHeaders = new Headers()
@@ -353,7 +367,7 @@ function fetchViaHttpProxy(
 
     req.on('error', reject)
     req.on('timeout', () => { req.destroy(); reject(new Error('代理请求超时')) })
-    req.end()
+    req.end(bodyBuffer || undefined)
 
     if (init?.signal) {
       if (init.signal.aborted) { req.destroy(); reject(new Error('The operation was aborted')); return }

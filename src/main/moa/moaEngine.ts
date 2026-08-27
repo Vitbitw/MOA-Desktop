@@ -1,6 +1,7 @@
 import { getAllProviders } from '../providers/providerManager'
 import { callSubModel, callSubModelsParallel, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, getAggregationPrompt } from './aggregationPrompt'
+import { fetchProxy } from '../local/fetchProxy'
 import type { SubModelConfig, AggregatorConfig, SubModelOutput } from '../../shared/types'
 
 export interface MoaRequest {
@@ -32,6 +33,7 @@ export interface MoaResponse {
 
 /** Resolve sub-model configs to actual provider URLs and keys. */
 function resolveSubModels(subModels: SubModelConfig[]): Array<{
+  providerId: string
   providerBaseUrl: string
   apiKey: string
   modelId: string
@@ -41,6 +43,7 @@ function resolveSubModels(subModels: SubModelConfig[]): Array<{
   return subModels.map((sm) => {
     const p = providers.find((prov) => prov.id === sm.providerId)
     return {
+      providerId: sm.providerId,
       providerBaseUrl: p?.baseUrl || '',
       apiKey: p?.apiKey || '',
       modelId: sm.modelId,
@@ -76,7 +79,7 @@ async function callAggregator(
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (aggInfo.apiKey) headers.Authorization = `Bearer ${aggInfo.apiKey}`
-    const resp = await fetch(`${aggInfo.providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    const resp = await fetchProxy(`${aggInfo.providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -284,6 +287,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
   const promises = resolvedSubs.map((sm, index) =>
     callSubModel({
       providerBaseUrl: sm.providerBaseUrl,
+      providerId: sm.providerId,
       apiKey: sm.apiKey,
       modelId: sm.modelId,
       messages: req.messages,
@@ -297,7 +301,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
       const errMsg = err instanceof Error ? err.message : String(err)
       const errorOutput: SubModelOutput = {
         modelId: sm.modelId,
-        providerId: sm.providerBaseUrl,
+        providerId: sm.providerId || sm.providerBaseUrl,
         content: '',
         status: 'error',
         error: errMsg,

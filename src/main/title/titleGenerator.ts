@@ -76,13 +76,17 @@ export async function generateTitle(req: TitleGenerateRequest): Promise<{ title:
   // Empty messages guard — don't waste an API call on nothing
   if (!messages || messages.length === 0) return { title: null }
 
+  // Clamp maxLength to sane bounds (IPC 直调可能传任意值)
+  const safeMaxLength = Math.max(5, Math.min(100, Number.isFinite(maxLength) ? maxLength : 50))
+
   const resolved = resolveTitleModel(providerId)
   if (!resolved) return { title: null }
 
-  const prompt = buildTitlePrompt(messages, maxLength, language)
+  const prompt = buildTitlePrompt(messages, safeMaxLength, language)
 
   const result: SubModelOutput = await callSubModel({
     providerBaseUrl: resolved.baseUrl,
+    providerId,
     apiKey: resolved.apiKey,
     modelId,
     messages: [{ role: 'user', content: prompt }],
@@ -95,9 +99,9 @@ export async function generateTitle(req: TitleGenerateRequest): Promise<{ title:
   }
 
   // Sanitize: strip quotes, whitespace, clamp to maxLength
-  let title = result.content.trim().replace(/^[""''""']+|[""''""']+$/g, '').trim()
-  if (title.length > maxLength) {
-    title = title.slice(0, maxLength)
+  let title = result.content.trim().replace(/^["""''']+|["""''']+$/g, '').trim()
+  if (title.length > safeMaxLength) {
+    title = title.slice(0, safeMaxLength)
   }
   if (!title) return { title: null }
 

@@ -3,6 +3,8 @@ import { fetchProxy } from '../local/fetchProxy'
 
 export interface SubModelCallOptions {
   providerBaseUrl: string
+  /** 厂商 ID（写入 SubModelOutput.providerId；缺省时回退 baseUrl 兼容旧调用） */
+  providerId?: string
   apiKey: string
   modelId: string
   messages: Array<{ role: string; content: string }>
@@ -16,7 +18,7 @@ export interface SubModelCallOptions {
  */
 export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelOutput> {
   const startTime = Date.now()
-  const { providerBaseUrl, apiKey, modelId, messages, systemPrompt, timeoutMs } = opts
+  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs } = opts
 
   // Build payload
   const body: Record<string, unknown> = {
@@ -44,7 +46,7 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
       const errText = await resp.text()
       return {
         modelId,
-        providerId: providerBaseUrl,
+        providerId: providerId || providerBaseUrl,
         content: '',
         status: 'error',
         error: `HTTP ${resp.status}: ${errText.slice(0, 300)}`,
@@ -58,7 +60,7 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
 
     return {
       modelId,
-      providerId: providerBaseUrl,
+      providerId: providerId || providerBaseUrl,
       content,
       status: 'success',
       durationMs,
@@ -72,7 +74,7 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
     const msg = err instanceof Error ? err.message : String(err)
     return {
       modelId,
-      providerId: providerBaseUrl,
+      providerId: providerId || providerBaseUrl,
       content: '',
       status: 'error',
       error: msg,
@@ -84,6 +86,7 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
 export interface ParallelCallOptions {
   subModels: Array<{
     providerBaseUrl: string
+    providerId?: string
     apiKey: string
     modelId: string
   }>
@@ -102,6 +105,7 @@ export async function callSubModelsParallel(opts: ParallelCallOptions): Promise<
   const promises = opts.subModels.map((sm) =>
     callSubModel({
       providerBaseUrl: sm.providerBaseUrl,
+      providerId: sm.providerId,
       apiKey: sm.apiKey,
       modelId: sm.modelId,
       messages: opts.messages,
@@ -118,7 +122,7 @@ export async function callSubModelsParallel(opts: ParallelCallOptions): Promise<
     const sm = opts.subModels[i]
     return {
       modelId: sm.modelId,
-      providerId: sm.providerBaseUrl,
+      providerId: sm.providerId || sm.providerBaseUrl,
       content: '',
       status: 'error' as const,
       error: 'Promise.allSettled 中出现意外拒绝',

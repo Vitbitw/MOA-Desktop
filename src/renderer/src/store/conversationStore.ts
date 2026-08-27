@@ -50,6 +50,8 @@ interface ConversationState {
   liveSubOutputs: LiveSubOutput[]
   aggregatorText: string
   aggregatorRunning: boolean
+  /** 当前 sendMessage 注册的 IPC 事件清理函数（视图切换时调用），null 表示无活跃监听 */
+  liveCleanupRef: (() => void) | null
 
   // ── Live streaming actions ──
   setLiveSubOutputs: (outputs: LiveSubOutput[]) => void
@@ -92,6 +94,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   liveSubOutputs: [],
   aggregatorText: '',
   aggregatorRunning: false,
+  liveCleanupRef: null,
 
   // ── Live streaming actions ──
   setLiveSubOutputs: (liveSubOutputs) => set({ liveSubOutputs }),
@@ -170,17 +173,30 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     const { mode, currentConversationId } = get()
     if (!content.trim()) return
 
+    // 0. 每次请求唯一 ID：防止上一次 onAllDone 的 cleanup 清掉本次请求的监听
+    //    （连续快速发两条消息时，第一次的 onAllDone 会 cleanup 掉第二次刚注册的监听）
+    const requestId = crypto.randomUUID()
+
     // 1. Clear previous live state
     set({
       liveSubOutputs: [],
       aggregatorText: '',
       aggregatorRunning: false,
-      error: null
+      error: null,
+      liveCleanupRef: null
     })
 
     // 2. Register IPC event listeners (BEFORE sending)
     const unsubs: (() => void)[] = []
     const cleanup = () => { unsubs.forEach(fn => fn()); unsubs.length = 0 }
+
+    // 仅在「当前仍是本次请求」时清理（防旧请求的 onAllDone 清掉新请求的监听）
+    const cleanupIfCurrent = () => {
+      if (get().liveCleanupRef === cleanup) {
+        cleanup()
+        set({ liveCleanupRef: null })
+      }
+    }
 
     if (window.moaAPI.onSubOutputUpdate) {
       unsubs.push(window.moaAPI.onSubOutputUpdate((data: SubOutputUpdate) => {
@@ -226,7 +242,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
 
     if (window.moaAPI.onAllDone) {
       unsubs.push(window.moaAPI.onAllDone((_data: { conversationId: string; conversations: unknown[] }) => {
-        cleanup()
+        cleanupIfCurrent()
         // Keep the liveSubOutputs and aggregatorText for display
         // Refresh conversations list
         get().refreshConversations()
@@ -274,7 +290,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     }
 
     // 3. Save the cleanup function (for view switching cleanup)
-    ;(get() as any)._liveCleanup = cleanup
+    set({ liveCleanupRef: cleanup })
 
     // 4. Optimistic: add user message locally (no conversationId yet for new conversations)
     const tempId = crypto.randomUUID()
@@ -352,7 +368,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         set({ error: String(res.error || '请求失败'), loading: false })
       }
     } catch (err) {
-      cleanup()
+      cleanupIfCurrent()
       set({ error: String(err), loading: false })
     } finally {
       set({ loading: false })
@@ -361,10 +377,10 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
 
   // ── Cleanup live events externally (e.g., when switching views) ──
   cleanupLiveEvents: () => {
-    const cleanup = (get() as any)._liveCleanup as (() => void) | undefined
+    const cleanup = get().liveCleanupRef
     if (cleanup) {
       cleanup()
-      ;(get() as any)._liveCleanup = undefined
+      set({ liveCleanupRef: null })
     }
   },
 

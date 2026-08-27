@@ -162,9 +162,23 @@ function createApplicationMenu() {
         {
           label: 'API 代理地址',
           click: () => {
-            const settings = DEFAULT_SETTINGS.proxy
-            const url = `http://${settings.host}:${settings.port}`
-            clipboard.writeText(url)
+            // 从 DB 读真实代理设置（用户可能改过 host/port/关闭代理），与 SETTINGS_GET_ALL 一致
+            let proxy = DEFAULT_SETTINGS.proxy
+            try {
+              const row = getDatabase().queryOne<{ value: string }>(
+                "SELECT value FROM moa_config WHERE key = 'app_settings'"
+              )
+              if (row?.value) {
+                const saved = JSON.parse(row.value)
+                proxy = { ...DEFAULT_SETTINGS.proxy, ...(saved.proxy || {}) }
+              }
+            } catch {
+              // 读取失败回退默认值
+            }
+            const url = proxy.enabled
+              ? `http://${proxy.host}:${proxy.port}`
+              : `http://${DEFAULT_HOST}:${DEFAULT_PORT} (代理未启用)`
+            clipboard.writeText(proxy.enabled ? `http://${proxy.host}:${proxy.port}` : '')
             mainWindow?.webContents.send(IPC_EVENT.MENU_COPY_PROXY_URL, url)
           }
         },
@@ -499,15 +513,14 @@ function registerIpcHandlers() {
       const logId = crypto.randomUUID()
       const logDuration = Date.now() - now
       // 组装用量明细：成功且有 tokenUsage 的子模型（role='sub'）+ 聚合器（role='agg'，有则记）
-      // 注意：SubModelOutput.providerId 存的是 baseUrl（见 subModelCaller），不是厂商 ID；
-      // 厂商 ID 必须从 config.subModels 的 SubModelConfig.providerId 映射取。
-      const subProviderMap = new Map(config.subModels.map((sm) => [sm.modelId, sm.providerId]))
+      // 注意：SubModelOutput.providerId 已由 callSubModel 写入真实厂商 ID（providerId 参数），
+      // 不再需要按 modelId 反查厂商（同名模型跨厂商会互相覆盖——旧实现的坑）。
       const usageInputs: Array<{ modelId: string; providerId?: string; role: 'sub' | 'agg' | 'title'; prompt: number; completion: number }> = []
       for (const o of (moaResult.subOutputs || [])) {
         if (o.status === 'success' && o.tokenUsage) {
           usageInputs.push({
             modelId: o.modelId,
-            providerId: subProviderMap.get(o.modelId),
+            providerId: o.providerId,
             role: 'sub',
             prompt: o.tokenUsage.prompt,
             completion: o.tokenUsage.completion

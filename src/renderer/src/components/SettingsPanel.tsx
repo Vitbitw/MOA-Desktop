@@ -611,9 +611,17 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
     setSaving(true)
     setError(null)
     try {
+      // baseUrl 为空且选中了内置模板 → 用模板 URL；否则要求用户填 URL（不能拿 name 当 URL）
+      const selectedTemplate = BUILT_IN_PROVIDER_TEMPLATES.find((t) => t.name === name.trim())
+      const finalBaseUrl = baseUrl.trim() || selectedTemplate?.baseUrl || ''
+      if (!finalBaseUrl) {
+        setError('请填写 API 地址（或从上方快速选择内置厂商）')
+        setSaving(false)
+        return
+      }
       const res = await window.moaAPI.addProvider({
         name: name.trim(),
-        baseUrl: baseUrl.trim() || name.trim(),
+        baseUrl: finalBaseUrl,
         apiKey: apiKey.trim()
       })
       if (res.success) {

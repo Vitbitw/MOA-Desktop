@@ -4,10 +4,78 @@ import type { Server } from 'node:http'
 import { getAllProviders } from '../providers/providerManager'
 import { getMoaConfig } from '../moa/moaConfig'
 import { executeMoA } from '../moa/moaEngine'
+import { getDatabase } from '../db/database'
 import type { Provider } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
+import { DEFAULT_MAX_CONCURRENCY } from '../../shared/defaults'
 
 let server: Server | null = null
+
+// ── 并发计数与限流 ──
+// 此前 /health 的 activeRequests/queueLength 硬编码 0，maxConcurrency 设置从未生效。
+let activeRequests = 0
+let queueLength = 0
+const waiters: Array<() => void> = []
+
+/** 读取代理最大并发数（settings.proxy.maxConcurrency），无效/未配置回退默认。 */
+function getMaxConcurrency(): number {
+  try {
+    const row = getDatabase().queryOne<{ value: string }>(
+      "SELECT value FROM moa_config WHERE key = 'app_settings'"
+    )
+    if (row?.value) {
+      const saved = JSON.parse(row.value)
+      const n = Number(saved?.proxy?.maxConcurrency)
+      if (Number.isFinite(n) && n > 0) return n
+    }
+  } catch {
+    // 读取失败回退默认
+  }
+  return DEFAULT_MAX_CONCURRENCY
+}
+
+/** 获取并发许可；超限则进入 FIFO 等待队列。 */
+function acquire(): Promise<void> {
+  if (activeRequests < getMaxConcurrency()) {
+    activeRequests++
+    return Promise.resolve()
+  }
+  queueLength++
+  return new Promise((resolve) => {
+    waiters.push(() => {
+      queueLength--
+      activeRequests++
+      resolve()
+    })
+  })
+}
+
+function release(): void {
+  activeRequests = Math.max(0, activeRequests - 1)
+  const next = waiters.shift()
+  if (next) next()
+}
+
+/** 包装路由：进入时 acquire，响应结束（finish/close 任一）释放。 */
+function withConcurrency(handler: (req: Request, res: Response) => Promise<void> | void) {
+  return async (req: Request, res: Response): Promise<void> => {
+    await acquire()
+    let released = false
+    const releaseOnce = () => {
+      if (released) return
+      released = true
+      release()
+    }
+    res.on('finish', releaseOnce)
+    res.on('close', releaseOnce)
+    try {
+      await handler(req, res)
+    } catch (err) {
+      releaseOnce()
+      throw err
+    }
+  }
+}
 
 /** 可参与直连路由的 provider（enabled 且有 API key）。 */
 function usableProviders(): Provider[] {
@@ -50,8 +118,8 @@ export function createProxyServer(): Express {
       status: 'ok',
       version: '1.0.0',
       uptimeSeconds: Math.floor(process.uptime()),
-      activeRequests: 0,
-      queueLength: 0,
+      activeRequests,
+      queueLength,
       moaConfig: { subCount: config.subModels.length, mode: config.mode },
       providers: [{ name: 'default', status: provider ? 'ok' : 'no_key', model: config.mode }]
     })
@@ -69,7 +137,7 @@ export function createProxyServer(): Express {
   })
 
   // ── Chat completions ──
-  app.post('/v1/chat/completions', async (req: Request, res: Response) => {
+  app.post('/v1/chat/completions', withConcurrency(async (req: Request, res: Response) => {
     const requestedModel: string | undefined = req.body?.model
     // 智能路由：请求的 model 命中某 provider（含本地引擎）则路由之，否则回落第一个可用
     const provider = routeForRequest(requestedModel)
@@ -245,11 +313,11 @@ export function createProxyServer(): Express {
         ...(stream ? {} : { x_moa_sub_models: result.subOutputs.map(o => ({ modelId: o.modelId, status: o.status, durationMs: o.durationMs })) })
       })
     }
-  })
+  }))
 
   // ── Non-completions passthrough ──
   ;['/v1/embeddings', '/v1/images/generations', '/v1/audio/transcriptions', '/v1/audio/speech', '/v1/moderations'].forEach((endpoint) => {
-    app.post(endpoint, async (req: Request, res: Response) => {
+    app.post(endpoint, withConcurrency(async (req: Request, res: Response) => {
       const provider = firstUsableProvider()
       if (!provider) { res.status(503).json({ error: { message: 'No provider configured', type: 'moa_config_error' } }); return }
       try {
@@ -264,7 +332,7 @@ export function createProxyServer(): Express {
       } catch {
         res.status(502).json({ error: { message: 'Passthrough failed', type: 'proxy_error' } })
       }
-    })
+    }))
   })
 
   return app

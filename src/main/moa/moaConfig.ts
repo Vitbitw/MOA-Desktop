@@ -46,7 +46,13 @@ export function loadMoaConfigFromDb(): void {
 }
 
 export function getMoaConfig(): MoaRuntimeConfig {
-  return { ...currentConfig }
+  // 深拷贝：subModels/aggregator 数组/对象不能暴露引用，否则渲染端改数组会污染主进程内存态
+  return {
+    ...currentConfig,
+    subModels: currentConfig.subModels.map((sm) => ({ ...sm })),
+    aggregator: currentConfig.aggregator ? { ...currentConfig.aggregator } : null,
+    customAggregationPrompt: currentConfig.customAggregationPrompt
+  }
 }
 
 export function setMoaConfig(config: Partial<MoaRuntimeConfig>): MoaRuntimeConfig {
