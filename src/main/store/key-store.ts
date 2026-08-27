@@ -1,8 +1,12 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import Store from 'electron-store'
-import { safeStorage } from 'electron'
+import { safeStorage, app } from 'electron'
 
 interface KeyStoreSchema {
   providerKeys: Record<string, string>
+  /** 云端用量监控凭证：key 为监控源 id（session token）或 `id.apiKey`（Provider API Key） */
+  usageCredentials: Record<string, string>
 }
 
 let store: Store<KeyStoreSchema> | null = null
@@ -20,33 +24,61 @@ function encryptValue(plain: string): string {
     if (safeStorage.isEncryptionAvailable()) {
       return `enc:${safeStorage.encryptString(plain).toString('base64')}`
     }
-  } catch {
+  } catch (err) {
     // 加密失败回退明文
+    console.warn('[KeyStore] safeStorage 加密失败，API Key 明文落盘:', err)
   }
   return plain
 }
 
-function decryptValue(stored: string): string {
+function decryptValue(stored: unknown): string {
+  if (typeof stored !== 'string') return ''
   if (stored.startsWith('enc:')) {
     try {
-      if (safeStorage.isEncryptionAvailable()) {
-        return safeStorage.decryptString(Buffer.from(stored.slice(4), 'base64'))
+      if (!safeStorage.isEncryptionAvailable()) {
+        // 系统密钥库不可用（如 Linux 无 keyring）：无法解密，明确提示，避免静默显示「未配置 Key」
+        console.warn('[KeyStore] safeStorage 不可用，无法解密 API Key（请重新填写）')
+        return ''
       }
-    } catch {
-      // 解密失败回退原值（避免崩溃）
+      return safeStorage.decryptString(Buffer.from(stored.slice(4), 'base64'))
+    } catch (err) {
+      // 解密失败（如系统密钥变化）：无法恢复旧密文，提示用户重新填写
+      console.warn('[KeyStore] API Key 解密失败（系统凭据可能已变化），请重新填写:', err)
+      return ''
     }
-    return ''
   }
   return stored
 }
 
 export function getKeyStore(): Store<KeyStoreSchema> {
   if (!store) {
+    healCorruptStore()
     store = new Store<KeyStoreSchema>({
       name: 'moa-keys'
     })
   }
   return store
+}
+
+/**
+ * electron-store 构造时会 `JSON.parse` 存储文件；文件损坏（如写入被中断、被二进制覆盖）
+ * 会让 getKeyStore() 直接抛错、拖垮整个应用。这里在构造前自检：
+ * 非法 JSON → 备份为 `moa-keys.json.corrupt-<ts>` 后重建，旧凭据不可恢复（仅能重新填写）。
+ */
+function healCorruptStore(): void {
+  const p = path.join(app.getPath('userData'), 'moa-keys.json')
+  try {
+    if (!fs.existsSync(p)) return
+    const raw = fs.readFileSync(p, 'utf8')
+    JSON.parse(raw)
+  } catch {
+    try {
+      fs.renameSync(p, `${p}.corrupt-${Date.now()}`)
+      console.warn('[KeyStore] moa-keys.json 损坏，已备份并重建，请重新填写 API Key')
+    } catch (err) {
+      console.error('[KeyStore] 备份损坏文件失败:', err)
+    }
+  }
 }
 
 export function saveProviderKey(providerId: string, apiKey: string): void {
@@ -69,4 +101,28 @@ export function removeProviderKey(providerId: string): void {
   const keys = s.get('providerKeys', {})
   delete keys[providerId]
   s.set('providerKeys', keys)
+}
+
+// ─── 云端用量监控凭证（按监控源 id 存取，safeStorage 加密）───
+
+export function saveUsageCredential(key: string, value: string): void {
+  const s = getKeyStore()
+  const creds = s.get('usageCredentials', {})
+  creds[key] = encryptValue(value)
+  s.set('usageCredentials', creds)
+}
+
+export function getUsageCredential(key: string): string | undefined {
+  const s = getKeyStore()
+  const creds = s.get('usageCredentials', {})
+  const stored = creds[key]
+  if (stored == null) return undefined
+  return decryptValue(stored)
+}
+
+export function removeUsageCredential(key: string): void {
+  const s = getKeyStore()
+  const creds = s.get('usageCredentials', {})
+  delete creds[key]
+  s.set('usageCredentials', creds)
 }

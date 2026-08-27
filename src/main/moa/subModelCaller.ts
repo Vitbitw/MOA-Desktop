@@ -83,54 +83,6 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
   }
 }
 
-export interface ParallelCallOptions {
-  subModels: Array<{
-    providerBaseUrl: string
-    providerId?: string
-    apiKey: string
-    modelId: string
-  }>
-  messages: Array<{ role: string; content: string }>
-  systemPrompt?: string
-  subTimeoutMs?: number
-}
-
-/**
- * Call all sub-models in parallel via Promise.allSettled.
- * Returns results with timeout and error info per model.
- */
-export async function callSubModelsParallel(opts: ParallelCallOptions): Promise<SubModelOutput[]> {
-  const timeoutMs = opts.subTimeoutMs ?? 60_000
-
-  const promises = opts.subModels.map((sm) =>
-    callSubModel({
-      providerBaseUrl: sm.providerBaseUrl,
-      providerId: sm.providerId,
-      apiKey: sm.apiKey,
-      modelId: sm.modelId,
-      messages: opts.messages,
-      systemPrompt: opts.systemPrompt,
-      timeoutMs
-    })
-  )
-
-  const settled = await Promise.allSettled(promises)
-
-  return settled.map((result, i) => {
-    if (result.status === 'fulfilled') return result.value
-
-    const sm = opts.subModels[i]
-    return {
-      modelId: sm.modelId,
-      providerId: sm.providerId || sm.providerBaseUrl,
-      content: '',
-      status: 'error' as const,
-      error: 'Promise.allSettled 中出现意外拒绝',
-      durationMs: 0
-    }
-  })
-}
-
 /** Count how many sub-models succeeded. */
 export function countSuccessfulSubModels(results: SubModelOutput[]): number {
   return results.filter((r) => r.status === 'success').length

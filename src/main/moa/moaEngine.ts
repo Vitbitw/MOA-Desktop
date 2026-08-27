@@ -1,5 +1,5 @@
 import { getAllProviders } from '../providers/providerManager'
-import { callSubModel, callSubModelsParallel, countSuccessfulSubModels } from './subModelCaller'
+import { callSubModel, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, getAggregationPrompt } from './aggregationPrompt'
 import { fetchProxy } from '../local/fetchProxy'
 import type { SubModelConfig, AggregatorConfig, SubModelOutput } from '../../shared/types'
@@ -29,6 +29,13 @@ export interface MoaResponse {
   success: boolean
   partialFailure?: boolean
   error?: string
+}
+
+/** 可选的事件回调：事件版入口会注入，纯调用版（executeMoA）不注入 */
+interface MoaEvents {
+  emitSubOutput: (output: SubModelOutput, index: number) => void
+  emitAggregationStart: () => void
+  emitAggregationChunk: (text: string, done: boolean) => void
 }
 
 /** Resolve sub-model configs to actual provider URLs and keys. */
@@ -113,10 +120,10 @@ async function callAggregator(
 }
 
 /**
- * MoA engine entry point.
- * Determines mode, calls sub-models in parallel, then either returns raw comparison or aggregates.
+ * MoA 引擎统一实现。executeMoA（纯调用）与 executeMoAWithEvents（事件流）共享此逻辑，
+ * 仅通过可选的 events 回调差异（子模型逐个完成、聚合开始/分块）。
  */
-export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
+async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<MoaResponse> {
   // ── Resolve sub-models ──
   const resolvedSubs = resolveSubModels(req.subModels)
   if (resolvedSubs.length === 0) {
@@ -129,158 +136,7 @@ export async function executeMoA(req: MoaRequest): Promise<MoaResponse> {
     }
   }
 
-  // ── Call sub-models in parallel ──
-  const subOutputs = await callSubModelsParallel({
-    subModels: resolvedSubs,
-    messages: req.messages,
-    systemPrompt: req.systemPrompt,
-    subTimeoutMs: req.subTimeoutMs ?? 60_000
-  })
-
-  const successfulCount = countSuccessfulSubModels(subOutputs)
-
-  // ── Direct mode ──
-  if (req.mode === 'direct') {
-    const first = subOutputs[0]
-    return {
-      type: 'direct',
-      content: first.status === 'success' ? first.content : '',
-      subOutputs,
-      success: first.status === 'success',
-      error: first.status !== 'success' ? first.error : undefined
-    }
-  }
-
-  // ── Compare (D) mode ──
-  if (req.mode === 'compare') {
-    return {
-      type: 'compare',
-      content: '',
-      subOutputs,
-      success: successfulCount > 0,
-      partialFailure: successfulCount < subOutputs.length
-    }
-  }
-
-  // ── Aggregate (A) mode ──
-  if (successfulCount === 0) {
-    return {
-      type: 'aggregate',
-      content: '',
-      subOutputs,
-      success: false,
-      error: '所有子模型均失败。请检查厂商连接和 API Key。'
-    }
-  }
-
-  const successfulOutputs = subOutputs.filter((o) => o.status === 'success')
-
-  // Resolve aggregator model
-  const aggInfo = req.aggregator ? resolveAggregator(req.aggregator) : null
-  if (!aggInfo) {
-    // No aggregator configured — fallback to compare
-    return {
-      type: 'aggregate',
-      content: '',
-      subOutputs,
-      success: false,
-      partialFailure: successfulCount < subOutputs.length,
-      error: '未配置聚合模型。请在设置中配置或切换为 D 模式。'
-    }
-  }
-
-  // Build aggregation messages
-  const aggPrompt = getAggregationPrompt(
-    req.aggregationPromptVariant || 'standard-zh',
-    req.customAggregationPrompt
-  )
-  const aggMessages = buildAggregationMessages(
-    req.messages,
-    successfulOutputs.map((o) => ({ modelId: o.modelId, content: o.content })),
-    aggPrompt
-  )
-
-  // Call aggregator
-  const aggResult = await callAggregator(aggInfo, aggMessages, req.aggTimeoutMs ?? 120_000)
-
-  if (!aggResult.success) {
-    // Try fallback aggregator if configured
-    if (req.aggregator?.fallbackProviderId && req.aggregator?.fallbackModelId) {
-      const fallbackAgg = resolveAggregator({
-        primaryModelId: req.aggregator.fallbackModelId,
-        primaryProviderId: req.aggregator.fallbackProviderId
-      })
-      if (fallbackAgg) {
-        const fallbackResult = await callAggregator(fallbackAgg, aggMessages, req.aggTimeoutMs ?? 120_000)
-        if (fallbackResult.success) {
-          return {
-            type: 'aggregate',
-            content: fallbackResult.content,
-            subOutputs,
-            aggregatorContent: fallbackResult.content,
-            aggregatorUsage: fallbackResult.usage,
-            aggregatorModelId: req.aggregator.fallbackModelId,
-            aggregatorProviderId: req.aggregator.fallbackProviderId,
-            success: true,
-            partialFailure: successfulCount < subOutputs.length
-          }
-        }
-      }
-    }
-
-    // Aggregation failed — degrade to compare
-    return {
-      type: 'aggregate',
-      content: '',
-      subOutputs,
-      success: false,
-      partialFailure: successfulCount < subOutputs.length,
-      aggregatorContent: '',
-      error: `聚合失败：${aggResult.error}。子模型输出可在对比视图中查看。`
-    }
-  }
-
-  return {
-    type: 'aggregate',
-    content: aggResult.content,
-    subOutputs,
-    aggregatorContent: aggResult.content,
-    aggregatorUsage: aggResult.usage,
-    aggregatorModelId: req.aggregator?.primaryModelId ?? '',
-    aggregatorProviderId: req.aggregator?.primaryProviderId ?? '',
-    success: true,
-    partialFailure: successfulCount < subOutputs.length
-  }
-}
-
-// ── Event-emitting variant ──────────────────────────────────────────
-
-export interface MoaRequestWithEvents extends MoaRequest {
-  emitSubOutput: (output: SubModelOutput, index: number) => void
-  emitAggregationStart: () => void
-  emitAggregationChunk: (text: string, done: boolean) => void
-}
-
-/**
- * MoA engine entry point (event-emitting variant).
- * Same logic as executeMoA, but calls sub-models individually so each
- * result can be emitted via IPC callbacks as it completes.
- * Also emits aggregation start/chunk events.
- */
-export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<MoaResponse> {
-  // ── Resolve sub-models ──
-  const resolvedSubs = resolveSubModels(req.subModels)
-  if (resolvedSubs.length === 0) {
-    return {
-      type: req.mode,
-      content: '',
-      subOutputs: [],
-      success: false,
-      error: '没有可用的子模型：请检查厂商配置和 API Key'
-    }
-  }
-
-  // ── Call sub-models individually, emitting each as it completes ──
+  // ── Call sub-models in parallel, emitting each result as it completes ──
   const subOutputs: SubModelOutput[] = []
   const timeoutMs = req.subTimeoutMs ?? 60_000
 
@@ -295,7 +151,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
       timeoutMs
     }).then((result) => {
       subOutputs[index] = result
-      req.emitSubOutput(result, index)
+      events?.emitSubOutput(result, index)
       return result
     }).catch((err: unknown) => {
       const errMsg = err instanceof Error ? err.message : String(err)
@@ -308,7 +164,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
         durationMs: 0
       }
       subOutputs[index] = errorOutput
-      req.emitSubOutput(errorOutput, index)
+      events?.emitSubOutput(errorOutput, index)
       return errorOutput
     })
   )
@@ -366,7 +222,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
     }
   }
 
-  req.emitAggregationStart()
+  events?.emitAggregationStart()
 
   // Build aggregation messages
   const aggPrompt = getAggregationPrompt(
@@ -392,7 +248,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
       if (fallbackAgg) {
         const fallbackResult = await callAggregator(fallbackAgg, aggMessages, req.aggTimeoutMs ?? 120_000)
         if (fallbackResult.success) {
-          req.emitAggregationChunk(fallbackResult.content, true)
+          events?.emitAggregationChunk(fallbackResult.content, true)
           return {
             type: 'aggregate',
             content: fallbackResult.content,
@@ -409,7 +265,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
     }
 
     // Aggregation failed — degrade to compare
-    req.emitAggregationChunk('', true)
+    events?.emitAggregationChunk('', true)
     return {
       type: 'aggregate',
       content: '',
@@ -421,7 +277,7 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
     }
   }
 
-  req.emitAggregationChunk(aggResult.content, true)
+  events?.emitAggregationChunk(aggResult.content, true)
 
   return {
     type: 'aggregate',
@@ -434,4 +290,24 @@ export async function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<M
     success: true,
     partialFailure: successfulCount < subOutputs.length
   }
+}
+
+/** MoA engine entry point (pure call, no events). */
+export function executeMoA(req: MoaRequest): Promise<MoaResponse> {
+  return executeMoAInternal(req)
+}
+
+export interface MoaRequestWithEvents extends MoaRequest {
+  emitSubOutput: (output: SubModelOutput, index: number) => void
+  emitAggregationStart: () => void
+  emitAggregationChunk: (text: string, done: boolean) => void
+}
+
+/** MoA engine entry point (event-emitting variant). */
+export function executeMoAWithEvents(req: MoaRequestWithEvents): Promise<MoaResponse> {
+  return executeMoAInternal(req, {
+    emitSubOutput: req.emitSubOutput,
+    emitAggregationStart: req.emitAggregationStart,
+    emitAggregationChunk: req.emitAggregationChunk
+  })
 }

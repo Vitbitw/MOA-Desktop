@@ -70,38 +70,10 @@ export interface Conversation {
 
 // ─── Token / Usage ───
 export interface TokenUsage {
-  subModels: Record<string, { prompt: number; completion: number; cacheRead?: number; cacheCreation?: number }>
-  aggregator?: { prompt: number; completion: number; cacheRead?: number; cacheCreation?: number }
+  subModels: Record<string, { prompt: number; completion: number }>
+  aggregator?: { prompt: number; completion: number }
   total: { prompt: number; completion: number }
   cost?: number
-  cacheSavings?: number
-}
-
-// ─── Proxy / Request Log ───
-export interface RequestLog {
-  requestId: string
-  timestamp: number
-  clientIp: string
-  mode: 'proxy' | 'chat'
-  moaMode: 'aggregate' | 'direct'
-  subCount: number
-  promptTokens: number
-  completionTokens: number
-  cost: number
-  durationMs: number
-  success: boolean
-  errorDetail?: string
-}
-
-// ─── Health ───
-export interface HealthStatus {
-  status: 'ok' | 'degraded' | 'error'
-  version: string
-  uptimeSeconds: number
-  activeRequests: number
-  queueLength: number
-  moaConfig: { subCount: number; mode: string }
-  providers: Array<{ name: string; status: string; model: string }>
 }
 
 // ─── Title Settings ───
@@ -145,6 +117,8 @@ export interface AppSettings {
   }
   pricing: Record<string, PricingConfig>
   currency: 'USD' | 'CNY'
+  /** 云端用量监控（如 Command Code Studio） */
+  monitoring: MonitoringSettings
 }
 
 export interface PricingConfig {
@@ -177,3 +151,57 @@ export type UsageGroupBy = 'model' | 'provider' | 'mode'
 export interface UsageRow { key: string; requests: number; success: number; prompt: number; completion: number; cost: number }
 export interface UsageSummary { range: UsageRange; groupBy: UsageGroupBy; totals: { requests: number; success: number; prompt: number; completion: number; cost: number }; rows: UsageRow[] }
 export interface UsageToday { prompt: number; completion: number; cost: number; running: boolean }
+
+// ─── Cloud Usage Monitoring (Command Code) ───
+/** 云端用量监控源类型（当前仅支持 Command Code，后续可扩展） */
+export type RemoteUsageSourceType = 'commandcode'
+
+/** 一个云端用量监控源（如 Command Code Studio 账号） */
+export interface RemoteUsageSource {
+  id: string
+  type: RemoteUsageSourceType
+  name: string
+  studioUrl: string
+  enabled: boolean
+}
+
+export interface MonitoringSettings {
+  /** 已启用的云端用量监控源列表 */
+  sources: RemoteUsageSource[]
+  /** 自动刷新间隔（分钟），0 表示关闭 */
+  autoRefreshMinutes: number
+}
+
+/** 滚动窗口额度（5小时/7天），字段可能缺失 */
+export interface UsageWindowInfo {
+  /** 已用百分比 0-100 */
+  usedPercent?: number
+  /** 重置时间（epoch 秒） */
+  resetAt?: number
+}
+
+/** Command Code 用量归一化数据。区块可选：对应端点失败时 absent（见 sourcesAvailable） */
+export interface CommandCodeUsage {
+  fetchedAt: number
+  sourcesAvailable: { summary: boolean; charts: boolean; credits: boolean; windows: boolean }
+  summary?: { totalCount: number; totalCost: number; totalTokens: number; successRate: number }
+  credits?: { monthlyCredits: number }
+  windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo }
+  models?: Array<{
+    model: string
+    requests: number
+    cost: number
+    tokensIn: number
+    tokensOut: number
+    tokensTotal: number
+  }>
+}
+
+/** 监控源当前认证状态 */
+export interface MonitorStatus {
+  loggedIn: boolean
+  hasApiKey: boolean
+}
+
+/** monitor:refresh 失败时的错误码 */
+export type MonitorErrorCode = 'not_authenticated' | 'session_expired' | 'network' | 'unknown'

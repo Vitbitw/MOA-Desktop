@@ -4,12 +4,6 @@ import { useSettingsStore } from '../store/settingsStore'
 import { formatCost, formatTokens } from '../lib/usageFormat'
 import type { UsageToday } from '../../../shared/types'
 
-// ── moaAPI 用量接口（并行任务正在补全 env.d.ts，此处先做本地类型声明过渡）──
-const usageApi = window.moaAPI as unknown as {
-  getUsageToday: () => Promise<{ success: boolean; data: UsageToday; error?: string }>
-  onUsageUpdated: (cb: () => void) => () => void
-}
-
 interface Props {
   onOpenUsage: () => void
 }
@@ -19,7 +13,7 @@ export default function UsageBar({ onOpenUsage }: Props) {
   const [today, setToday] = useState<UsageToday | null>(null)
 
   const refresh = () => {
-    usageApi
+    window.moaAPI
       .getUsageToday()
       .then((res) => {
         if (res.success && res.data) setToday(res.data)
@@ -30,7 +24,7 @@ export default function UsageBar({ onOpenUsage }: Props) {
   // 初次拉取 + 监听用量更新事件刷新
   useEffect(() => {
     refresh()
-    const unsub = usageApi.onUsageUpdated(refresh)
+    const unsub = window.moaAPI.onUsageUpdated(refresh)
     return unsub
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

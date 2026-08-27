@@ -1,4 +1,4 @@
-import type { AppSettings } from './types'
+import type { AppSettings, MonitoringSettings } from './types'
 
 export const DEFAULT_PORT = 28888
 export const DEFAULT_HOST = '127.0.0.1'
@@ -17,6 +17,20 @@ export const DEFAULT_TITLE_SETTINGS = {
   modelId: '',
   maxLength: 50,
   language: 'auto' as const
+}
+
+/** 云端用量监控默认配置：预置一个启用的 Command Code 源 */
+export const DEFAULT_MONITORING: MonitoringSettings = {
+  sources: [
+    {
+      id: 'commandcode',
+      type: 'commandcode',
+      name: 'Command Code 云端',
+      studioUrl: 'https://commandcode.ai/studio',
+      enabled: true
+    }
+  ],
+  autoRefreshMinutes: 10
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -43,7 +57,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     usageOverlay: false
   },
   pricing: {},
-  currency: 'USD'
+  currency: 'USD',
+  monitoring: DEFAULT_MONITORING
 }
 
 // 部分厂商条目参考自 cc-switch (MIT) by farion1231
@@ -56,6 +71,9 @@ export const BUILT_IN_PROVIDER_TEMPLATES = [
   { name: 'Mistral AI', baseUrl: 'https://api.mistral.ai/v1' },
   { name: 'Cohere', baseUrl: 'https://api.cohere.com/v1' },
   { name: 'xAI', baseUrl: 'https://api.x.ai/v1' },
+
+  // ── 云端 Agent 平台 ──
+  { name: 'Command Code', baseUrl: 'https://api.commandcode.ai/provider/v1' },
 
   // ── 聚合 / 路由平台 ──
   { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },

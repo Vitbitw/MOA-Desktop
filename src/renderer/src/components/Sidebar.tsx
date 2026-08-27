@@ -2,13 +2,14 @@ import React, { useState } from 'react'
 import { useConversationStore } from '../store/conversationStore'
 import { useConfigStore } from '../store/configStore'
 import { useSettingsStore } from '../store/settingsStore'
-import { Search, Sun, Moon, Sparkles, RefreshCw, Plus, BarChart3 } from 'lucide-react'
+import { Search, Sun, Moon, Sparkles, RefreshCw, Plus, BarChart3, Globe } from 'lucide-react'
 
 interface SidebarProps {
   onOpenUsage?: () => void
+  onOpenCloud?: () => void
 }
 
-export default function Sidebar({ onOpenUsage }: SidebarProps) {
+export default function Sidebar({ onOpenUsage, onOpenCloud }: SidebarProps) {
   const conversations = useConversationStore((s) => s.conversations)
   const providers = useConfigStore((s) => s.providers)
   const currentId = useConversationStore((s) => s.currentConversationId)
@@ -192,15 +193,26 @@ export default function Sidebar({ onOpenUsage }: SidebarProps) {
         </div>
 
       {/* 底部：用量入口 */}
-      {onOpenUsage && (
-        <div className="p-2 border-t border-border">
-          <button
-            onClick={onOpenUsage}
-            className="w-full flex items-center gap-2 px-2 py-1.5 text-xs rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
-            title="查看用量统计"
-          >
-            <BarChart3 className="w-4 h-4" /> 用量
-          </button>
+      {(onOpenUsage || onOpenCloud) && (
+        <div className="p-2 border-t border-border flex flex-col gap-1">
+          {onOpenUsage && (
+            <button
+              onClick={onOpenUsage}
+              className="w-full flex items-center gap-2 px-2 py-1.5 text-xs rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
+              title="查看本地用量统计"
+            >
+              <BarChart3 className="w-4 h-4" /> 用量
+            </button>
+          )}
+          {onOpenCloud && (
+            <button
+              onClick={onOpenCloud}
+              className="w-full flex items-center gap-2 px-2 py-1.5 text-xs rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
+              title="查看 Command Code 云端用量"
+            >
+              <Globe className="w-4 h-4" /> 云监控
+            </button>
+          )}
         </div>
       )}
     </aside>

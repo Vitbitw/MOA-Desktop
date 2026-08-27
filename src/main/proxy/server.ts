@@ -1,11 +1,13 @@
-import express, { type Express, type Request, type Response } from 'express'
-import cors from 'cors'
+import express, { type Express, type Request, type Response, type NextFunction } from 'express'
+import cors, { type CorsOptions } from 'cors'
+import crypto from 'node:crypto'
 import type { Server } from 'node:http'
 import { getAllProviders } from '../providers/providerManager'
 import { getMoaConfig } from '../moa/moaConfig'
 import { executeMoA } from '../moa/moaEngine'
 import { getDatabase } from '../db/database'
-import type { Provider } from '../../shared/types'
+import { buildUsageEntries, sumUsage } from '../moa/usage'
+import type { Provider, SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
 import { DEFAULT_MAX_CONCURRENCY } from '../../shared/defaults'
 
@@ -54,6 +56,113 @@ function release(): void {
   activeRequests = Math.max(0, activeRequests - 1)
   const next = waiters.shift()
   if (next) next()
+}
+
+// ── 代理鉴权 ──
+// settings.proxy.authEnabled + proxyKey 均配置时，/v1/* 请求必须携带相同密钥
+// （请求头 x-api-key 或 Authorization: Bearer <key>）。
+function getProxyAuth(): { enabled: boolean; key: string } {
+  try {
+    const row = getDatabase().queryOne<{ value: string }>(
+      "SELECT value FROM moa_config WHERE key = 'app_settings'"
+    )
+    if (row?.value) {
+      const proxy = JSON.parse(row.value)?.proxy
+      if (proxy?.authEnabled && proxy?.proxyKey) {
+        return { enabled: true, key: String(proxy.proxyKey) }
+      }
+    }
+  } catch {
+    // 读取失败视为未启用鉴权
+  }
+  return { enabled: false, key: '' }
+}
+
+/** 代理鉴权中间件（仅挂载在 /v1/* 上；/health 除外） */
+function proxyAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const auth = getProxyAuth()
+  if (!auth.enabled) { next(); return }
+  const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : ''
+  const provided =
+    (typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'] : '') ||
+    (authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '')
+  if (provided && provided === auth.key) { next(); return }
+  res.status(401).json({
+    error: { message: 'Unauthorized: invalid or missing API key.', type: 'unauthorized' }
+  })
+}
+
+// ── 代理请求记账 ──
+// 此前代理流量从不写入 request_logs，用量统计（今日/总计/悬浮窗）只覆盖 App 内聊天，
+// 第三方客户端经本地代理产生的费用完全不可见。这里统一记录（source='proxy'）。
+
+/** 组装 moa 结果的用量明细（成功子模型 + 聚合器），供 request_logs.models 使用 */
+function usageInputsFromMoa(result: {
+  subOutputs: SubModelOutput[]
+  aggregatorUsage?: { prompt: number; completion: number }
+  aggregatorModelId?: string
+  aggregatorProviderId?: string
+}): Array<{ modelId: string; providerId?: string; role: 'sub' | 'agg'; prompt: number; completion: number }> {
+  const inputs: Array<{ modelId: string; providerId?: string; role: 'sub' | 'agg'; prompt: number; completion: number }> = []
+  for (const o of result.subOutputs) {
+    if (o.status === 'success' && o.tokenUsage) {
+      inputs.push({
+        modelId: o.modelId,
+        providerId: o.providerId,
+        role: 'sub',
+        prompt: o.tokenUsage.prompt,
+        completion: o.tokenUsage.completion
+      })
+    }
+  }
+  if (result.aggregatorUsage) {
+    inputs.push({
+      modelId: result.aggregatorModelId || '',
+      providerId: result.aggregatorProviderId,
+      role: 'agg',
+      prompt: result.aggregatorUsage.prompt,
+      completion: result.aggregatorUsage.completion
+    })
+  }
+  return inputs
+}
+
+interface ProxyLogEntry {
+  moaMode: string
+  success: boolean
+  prompt: number
+  completion: number
+  durationMs: number
+  subCount: number
+  models?: Array<{ modelId: string; providerId?: string; role: 'sub' | 'agg'; prompt: number; completion: number }>
+  error?: string | null
+}
+
+/** 写入一条代理请求日志（source='proxy'） */
+function logProxyRequest(entry: ProxyLogEntry): void {
+  try {
+    const entries = buildUsageEntries((entry.models || []).map((m) => ({ ...m, cost: 0 })))
+    const totals = sumUsage(entries)
+    getDatabase().exec(
+      `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail, models)
+       VALUES (?, ?, '127.0.0.1', 'proxy', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        crypto.randomUUID(),
+        Date.now(),
+        entry.moaMode,
+        entry.subCount,
+        Math.round(entry.prompt),
+        Math.round(entry.completion),
+        totals.cost,
+        Math.round(entry.durationMs),
+        entry.success ? 1 : 0,
+        entry.error || null,
+        JSON.stringify(entries)
+      ]
+    )
+  } catch (err) {
+    console.error('[Proxy] 记录请求日志失败:', err)
+  }
 }
 
 /** 包装路由：进入时 acquire，响应结束（finish/close 任一）释放。 */
@@ -107,8 +216,29 @@ function routeForRequest(model: string | undefined): { baseUrl: string; apiKey: 
 
 export function createProxyServer(): Express {
   const app: Express = express()
-  app.use(cors())
-  app.use(express.json({ limit: '2mb' }))
+
+  // ── CORS：仅放行本地回环浏览器来源 ──
+  // 此前 cors() 对任意来源全开，恶意网页可借助用户已配置的 Key 调用本地代理消耗上游费用。
+  // 原生客户端（curl / Cline / Copilot 等）请求无 Origin 头，不受影响。
+  const corsOptions: CorsOptions = {
+    origin: (origin, callback) => {
+      if (!origin) { callback(null, true); return }
+      try {
+        const h = new URL(origin).hostname
+        if (h === 'localhost' || h === '127.0.0.1' || h === '::1') {
+          callback(null, true)
+          return
+        }
+      } catch { /* 非法 origin，拒绝 */ }
+      callback(null, false)
+    }
+  }
+  app.use(cors(corsOptions))
+
+  // 鉴权：/health 无需鉴权，/v1/* 全部要求（启用时）
+  app.use('/v1', proxyAuthMiddleware)
+
+  app.use(express.json({ limit: '10mb' }))
 
   // ── Health ──
   app.get('/health', (_req: Request, res: Response) => {
@@ -153,6 +283,7 @@ export function createProxyServer(): Express {
 
     // ── Direct mode ──
     if (config.mode === 'direct' || config.subModels.length === 0) {
+      const reqStart = Date.now()
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
@@ -170,6 +301,16 @@ export function createProxyServer(): Express {
 
         if (!upstream.ok) {
           const errBody = await upstream.text()
+          logProxyRequest({
+            moaMode: 'direct',
+            success: false,
+            prompt: 0,
+            completion: 0,
+            durationMs: Date.now() - reqStart,
+            subCount: 0,
+            models: upstreamModel ? [{ modelId: upstreamModel, role: 'sub', prompt: 0, completion: 0 }] : [],
+            error: `Upstream ${upstream.status}: ${errBody.slice(0, 300)}`
+          })
           res.status(502).json({
             error: { message: `Upstream ${upstream.status}: ${errBody.slice(0, 500)}`, type: 'upstream_error' }
           })
@@ -200,7 +341,8 @@ export function createProxyServer(): Express {
             for (const line of lines) {
               // read 返回后到 write 前客户端可能已断开,再 write 到销毁的响应会触发 error
               if (clientClosed) break
-              if (line.startsWith('data: ')) res.write(line + '\n\n')
+              // 逐行透传（保留 event:/id: 等非 data 行；data 行的帧分隔由原有换行保留）
+              res.write(line + '\n')
             }
           }
           if (!clientClosed) {
@@ -208,14 +350,52 @@ export function createProxyServer(): Express {
             res.write('data: [DONE]\n\n')
             res.end()
           }
+          // 流式不做 token 级解析，仅记录请求计数与成功状态
+          logProxyRequest({
+            moaMode: 'direct',
+            success: !clientClosed,
+            prompt: 0,
+            completion: 0,
+            durationMs: Date.now() - reqStart,
+            subCount: 1,
+            models: upstreamModel ? [{ modelId: upstreamModel, role: 'sub', prompt: 0, completion: 0 }] : [],
+            error: clientClosed ? '客户端提前断开' : null
+          })
         } else {
           const data = await upstream.json()
+          const usage = data.usage || {}
+          logProxyRequest({
+            moaMode: 'direct',
+            success: true,
+            prompt: usage.prompt_tokens || 0,
+            completion: usage.completion_tokens || 0,
+            durationMs: Date.now() - reqStart,
+            subCount: 1,
+            models: upstreamModel ? [{
+              modelId: upstreamModel,
+              role: 'sub' as const,
+              prompt: usage.prompt_tokens || 0,
+              completion: usage.completion_tokens || 0
+            }] : []
+          })
           res.json(data)
         }
       } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        // SSE 流中被取消/断连：仍记一条失败日志（不计 token）
+        if (!(stream && res.headersSent)) {
+          logProxyRequest({
+            moaMode: 'direct',
+            success: false,
+            prompt: 0,
+            completion: 0,
+            durationMs: Date.now() - reqStart,
+            subCount: 0,
+            error: msg
+          })
+        }
         // SSE 已开写后不能再发 JSON 错误体（headers 已发送，Express 会二次抛错挂死响应）——直接收流
         if (stream && res.headersSent) { res.end(); return }
-        const msg = err instanceof Error ? err.message : String(err)
         res.status(502).json({ error: { message: `Proxy: ${msg}`, type: 'proxy_error' } })
       }
       return
@@ -224,6 +404,7 @@ export function createProxyServer(): Express {
     // ── MoA mode (aggregate / compare) ──
     // X1 修复：executeMoA 主体无整体异常防护，Express 4 又不捕获 async handler 的
     // rejection——任何内部抛错（DB 故障等）都会变成 unhandled rejection 崩溃主进程
+    const reqStart = Date.now()
     const result = await executeMoA({
       messages: messages || [],
       subModels: config.subModels,
@@ -241,7 +422,22 @@ export function createProxyServer(): Express {
       }
     })
 
+    // 用量明细（成功子模型 + 聚合器）统一计账
+    const moaInputs = usageInputsFromMoa(result)
+    const moaEntries = moaInputs.map((m) => ({ ...m, cost: 0 }))
+    const moaTotals = sumUsage(buildUsageEntries(moaEntries))
+
     if (!result.success) {
+      logProxyRequest({
+        moaMode: config.mode,
+        success: false,
+        prompt: moaTotals.prompt,
+        completion: moaTotals.completion,
+        durationMs: Date.now() - reqStart,
+        subCount: result.subOutputs.length,
+        models: moaInputs,
+        error: result.error || 'MoA execution failed'
+      })
       res.status(502).json({
         error: { message: result.error || 'MoA execution failed', type: 'moa_error' }
       })
@@ -249,6 +445,15 @@ export function createProxyServer(): Express {
     }
 
     if (config.mode === 'compare') {
+      logProxyRequest({
+        moaMode: 'compare',
+        success: true,
+        prompt: moaTotals.prompt,
+        completion: moaTotals.completion,
+        durationMs: Date.now() - reqStart,
+        subCount: result.subOutputs.length,
+        models: moaInputs
+      })
       // Return sub-model outputs as a structured JSON for external tools
       res.json({
         id: `chatcmpl-moa-${Date.now()}`,
@@ -271,6 +476,15 @@ export function createProxyServer(): Express {
     }
 
     // ── Aggregate mode ──
+    logProxyRequest({
+      moaMode: 'aggregate',
+      success: true,
+      prompt: moaTotals.prompt,
+      completion: moaTotals.completion,
+      durationMs: Date.now() - reqStart,
+      subCount: result.subOutputs.length,
+      models: moaInputs
+    })
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream')
       res.setHeader('Cache-Control', 'no-cache')
@@ -319,7 +533,19 @@ export function createProxyServer(): Express {
   ;['/v1/embeddings', '/v1/images/generations', '/v1/audio/transcriptions', '/v1/audio/speech', '/v1/moderations'].forEach((endpoint) => {
     app.post(endpoint, withConcurrency(async (req: Request, res: Response) => {
       const provider = firstUsableProvider()
-      if (!provider) { res.status(503).json({ error: { message: 'No provider configured', type: 'moa_config_error' } }); return }
+      const reqStart = Date.now()
+      if (!provider) {
+        logProxyRequest({
+          moaMode: 'passthrough',
+          success: false,
+          prompt: 0,
+          completion: 0,
+          durationMs: Date.now() - reqStart,
+          subCount: 0,
+          error: 'No provider configured'
+        })
+        res.status(503).json({ error: { message: 'No provider configured', type: 'moa_config_error' } }); return
+      }
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
@@ -328,8 +554,27 @@ export function createProxyServer(): Express {
           headers,
           body: JSON.stringify(req.body)
         })
+        // passthrough 端点响应体格式各异，不易统一解析 usage；仅记录请求计数与状态
+        logProxyRequest({
+          moaMode: 'passthrough',
+          success: upstream.ok,
+          prompt: 0,
+          completion: 0,
+          durationMs: Date.now() - reqStart,
+          subCount: 0,
+          error: upstream.ok ? null : `Upstream ${upstream.status}`
+        })
         res.status(upstream.status).json(await upstream.json())
-      } catch {
+      } catch (err) {
+        logProxyRequest({
+          moaMode: 'passthrough',
+          success: false,
+          prompt: 0,
+          completion: 0,
+          durationMs: Date.now() - reqStart,
+          subCount: 0,
+          error: err instanceof Error ? err.message : String(err)
+        })
         res.status(502).json({ error: { message: 'Passthrough failed', type: 'proxy_error' } })
       }
     }))

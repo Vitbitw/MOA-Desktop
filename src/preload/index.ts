@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday } from '../shared/types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, CommandCodeUsage, MonitorStatus } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
   // Config / Providers
@@ -50,6 +50,13 @@ contextBridge.exposeInMainWorld('moaAPI', {
   getUsageSummary: (params: { range: UsageRange; groupBy: UsageGroupBy }) =>
     ipcRenderer.invoke(IPC.USAGE_GET_SUMMARY, params),
   getUsageToday: () => ipcRenderer.invoke(IPC.USAGE_GET_TODAY),
+
+  // Cloud Usage Monitoring (Command Code)
+  getMonitorStatus: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_GET_STATUS, sourceId),
+  monitorLogin: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_LOGIN, source),
+  monitorLogout: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_LOGOUT, sourceId),
+  monitorSetApiKey: (sourceId: string, apiKey: string) => ipcRenderer.invoke(IPC.MONITOR_SET_API_KEY, sourceId, apiKey),
+  monitorRefresh: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_REFRESH, source),
 
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => {

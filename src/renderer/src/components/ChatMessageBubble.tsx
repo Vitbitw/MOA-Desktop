@@ -3,12 +3,36 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import type { ChatMessage } from '../../../shared/types'
-import { useConversationStore } from '../store/conversationStore'
+import type { ChatMessage, MoAMode, SubModelOutput } from '../../../shared/types'
+
+/** 单条子模型输出的统一渲染（对比模式平铺 / 聚合模式折叠共用） */
+function SubOutputItem({ out, index }: { out: SubModelOutput; index: number }) {
+  return (
+    <div className="text-xs p-2 rounded bg-background/50 border border-border/30">
+      <div className="font-medium text-muted-foreground mb-1">
+        #{index + 1} {out.modelId}
+        {out.durationMs ? ` · ${out.durationMs}ms` : ''}
+        <span className={`ml-1 ${out.status === 'success' ? 'text-green-500' : 'text-red-500'}`}>
+          {out.status === 'success' ? '✓' : '✗'}
+        </span>
+      </div>
+      {out.status === 'success' ? (
+        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+          {out.content.slice(0, 500)}
+        </ReactMarkdown>
+      ) : (
+        <span className="text-red-400">{out.error}</span>
+      )}
+    </div>
+  )
+}
 
 function ChatMessageBubble({ msg }: { msg: ChatMessage }) {
-  const mode = useConversationStore((s) => s.mode)
   const isUser = msg.role === 'user'
+  // 模式跟随消息创建时的 mode，而非全局当前模式——全局切换模式时历史消息展示不会错乱
+  const effectiveMode: MoAMode = msg.mode || 'aggregate'
+  const subOutputs = msg.subModelOutputs || []
+  const hasSub = subOutputs.length > 0
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -22,92 +46,43 @@ function ChatMessageBubble({ msg }: { msg: ChatMessage }) {
         {isUser ? (
           <pre className="whitespace-pre-wrap font-sans m-0">{msg.content}</pre>
         ) : (
-          /* In compare mode with sub-outputs, the sub-model block below handles all display */
-          (mode === 'aggregate' || !msg.subModelOutputs || msg.subModelOutputs.length === 0) && (
-            <div className="prose prose-sm dark:prose-invert max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-                {msg.content}
-              </ReactMarkdown>
-            </div>
-          )
-        )}
+          <>
+            {/* 正文：聚合/直通模式渲染正文；对比模式由下方子模型展开区承载全部信息 */}
+            {effectiveMode !== 'compare' || !hasSub ? (
+              <div className="prose prose-sm dark:prose-invert max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+                  {msg.content}
+                </ReactMarkdown>
+              </div>
+            ) : null}
 
-        {/* Sub-model outputs: varies by mode */}
-        {!isUser && msg.subModelOutputs && msg.subModelOutputs.length > 0 && (
-          mode === 'aggregate' ? (
-            /* ── 智能聚合：折叠按钮，默认不展开内容 ── */
-            <details className="mt-2 pt-2 border-t border-border/50">
-              <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground select-none">
-                查看子模型输出 ({msg.subModelOutputs.length})
-              </summary>
-              <div className="mt-1 space-y-2">
-                {msg.subModelOutputs.map((out, i) => (
-                  <div key={i} className="text-xs p-2 rounded bg-background/50 border border-border/30">
-                    <div className="font-medium text-muted-foreground mb-1">
-                      #{i + 1} {out.modelId}
-                      {out.durationMs ? ` · ${out.durationMs}ms` : ''}
-                      <span className={`ml-1 ${out.status === 'success' ? 'text-green-500' : 'text-red-500'}`}>
-                        {out.status === 'success' ? '✓' : '✗'}
-                      </span>
-                    </div>
-                    {out.status === 'success' ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-                        {out.content.slice(0, 500)}
-                      </ReactMarkdown>
-                    ) : (
-                      <span className="text-red-400">{out.error}</span>
-                    )}
+            {/* 子模型输出：聚合模式折叠，对比/直通模式平铺 */}
+            {hasSub && (
+              effectiveMode === 'aggregate' ? (
+                <details className="mt-2 pt-2 border-t border-border/50">
+                  <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground select-none">
+                    查看子模型输出 ({subOutputs.length})
+                  </summary>
+                  <div className="mt-1 space-y-2">
+                    {subOutputs.map((out, i) => (
+                      <SubOutputItem key={i} out={out} index={i} />
+                    ))}
                   </div>
-                ))}
-              </div>
-            </details>
-          ) : (
-            /* ── 原始对比：直接展开子模型，顶部显示聚合输出或占位提示 ── */
-            <div className="mt-2 pt-2 border-t border-border/50">
-              {(() => {
-                const isRealAggOutput =
-                  msg.content &&
-                  msg.content.trim() &&
-                  !msg.content.startsWith('已调用') &&
-                  !msg.content.startsWith('(模型返回了空内容)') &&
-                  !msg.content.startsWith('请求失败')
-                return isRealAggOutput ? (
-                  <div className="mb-2 p-2 rounded bg-background/50 border border-border/30">
-                    <p className="text-xs font-medium text-muted-foreground mb-1">聚合模型输出</p>
-                    <div className="prose dark:prose-invert max-w-none text-xs">
-                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
-                  </div>
-                ) : (
+                </details>
+              ) : (
+                <div className="mt-2 pt-2 border-t border-border/50">
                   <p className="text-xs text-muted-foreground mb-2">
-                    以下是 {msg.subModelOutputs.length} 条模型输出的内容
+                    以下是 {subOutputs.length} 条模型输出的内容
                   </p>
-                )
-              })()}
-              <div className="space-y-2">
-                {msg.subModelOutputs.map((out, i) => (
-                  <div key={i} className="text-xs p-2 rounded bg-background/50 border border-border/30">
-                    <div className="font-medium text-muted-foreground mb-1">
-                      #{i + 1} {out.modelId}
-                      {out.durationMs ? ` · ${out.durationMs}ms` : ''}
-                      <span className={`ml-1 ${out.status === 'success' ? 'text-green-500' : 'text-red-500'}`}>
-                        {out.status === 'success' ? '✓' : '✗'}
-                      </span>
-                    </div>
-                    {out.status === 'success' ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-                        {out.content.slice(0, 500)}
-                      </ReactMarkdown>
-                    ) : (
-                      <span className="text-red-400">{out.error}</span>
-                    )}
+                  <div className="space-y-2">
+                    {subOutputs.map((out, i) => (
+                      <SubOutputItem key={i} out={out} index={i} />
+                    ))}
                   </div>
-                ))}
-              </div>
-            </div>
-          )
+                </div>
+              )
+            )}
+          </>
         )}
       </div>
     </div>

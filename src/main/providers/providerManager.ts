@@ -26,10 +26,14 @@ export function addProvider(
   apiKey: string
 ): { id: string } {
   const template = BUILT_IN_PROVIDER_TEMPLATES.find((t) => t.name === name)
-  const url = template?.baseUrl || baseUrl
-
-  // 非内置模板时校验 URL 合法性（内置模板直接信任）
-  if (!template) {
+  // 用户提供的 URL 优先；仅当用户留空时才回退内置模板 URL。
+  // 注意不能模板优先：用户自定义网关命名为「OpenAI」时其 baseUrl 会被静默替换为官方地址。
+  let url = baseUrl.trim()
+  if (!url) {
+    url = template?.baseUrl || ''
+    if (!url) throw new Error('请填写 API 地址（或从内置厂商中选择）')
+  } else {
+    // 用户提供的 URL 一律校验合法性（无论名称是否命中内置模板）
     try {
       const u = new URL(url)
       if (u.protocol !== 'http:' && u.protocol !== 'https:') {

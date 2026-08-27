@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, CommandCodeUsage, MonitorStatus, MonitorErrorCode } from './types'
 
 interface MoaAPI {
   // Config / Providers
@@ -45,6 +45,16 @@ interface MoaAPI {
   getUsageSummary: (params: { range: UsageRange; groupBy: UsageGroupBy }) =>
     Promise<{ success: boolean; data: UsageSummary; error?: string }>
   getUsageToday: () => Promise<{ success: boolean; data: UsageToday; error?: string }>
+
+  // Cloud Usage Monitoring (Command Code)
+  getMonitorStatus: (sourceId: string) =>
+    Promise<{ success: boolean; data: MonitorStatus; error?: string }>
+  monitorLogin: (source: RemoteUsageSource) =>
+    Promise<{ success: boolean; data: { success: boolean; cancelled?: boolean; error?: string }; error?: string }>
+  monitorLogout: (sourceId: string) => Promise<{ success: boolean; error?: string }>
+  monitorSetApiKey: (sourceId: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
+  monitorRefresh: (source: RemoteUsageSource) =>
+    Promise<{ success: boolean; data?: CommandCodeUsage; error?: string; code?: MonitorErrorCode }>
 
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => () => void

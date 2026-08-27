@@ -11,12 +11,13 @@ import MonitorView from './components/MonitorView'
 import SettingsPanel from './components/SettingsPanel'
 import UsageView from './components/UsageView'
 import UsageBar from './components/UsageBar'
+import CloudMonitorView from './components/CloudMonitorView'
 
 function App() {
   const setProviders = useConfigStore((s) => s.setProviders)
   const setConversations = useConversationStore((s) => s.setConversations)
   const [showSettings, setShowSettings] = useState(false)
-  const [viewMode, setViewMode] = useState<'standard' | 'monitor' | 'usage'>('standard')
+  const [viewMode, setViewMode] = useState<'standard' | 'monitor' | 'usage' | 'cloud'>('standard')
 
   // Listen for menu "设置" (Ctrl+,)
   useEffect(() => {
@@ -89,7 +90,7 @@ function App() {
   return (
     <ErrorBoundary>
       <div className="flex h-screen overflow-hidden bg-background">
-        <Sidebar onOpenUsage={() => setViewMode('usage')} />
+        <Sidebar onOpenUsage={() => setViewMode('usage')} onOpenCloud={() => setViewMode('cloud')} />
         <main className="flex flex-col flex-1 min-w-0">
           {/* View mode toolbar — only when chat is showing */}
           {!showSettings && (
@@ -124,6 +125,16 @@ function App() {
               >
                 用量
               </button>
+              <button
+                onClick={() => setViewMode('cloud')}
+                className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                  viewMode === 'cloud'
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+              >
+                云监控
+              </button>
             </div>
           )}
           {!showSettings && viewMode === 'monitor' ? (
@@ -137,6 +148,8 @@ function App() {
               <UsageView />
               <InputBox />
             </>
+          ) : !showSettings && viewMode === 'cloud' ? (
+            <CloudMonitorView />
           ) : !showSettings ? (
             <>
               <UsageBar onOpenUsage={() => setViewMode('usage')} />

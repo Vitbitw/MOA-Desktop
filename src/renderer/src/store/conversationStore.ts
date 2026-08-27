@@ -13,12 +13,24 @@ export interface LiveSubOutput {
   tokenUsage?: { prompt: number; completion: number }
 }
 
+/** DB conversations 表行结构 */
+interface ConversationRow {
+  id: string
+  title?: string | null
+  mode?: string | null
+  sub_models?: string | null
+  created_at: number
+  updated_at: number
+  message_count?: number | null
+  title_edited?: number | null
+}
+
 /** Factory: convert DB row to Conversation type. */
-export function convFromRow(c: any): Conversation {
+export function convFromRow(c: ConversationRow): Conversation {
   return {
     id: c.id,
     title: c.title || '',
-    mode: c.mode || 'aggregate',
+    mode: (c.mode as Conversation['mode']) || 'aggregate',
     subModels: c.sub_models ? JSON.parse(c.sub_models) : [],
     createdAt: c.created_at,
     updatedAt: c.updated_at,
@@ -71,6 +83,8 @@ interface ConversationState {
   // ── Title actions ──
   updateConversationTitle: (id: string, title: string, titleEdited?: boolean) => Promise<void>
   generateAndSetTitle: (id: string, messages: Array<{ role: string; content: string }>, titleSettings: TitleSettings) => Promise<void>
+  /** 自动标题（首次 + 实时更新）：须在消息已更新的时机调用，避免基于旧快照生成 */
+  maybeAutoTitle: (conversationId: string, messages: ChatMessage[]) => void
 }
 
 export const useConversationStore = create<ConversationState>((set, get) => ({
@@ -243,49 +257,10 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     if (window.moaAPI.onAllDone) {
       unsubs.push(window.moaAPI.onAllDone((_data: { conversationId: string; conversations: unknown[] }) => {
         cleanupIfCurrent()
-        // Keep the liveSubOutputs and aggregatorText for display
-        // Refresh conversations list
+        // 仅刷新会话列表；标题自动生成移到 sendMessage 响应分支执行——
+        // 事件先于 invoke 响应到达时 messages 还不含本轮 assistant 回复，
+        // 在此触发会基于不完整上下文生成标题。
         get().refreshConversations()
-
-        // ── Auto-trigger title generation (fire-and-forget, non-blocking) ──
-        window.moaAPI.getSettings().then((settingsRes: any) => {
-          if (!settingsRes.success) return
-          const titleSettings = settingsRes.data?.title as TitleSettings | undefined
-          if (!titleSettings) return
-          // Read fresh state inside async callback to avoid stale closure
-          const currentState = get()
-          const cId = _data.conversationId || currentState.currentConversationId
-          if (!cId) return
-          const conv = currentState.conversations.find((c) => c.id === cId)
-          if (!conv) return
-
-          // Guard: never overwrite user-edited titles
-          if (conv.titleEdited) return
-
-          // ── Branch A: First-time generation ──
-          const isDefaultTitle = !conv.title || conv.title === '新对话'
-          const isFirstAllowed = titleSettings.autoMode === 'first_reply'
-            || titleSettings.autoMode === 'first_and_manual'
-          if (isDefaultTitle && isFirstAllowed) {
-            get().generateAndSetTitle(cId, currentState.messages, titleSettings)
-            return
-          }
-
-          // ── Branch B: Realtime update ──
-          // Only trigger when realtime mode is enabled and a title already exists
-          if (!isDefaultTitle && titleSettings.realtimeMode !== 'off') {
-            if (titleSettings.realtimeMode === 'every_reply') {
-              get().generateAndSetTitle(cId, currentState.messages, titleSettings)
-            } else if (titleSettings.realtimeMode === 'every_n_rounds' && titleSettings.realtimeN > 0) {
-              // A "round" = one user question + one assistant reply = 2 messages
-              // Check if the message count is divisible by (realtimeN * 2)
-              const msgCount = currentState.messages.length
-              if (msgCount > 0 && msgCount % (titleSettings.realtimeN * 2) === 0) {
-                get().generateAndSetTitle(cId, currentState.messages, titleSettings)
-              }
-            }
-          }
-        }).catch(() => {})
       }))
     }
 
@@ -364,6 +339,12 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           currentConversationId: data.conversationId || state.currentConversationId,
           loading: false
         }))
+
+        // ── 自动标题生成（fire-and-forget）──
+        // 此时 messages 已含本轮 assistant 回复，上下文完整；
+        // 主进程 first_message 路径与 renderer first_reply/first_and_manual 路径互斥，不会重复生成。
+        const finalMessages = [...patchedMessages, asstMsg]
+        get().maybeAutoTitle(data.conversationId, finalMessages)
       } else {
         set({ error: String(res.error || '请求失败'), loading: false })
       }
@@ -431,6 +412,46 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         delete next[id]
         return { titleLoading: next }
       })
+    }
+  },
+
+  // 自动标题触发逻辑（首次 + 实时）；renderer 端 first_reply/first_and_manual 在此统一处理，
+  // 主进程仅负责 first_message（见 index.ts）。messages 参数为已含本轮回复的最新消息。
+  maybeAutoTitle: async (conversationId, messages) => {
+    try {
+      const settingsRes = await window.moaAPI.getSettings()
+      if (!settingsRes.success) return
+      const titleSettings = (settingsRes.data as { title?: TitleSettings } | undefined)?.title
+      if (!titleSettings) return
+      if (!conversationId) return
+      const conv = get().conversations.find((c) => c.id === conversationId)
+      if (!conv) return
+      // Guard: never overwrite user-edited titles
+      if (conv.titleEdited) return
+
+      // ── Branch A: First-time generation ──
+      const isDefaultTitle = !conv.title || conv.title === '新对话'
+      const isFirstAllowed = titleSettings.autoMode === 'first_reply'
+        || titleSettings.autoMode === 'first_and_manual'
+      if (isDefaultTitle && isFirstAllowed) {
+        get().generateAndSetTitle(conversationId, messages, titleSettings)
+        return
+      }
+
+      // ── Branch B: Realtime update ──
+      if (!isDefaultTitle && titleSettings.realtimeMode !== 'off') {
+        if (titleSettings.realtimeMode === 'every_reply') {
+          get().generateAndSetTitle(conversationId, messages, titleSettings)
+        } else if (titleSettings.realtimeMode === 'every_n_rounds' && titleSettings.realtimeN > 0) {
+          // A "round" = one user question + one assistant reply = 2 messages
+          const msgCount = messages.length
+          if (msgCount > 0 && msgCount % (titleSettings.realtimeN * 2) === 0) {
+            get().generateAndSetTitle(conversationId, messages, titleSettings)
+          }
+        }
+      }
+    } catch {
+      // 标题生成失败不影响主流程
     }
   }
 }))

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { app, BrowserWindow, ipcMain, Menu, shell, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, clipboard } from 'electron'
 import path from 'path'
 import { getDatabase } from './db/database'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
@@ -13,6 +13,9 @@ import { generateTitle } from './title/titleGenerator'
 import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
 import { invalidateProxyCache } from './local/fetchProxy'
+import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
+import { saveUsageCredential } from './store/key-store'
+import type { RemoteUsageSource } from '../shared/types'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -44,6 +47,35 @@ interface RequestLogRow {
 function broadcastUsageUpdate() {
   mainWindow?.webContents.send(IPC_EVENT.USAGE_UPDATED)
   syncUsageWindow()
+}
+
+/** 记录一次标题生成的用量日志（source='title'）；tokenUsage 缺失则跳过 */
+function recordTitleUsage(modelId: string, providerId: string, tokenUsage?: { prompt: number; completion: number }): void {
+  if (!tokenUsage) return
+  try {
+    const entries = buildUsageEntries([{
+      modelId,
+      providerId,
+      role: 'title',
+      prompt: tokenUsage.prompt,
+      completion: tokenUsage.completion
+    }])
+    getDatabase().exec(
+      `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail, models)
+       VALUES (?, ?, '127.0.0.1', 'title', 'direct', 1, ?, ?, ?, 0, 1, NULL, ?)`,
+      [
+        crypto.randomUUID(),
+        Date.now(),
+        tokenUsage.prompt,
+        tokenUsage.completion,
+        entries[0].cost,
+        JSON.stringify(entries)
+      ]
+    )
+    broadcastUsageUpdate()
+  } catch (err) {
+    console.error('[Main] 记录标题用量失败:', err)
+  }
 }
 
 /**
@@ -181,11 +213,6 @@ function createApplicationMenu() {
             clipboard.writeText(proxy.enabled ? `http://${proxy.host}:${proxy.port}` : '')
             mainWindow?.webContents.send(IPC_EVENT.MENU_COPY_PROXY_URL, url)
           }
-        },
-        { type: 'separator' as const },
-        {
-          label: '项目 GitHub',
-          click: () => shell.openExternal('https://github.com/')
         }
       ]
     }
@@ -391,6 +418,9 @@ function registerIpcHandlers() {
         )
 
         // ── Fire-and-forget: first_message auto title generation ──
+        // 注意：仅处理 autoMode='first_message'（用户首条消息一发出即生成标题）。
+        // first_reply / first_and_manual 由渲染端在 onAllDone 收到完整回复后触发，
+        // 此处必须排除，否则默认 first_and_manual 下两端会重复生成标题（双倍 API 调用）。
         ;(async () => {
           try {
             const settingsRow = db.queryOne<{ value: string }>("SELECT value FROM moa_config WHERE key = 'app_settings'")
@@ -398,7 +428,7 @@ function registerIpcHandlers() {
             const appSettings = JSON.parse(settingsRow.value)
             const ts = appSettings?.title
             if (!ts?.providerId || !ts?.modelId) return
-            if (ts.autoMode !== 'first_message' && ts.autoMode !== 'first_and_manual') return
+            if (ts.autoMode !== 'first_message') return
             const genResult = await generateTitle({
               messages: [{ role: 'user', content: msg.content }],
               providerId: ts.providerId,
@@ -415,29 +445,7 @@ function registerIpcHandlers() {
               }
 
               // 标题生成成功且有 tokenUsage 时，记录一条用量日志（source='title'）；失败不记
-              if (genResult.tokenUsage) {
-                const titleEntries = buildUsageEntries([{
-                  modelId: ts.modelId,
-                  providerId: ts.providerId,
-                  role: 'title',
-                  prompt: genResult.tokenUsage.prompt,
-                  completion: genResult.tokenUsage.completion
-                }])
-                db.exec(
-                  `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail, models)
-                   VALUES (?, ?, '127.0.0.1', 'title', 'direct', 1, ?, ?, ?, 0, 1, NULL, ?)`,
-                  [
-                    crypto.randomUUID(),
-                    Date.now(),
-                    genResult.tokenUsage.prompt,
-                    genResult.tokenUsage.completion,
-                    titleEntries[0].cost,
-                    JSON.stringify(titleEntries)
-                  ]
-                )
-                // 用量更新广播（悬浮窗同步由后续任务接入）
-                broadcastUsageUpdate()
-              }
+              recordTitleUsage(ts.modelId, ts.providerId, genResult.tokenUsage)
             }
           } catch {
             // silent — title generation failure is non-critical
@@ -587,6 +595,8 @@ function registerIpcHandlers() {
       if (result.title === null) {
         return { success: false, error: '标题生成失败：模型返回空或未配置正确（请检查厂商 API Key 和模型 ID）' }
       }
+      // 渲染端手动/首次标题生成同样记录用量，与主进程 first_message 路径口径一致
+      recordTitleUsage(data.modelId, data.providerId, result.tokenUsage)
       return { success: true, title: result.title }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -630,7 +640,8 @@ function registerIpcHandlers() {
       const MODE_LABELS: Record<string, string> = {
         aggregate: '聚合',
         compare: '对比',
-        direct: '直通'
+        direct: '直通',
+        passthrough: '透传'
       }
 
       // 总量：行数 / 成功行数 / 各列累加
@@ -712,7 +723,54 @@ function registerIpcHandlers() {
     }
   })
 
-  }
+  // ── Cloud Usage Monitoring (Command Code) ──
+  ipcMain.handle(IPC.MONITOR_GET_STATUS, (_e, sourceId: string) => {
+    try {
+      return { success: true, data: getMonitorStatus(sourceId) }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.MONITOR_LOGIN, async (_e, source: RemoteUsageSource) => {
+    try {
+      const result = await loginToCommandCode(source, mainWindow)
+      return { success: true, data: result }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.MONITOR_LOGOUT, (_e, sourceId: string) => {
+    try {
+      logoutCommandCode(sourceId)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.MONITOR_SET_API_KEY, (_e, sourceId: string, apiKey: string) => {
+    try {
+      saveUsageCredential(usageApiKeyKey(sourceId), apiKey)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
+    try {
+      const result = await refreshCommandCodeUsage(source)
+      if (result.ok) {
+        return { success: true, data: result.data }
+      }
+      return { success: false, error: result.error, code: result.code }
+    } catch (err) {
+      return { success: false, error: String(err), code: 'unknown' }
+    }
+  })
+}
 
 app.whenReady().then(async () => {
   // Init database

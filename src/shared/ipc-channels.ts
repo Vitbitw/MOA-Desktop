@@ -33,14 +33,19 @@ export const IPC = {
   // Usage Monitoring
   USAGE_GET_SUMMARY: 'usage:getSummary',
   USAGE_GET_TODAY: 'usage:getToday',
+
+  // Cloud Usage Monitoring
+  MONITOR_GET_STATUS: 'monitor:getStatus',
+  MONITOR_LOGIN: 'monitor:login',
+  MONITOR_LOGOUT: 'monitor:logout',
+  MONITOR_SET_API_KEY: 'monitor:setApiKey',
+  MONITOR_REFRESH: 'monitor:refresh',
 } as const
 
 export const IPC_EVENT = {
   MOA_SUB_OUTPUT_UPDATE: 'moa:subOutputUpdate',
-  MOA_SUB_OUTPUT_ERROR: 'moa:subOutputError',
   MOA_AGGREGATION_START: 'moa:aggregationStart',
   MOA_AGGREGATION_CHUNK: 'moa:aggregationChunk',
-  MOA_AGGREGATION_DONE: 'moa:aggregationDone',
   MOA_ALL_DONE: 'moa:allDone',
 
   // Menu events

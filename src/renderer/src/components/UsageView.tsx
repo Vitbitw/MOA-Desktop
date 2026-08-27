@@ -4,11 +4,6 @@ import { useSettingsStore } from '../store/settingsStore'
 import { formatCost, formatTokens } from '../lib/usageFormat'
 import type { UsageRange, UsageGroupBy, UsageSummary } from '../../../shared/types'
 
-// ── moaAPI 用量接口（并行任务正在补全 env.d.ts，此处先做本地类型声明过渡）──
-const usageApi = window.moaAPI as unknown as {
-  getUsageSummary: (params: { range: UsageRange; groupBy: UsageGroupBy }) => Promise<{ success: boolean; data: UsageSummary; error?: string }>
-}
-
 const RANGE_TABS: Array<{ value: UsageRange; label: string }> = [
   { value: 'today', label: '今日' },
   { value: 'week', label: '本周' },
@@ -44,7 +39,7 @@ export default function UsageView() {
     let cancelled = false
     setLoading(true)
     setLoadError(null)
-    usageApi
+    window.moaAPI
       .getUsageSummary({ range, groupBy })
       .then((res) => {
         if (cancelled) return
