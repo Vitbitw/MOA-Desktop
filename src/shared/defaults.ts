@@ -19,7 +19,7 @@ export const DEFAULT_TITLE_SETTINGS = {
   language: 'auto' as const
 }
 
-/** 云端用量监控默认配置：预置启用的 Command Code 与 Xiaomi MiMo 源 */
+/** 云端用量监控默认配置：预置启用的 Command Code / Xiaomi MiMo / DeepSeek 源 */
 export const DEFAULT_MONITORING: MonitoringSettings = {
   sources: [
     {
@@ -34,6 +34,13 @@ export const DEFAULT_MONITORING: MonitoringSettings = {
       type: 'mimo',
       name: 'Xiaomi MiMo',
       studioUrl: 'https://platform.xiaomimimo.com/console/plan-manage',
+      enabled: true
+    },
+    {
+      id: 'deepseek',
+      type: 'deepseek',
+      name: 'DeepSeek 开放平台',
+      studioUrl: 'https://platform.deepseek.com/usage',
       enabled: true
     }
   ],

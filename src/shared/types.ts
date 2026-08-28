@@ -156,9 +156,9 @@ export interface UsageRow { key: string; requests: number; success: number; prom
 export interface UsageSummary { range: UsageRange; groupBy: UsageGroupBy; totals: { requests: number; success: number; prompt: number; completion: number; cost: number }; rows: UsageRow[] }
 export interface UsageToday { prompt: number; completion: number; cost: number; running: boolean }
 
-// ─── Cloud Usage Monitoring (Command Code / Xiaomi MiMo) ───
-/** 云端用量监控源类型（当前支持 Command Code 与 Xiaomi MiMo，后续可扩展） */
-export type RemoteUsageSourceType = 'commandcode' | 'mimo'
+// ─── Cloud Usage Monitoring (Command Code / Xiaomi MiMo / DeepSeek) ───
+/** 云端用量监控源类型（当前支持 Command Code / Xiaomi MiMo / DeepSeek，后续可扩展） */
+export type RemoteUsageSourceType = 'commandcode' | 'mimo' | 'deepseek'
 
 /** 一个云端用量监控源（如 Command Code Studio 账号） */
 export interface RemoteUsageSource {
@@ -247,4 +247,54 @@ export interface MimoUsage {
 }
 
 /** 任意监控源的归一化用量（monitor:refresh 返回值，按 source.type 区分结构） */
-export type MonitorUsage = CommandCodeUsage | MimoUsage
+export type MonitorUsage = CommandCodeUsage | MimoUsage | DeepSeekUsage
+
+// ─── DeepSeek 用量 ───
+
+/** DeepSeek 账户余额条目（/user/balance balance_infos[]，金额为字符串） */
+export interface DeepSeekBalanceInfo {
+  currency: string
+  totalBalance: number
+  grantedBalance: number
+  toppedUpBalance: number
+}
+
+/** DeepSeek 账户余额（/user/balance） */
+export interface DeepSeekBalance {
+  /** 余额是否足以发起 API 调用 */
+  isAvailable: boolean
+  infos: DeepSeekBalanceInfo[]
+}
+
+/** DeepSeek 单模型用量汇总（当月 total） */
+export interface DeepSeekModelUsage {
+  model: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  /** 请求次数（REQUEST） */
+  requests: number
+  /** 花费（cost 接口对应金额） */
+  cost: number
+}
+
+/** DeepSeek 每日用量（近 7 日趋势） */
+export interface DeepSeekDailyUsage {
+  date: string
+  tokens: number
+  cost: number
+}
+
+/** DeepSeek 用量归一化数据。区块可选：对应端点失败时 absent（见 sourcesAvailable） */
+export interface DeepSeekUsage {
+  fetchedAt: number
+  sourcesAvailable: { balance: boolean; usage: boolean }
+  balance?: DeepSeekBalance
+  currency?: string
+  todayTokens?: number
+  todayCost?: number
+  monthTokens?: number
+  monthCost?: number
+  models?: DeepSeekModelUsage[]
+  daily?: DeepSeekDailyUsage[]
+}

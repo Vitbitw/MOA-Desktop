@@ -15,6 +15,7 @@ import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWi
 import { invalidateProxyCache } from './local/fetchProxy'
 import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
 import { loginToMimo, refreshMimoUsage } from './monitoring/mimo'
+import { loginToDeepSeek, logoutDeepSeek, getDeepSeekStatus, refreshDeepSeekUsage } from './monitoring/deepseek'
 import { saveUsageCredential } from './store/key-store'
 import type { RemoteUsageSource } from '../shared/types'
 
@@ -724,10 +725,11 @@ function registerIpcHandlers() {
     }
   })
 
-  // ── Cloud Usage Monitoring (Command Code) ──
-  ipcMain.handle(IPC.MONITOR_GET_STATUS, (_e, sourceId: string) => {
+  // ── Cloud Usage Monitoring (Command Code / MiMo / DeepSeek) ──
+  ipcMain.handle(IPC.MONITOR_GET_STATUS, (_e, source: RemoteUsageSource) => {
     try {
-      return { success: true, data: getMonitorStatus(sourceId) }
+      const status = source.type === 'deepseek' ? getDeepSeekStatus(source.id) : getMonitorStatus(source.id)
+      return { success: true, data: status }
     } catch (err) {
       return { success: false, error: String(err) }
     }
@@ -738,7 +740,9 @@ function registerIpcHandlers() {
       const result =
         source.type === 'mimo'
           ? await loginToMimo(source, mainWindow)
-          : await loginToCommandCode(source, mainWindow)
+          : source.type === 'deepseek'
+            ? await loginToDeepSeek(source, mainWindow)
+            : await loginToCommandCode(source, mainWindow)
       return { success: true, data: result }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -748,6 +752,7 @@ function registerIpcHandlers() {
   ipcMain.handle(IPC.MONITOR_LOGOUT, (_e, sourceId: string) => {
     try {
       logoutCommandCode(sourceId)
+      logoutDeepSeek(sourceId)
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -765,7 +770,12 @@ function registerIpcHandlers() {
 
   ipcMain.handle(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
     try {
-      const result = source.type === 'mimo' ? await refreshMimoUsage(source) : await refreshCommandCodeUsage(source)
+      const result =
+        source.type === 'mimo'
+          ? await refreshMimoUsage(source)
+          : source.type === 'deepseek'
+            ? await refreshDeepSeekUsage(source)
+            : await refreshCommandCodeUsage(source)
       if (result.ok) {
         return { success: true, data: result.data }
       }

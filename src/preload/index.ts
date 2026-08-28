@@ -51,8 +51,8 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.invoke(IPC.USAGE_GET_SUMMARY, params),
   getUsageToday: () => ipcRenderer.invoke(IPC.USAGE_GET_TODAY),
 
-  // Cloud Usage Monitoring (Command Code)
-  getMonitorStatus: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_GET_STATUS, sourceId),
+  // Cloud Usage Monitoring
+  getMonitorStatus: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_GET_STATUS, source),
   monitorLogin: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_LOGIN, source),
   monitorLogout: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_LOGOUT, sourceId),
   monitorSetApiKey: (sourceId: string, apiKey: string) => ipcRenderer.invoke(IPC.MONITOR_SET_API_KEY, sourceId, apiKey),

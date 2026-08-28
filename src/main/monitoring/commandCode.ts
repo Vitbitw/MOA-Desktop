@@ -393,29 +393,6 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   const creditsRes = get(2)
   const windowsRes = get(3)
 
-  // ── 诊断（临时）：打印 200 响应的原始结构，用于核对解析兼容 ──
-  const PREVIEW = (b: unknown): string => {
-    try {
-      const s = JSON.stringify(b)
-      return s.length > 900 ? `${s.slice(0, 900)}…` : s
-    } catch {
-      return String(b)
-    }
-  }
-  if (summaryRes?.status === 200) console.log('[Monitor] summary body:', PREVIEW(summaryRes.body))
-  if (chartsRes?.status === 200) {
-    const raw = chartsRes.body as Record<string, unknown> | null
-    const probe = isObj(raw) ? Object.keys(raw) : []
-    console.log('[Monitor] charts body keys:', JSON.stringify(probe), 'buckets@data:', isObj(raw) ? (Array.isArray(raw.data) ? raw.data.length : typeof raw.data) : 'n/a')
-  }
-  if (creditsRes?.status === 200) console.log('[Monitor] credits body:', PREVIEW(creditsRes.body))
-  if (windowsRes) {
-    if (windowsRes.status === 200) console.log('[Monitor] windows body:', PREVIEW(windowsRes.body))
-    else console.log(`[Monitor] windows: HTTP ${windowsRes.status}`)
-  } else {
-    console.log('[Monitor] windows: 未配置 API Key，跳过 /alpha/billing/credits')
-  }
-
   const summary = summaryRes && summaryRes.status === 200 ? parseSummary(summaryRes.body) : undefined
   if (summary) sourcesAvailable.summary = true
 
