@@ -1029,12 +1029,12 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
 
       {loggedIn && usage && (
         <>
-          {/* API Key 提示条：缺余额时引导配置 */}
+          {/* 余额提醒条：登录态余额也获取失败时展示 */}
           {!usage.sourcesAvailable.balance && (
             <div className="rounded-lg border border-border bg-card px-4 py-2.5 flex flex-wrap items-center gap-2 text-sm">
               <KeyRound className="w-4 h-4 text-muted-foreground flex-shrink-0" />
               <span className="text-xs text-muted-foreground flex-1 min-w-40">
-                账户余额需要配置平台 API Key（在开放平台 → API Keys 生成）。不配置不影响用量数据。
+                余额获取失败，可尝试重新登录；也可配置 API Key 作为余额查询的备用通道。
               </span>
               {status?.hasApiKey && !showApiKeyInput ? (
                 <span className="text-xs text-green-600">已配置 API Key</span>
@@ -1113,27 +1113,41 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
           </section>
 
           {/* 近 7 日趋势 */}
-          {daily.length > 0 && (
-            <section>
-              <h3 className="text-xs font-semibold text-muted-foreground mb-2">近 7 日趋势</h3>
+          <section>
+            <h3 className="text-xs font-semibold text-muted-foreground mb-2">近 7 日趋势</h3>
+            {daily.length > 0 ? (
               <div className="rounded-lg border border-border bg-card px-4 py-4">
+                {/* 柱区：固定高度 + 像素柱高（% 高度在内容撑开的 flex 子项中会失效） */}
                 <div className="flex items-end gap-1.5 h-24">
                   {daily.map((d) => (
-                    <div key={d.date} className="flex-1 flex flex-col items-center gap-1 group">
-                      <div className="text-[10px] text-muted-foreground tabular-nums">{d.tokens > 0 ? fmtNum(d.tokens) : ''}</div>
+                    <div key={d.date} className="flex-1 h-full flex flex-col items-center justify-end gap-1 group">
+                      <div className="text-[10px] leading-none text-muted-foreground tabular-nums h-3">
+                        {d.tokens > 0 ? fmtNum(d.tokens) : ''}
+                      </div>
                       <div
-                        className={`w-full rounded-t ${d.tokens > 0 ? 'bg-primary/80 group-hover:bg-primary' : 'bg-muted/40'}`}
-                        style={{ height: `${Math.max((d.tokens / maxDailyTokens) * 100, d.tokens > 0 ? 6 : 2)}%` }}
-                        title={`${d.date}: ${fmtNum(d.tokens)} tokens · ¥${d.cost.toFixed(4)}`}
+                        className={`w-full max-w-7 rounded-t transition-colors ${d.tokens > 0 ? 'bg-primary group-hover:bg-primary/70' : 'bg-muted/40'}`}
+                        style={{ height: `${Math.max(Math.round((d.tokens / maxDailyTokens) * 48), d.tokens > 0 ? 4 : 2)}px` }}
+                        title={`${d.date}: ${fmtNum(d.tokens)} tokens · ${curSym}${d.cost.toFixed(4)}`}
                       />
-                      <div className="text-[10px] text-muted-foreground">{d.date.slice(5)}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* 日期轴：与柱区同 gap 对齐 */}
+                <div className="flex gap-1.5 mt-1">
+                  {daily.map((d) => (
+                    <div key={d.date} className="flex-1 text-center text-[10px] text-muted-foreground">
+                      {d.date.slice(5)}
                     </div>
                   ))}
                 </div>
                 <div className="mt-2 text-xs text-muted-foreground">柱高按当日 Tokens 归一化；悬停查看 Tokens 与花费。</div>
               </div>
-            </section>
-          )}
+            ) : (
+              <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+                暂无趋势数据
+              </div>
+            )}
+          </section>
 
           {/* 模型明细 */}
           <section>

@@ -41,11 +41,13 @@ export function usageApiKeyKey(sourceId: string): string {
 
 // ─── 登录窗 ───
 
-/** 从登录窗页面的 localStorage 读取 userToken；命中则保存并返回 true */
+/** 从登录窗页面的 localStorage 读取 userToken；命中（value 为非空字符串）则保存并返回 true。
+ * 注意：userToken 的值是 JSON 包装 `{"value": "<token>", ...}`，未登录时 value 为 null，
+ * 不能仅凭「值非空」判定命中，否则会误把占位结构当登录态导致登录窗被误关。 */
 async function tryCaptureToken(win: BrowserWindow, sourceId: string): Promise<boolean> {
   try {
     const token = await win.webContents.executeJavaScript(
-      `(() => { const keys = ${JSON.stringify(TOKEN_KEYS)}; for (const k of keys) { const v = localStorage.getItem(k); if (v && v.trim()) return v.trim(); } return ''; })()`
+      `(() => { const keys = ${JSON.stringify(TOKEN_KEYS)}; for (const k of keys) { const raw = localStorage.getItem(k); if (!raw) continue; try { const parsed = JSON.parse(raw); if (parsed !== null && typeof parsed === 'object') { const inner = parsed.value; if (typeof inner === 'string' && inner.trim()) return inner.trim(); continue; } if (typeof parsed === 'string' && parsed.trim()) return parsed.trim(); continue; } catch { if (raw.trim()) return raw.trim(); } } return ''; })()`
     )
     if (typeof token === 'string' && token) {
       saveUsageCredential(usageTokenKey(sourceId), token)
@@ -102,17 +104,11 @@ export function loginToDeepSeek(
 
     const win = loginWin
 
-    // 仅在页面加载完成后轮询（避免 executeJavaScript 在 document 就绪前执行）
+    // 仅在页面加载完成后轮询（避免 executeJavaScript 在 document 就绪前执行）。
+    // 不设「立即复用旧 token」：SPA 加载初期可能短暂读到旧的过期 token，统一交给轮询 + value 校验判断。
     let pollTimer: ReturnType<typeof setInterval> | null = null
-    const startPolling = async () => {
+    const startPolling = () => {
       if (captured || settled) return
-      // 分区已持久化过登录态（此前登录成功）→ 直接复用
-      if (await tryCaptureToken(win, source.id)) {
-        captured = true
-        finish({ success: true })
-        win.close()
-        return
-      }
       pollTimer = setInterval(async () => {
         if (captured) return
         if (await tryCaptureToken(win, source.id)) {
@@ -210,9 +206,17 @@ async function dsGet(
   }
 }
 
-/** 余额请求（Bearer API Key） */
+/** 余额请求（Bearer API Key，官方公开接口） */
 function fetchBalance(apiKey: string): Promise<DsResponse> {
   return dsGet(`${API_BASE}/user/balance`, apiKey)
+}
+
+/** 平台余额请求（Bearer userToken，登录态即可，无需 API Key）。
+ * GET /api/v0/users/get_user_summary → data.biz_data.{ normal_wallets, bonus_wallets, total_costs } */
+function fetchUserSummary(userToken: string): Promise<DsResponse> {
+  return dsGet(`${PLATFORM_API_BASE}/users/get_user_summary`, userToken, {
+    Referer: 'https://platform.deepseek.com/usage'
+  })
 }
 
 /** 平台用量请求（Bearer userToken / API Key），需带 Referer 通过平台校验 */
@@ -253,6 +257,44 @@ function parseBalance(body: unknown): DeepSeekBalance | undefined {
   }
   if (infos.length === 0) return undefined
   return { isAvailable: body.is_available !== false, infos }
+}
+
+/** 解析 /api/v0/users/get_user_summary：
+ * data.biz_data.{ normal_wallets: [{currency,balance,token_estimation}], bonus_wallets: [...], total_costs: [{currency,amount}] }
+ * 充值余额 = normal_wallets（可负，透支），赠送余额 = bonus_wallets，总余额 = 两者之和 */
+function parseUserSummary(body: unknown): DeepSeekBalance | undefined {
+  const root = isObj(body) ? body : null
+  const data = root && isObj(root.data) ? root.data : null
+  const biz = data && isObj(data.biz_data) ? data.biz_data : null
+  if (!biz) return undefined
+
+  const walletSum = (arr: unknown): Map<string, number> => {
+    const byCur = new Map<string, number>()
+    if (!Array.isArray(arr)) return byCur
+    for (const w of arr) {
+      if (!isObj(w)) continue
+      const currency = typeof w.currency === 'string' ? w.currency : 'CNY'
+      const balance = toNum(w.balance)
+      if (balance === undefined) continue
+      byCur.set(currency, (byCur.get(currency) ?? 0) + balance)
+    }
+    return byCur
+  }
+
+  const normal = walletSum(biz.normal_wallets)
+  const bonus = walletSum(biz.bonus_wallets)
+  const currencies = new Set([...normal.keys(), ...bonus.keys()])
+  const infos: DeepSeekBalanceInfo[] = []
+  for (const currency of currencies) {
+    const toppedUpBalance = normal.get(currency) ?? 0
+    const grantedBalance = bonus.get(currency) ?? 0
+    if (toppedUpBalance === 0 && grantedBalance === 0) continue
+    infos.push({ currency, totalBalance: toppedUpBalance + grantedBalance, grantedBalance, toppedUpBalance })
+  }
+  if (infos.length === 0) return undefined
+  // 有透支（充值余额为负）视为余额不可用；否则可用
+  const isAvailable = infos.every((f) => f.totalBalance > 0)
+  return { isAvailable, infos }
 }
 
 /** 从单模型记录提取 usage 数值映射（按 type → amount，amount 为字符串） */
@@ -365,6 +407,14 @@ function lastSevenDaysKeys(today = new Date()): string[] {
   return keys
 }
 
+/** 把日期字符串归一化为数值（年*10000 + 月*100 + 日），兼容 2026-08-01 / 2026-8-1 / 2026/08/01 */
+function toDateNum(v: unknown): number | null {
+  if (typeof v !== 'string') return null
+  const m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/.exec(v.trim())
+  if (!m) return null
+  return Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3])
+}
+
 // ─── 主入口：拉取并归一化 ───
 
 export type DeepSeekRefreshResult =
@@ -387,8 +437,10 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
   const month = now.getMonth() + 1
 
   const jobs: Promise<DsResponse>[] = []
-  // 余额仅在有 API Key 时请求
-  if (apiKey) jobs.push(fetchBalance(apiKey))
+  // 余额：登录态（userToken）优先，无需 API Key；仅有 API Key 时回退官方 /user/balance
+  const hasBalanceSource = !!userToken || !!apiKey
+  if (userToken) jobs.push(fetchUserSummary(userToken))
+  else if (apiKey) jobs.push(fetchBalance(apiKey))
   jobs.push(fetchPlatformUsage('amount', usageToken, year, month), fetchPlatformUsage('cost', usageToken, year, month))
   let results: PromiseSettledResult<DsResponse>[]
   try {
@@ -398,10 +450,10 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
   }
 
   const get = (i: number): DsResponse | null => (results[i]?.status === 'fulfilled' ? results[i].value : null)
-  const balRes = apiKey ? get(0) : null
-  const amtRes = get(apiKey ? 1 : 0)
-  const costRes = get(apiKey ? 2 : 1)
-  console.log(`[Monitor] deepseek refresh(${source.id}): balance=${balRes?.status ?? 0} amount=${amtRes?.status ?? 0} cost=${costRes?.status ?? 0} (auth=${userToken ? 'userToken' : 'apiKey'})`)
+  const balRes = hasBalanceSource ? get(0) : null
+  const amtRes = get(hasBalanceSource ? 1 : 0)
+  const costRes = get(hasBalanceSource ? 2 : 1)
+  console.log(`[Monitor] deepseek refresh(${source.id}): balance=${balRes?.status ?? 0} amount=${amtRes?.status ?? 0} cost=${costRes?.status ?? 0} (balanceSrc=${userToken ? 'userSummary' : apiKey ? 'userBalance' : 'none'}, usageAuth=${userToken ? 'userToken' : 'apiKey'})`)
 
   // 用量接口 401/403 → 登录态失效（userToken 过期或 API Key 无权访问平台用量）
   if ((amtRes && (amtRes.status === 401 || amtRes.status === 403)) || (costRes && (costRes.status === 401 || costRes.status === 403))) {
@@ -410,9 +462,9 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
 
   const data: DeepSeekUsage = { fetchedAt: Date.now(), sourcesAvailable: { balance: false, usage: false } }
 
-  // 余额（仅 API Key 能拉）
-  if (apiKey && balRes && balRes.status === 200) {
-    const balance = parseBalance(balRes.body)
+  // 余额：userToken → get_user_summary；仅 API Key → /user/balance
+  if (hasBalanceSource && balRes && balRes.status === 200) {
+    const balance = userToken ? parseUserSummary(balRes.body) : parseBalance(balRes.body)
     if (balance) {
       data.balance = balance
       data.sourcesAvailable.balance = true
@@ -422,6 +474,14 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
   // 用量（需 amount 与 cost 至少一个成功）
   const amtPayload = amtRes && amtRes.status === 200 ? extractPayload(amtRes.body) : null
   const costPayload = costRes && costRes.status === 200 ? extractPayload(costRes.body) : null
+  // 诊断：接口状态与解析结果，用于排查趋势/用量数据异常
+  console.log(
+    `[Monitor] deepseek usage parse: amount=${amtRes?.status ?? 0}(${amtPayload ? `total:${amtPayload.total.length},days:${amtPayload.days.length}` : 'null'}) cost=${costRes?.status ?? 0}(${costPayload ? `total:${costPayload.total.length},days:${costPayload.days.length}` : 'null'})`
+  )
+  if (amtRes && amtRes.status !== 500) {
+    const preview = JSON.stringify(amtRes?.body ?? null)
+    console.log(`[Monitor] deepseek amount body (${preview.length} chars):`, preview.slice(0, 300))
+  }
   if (amtPayload || costPayload) {
     const amount = amtPayload ? parseAmount(amtPayload) : null
     const cost = costPayload ? parseCost(costPayload) : null
@@ -443,11 +503,12 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
       .sort((a, b) => b.cost - a.cost || b.totalTokens - a.totalTokens)
     if (modelRows.length > 0) data.models = modelRows
 
-    // 日趋势（近 7 日）：tokens 来自 amount.days，花费来自 cost.days
-    const tokensByDay = new Map<string, number>()
+    // 日趋势（近 7 日）：日期统一归一化为数值 key，避免格式/时区差异导致全部失配
+    const tokensByDay = new Map<number, number>()
     const amtDays = amtPayload?.days ?? []
     for (const day of amtDays) {
-      if (!isObj(day) || typeof day.date !== 'string') continue
+      const dn = toDateNum(isObj(day) ? day.date : null)
+      if (dn === null) continue
       let tokens = 0
       if (Array.isArray(day.data)) {
         for (const raw of day.data) {
@@ -455,18 +516,27 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
           tokens += (m.PROMPT_TOKEN ?? 0) + (m.PROMPT_CACHE_HIT_TOKEN ?? 0) + (m.PROMPT_CACHE_MISS_TOKEN ?? 0) + (m.RESPONSE_TOKEN ?? 0)
         }
       }
-      tokensByDay.set(day.date, (tokensByDay.get(day.date) ?? 0) + tokens)
+      tokensByDay.set(dn, (tokensByDay.get(dn) ?? 0) + tokens)
     }
-    const costByDay = cost?.costByDay ?? new Map<string, number>()
-    const todayKey = lastSevenDaysKeys(now)[6]
-    const daily: DeepSeekDailyUsage[] = lastSevenDaysKeys(now).map((key) => ({
-      date: key,
-      tokens: Math.round(tokensByDay.get(key) ?? 0),
-      cost: costByDay.get(key) ?? 0
-    }))
+    const rawCostByDay = cost?.costByDay ?? new Map<string, number>()
+    const costByDay = new Map<number, number>()
+    for (const [date, c] of rawCostByDay) {
+      const dn = toDateNum(date)
+      if (dn !== null) costByDay.set(dn, (costByDay.get(dn) ?? 0) + c)
+    }
+    const sevenKeys = lastSevenDaysKeys(now)
+    const daily: DeepSeekDailyUsage[] = sevenKeys.map((key) => {
+      const dn = toDateNum(key) ?? 0
+      return {
+        date: key,
+        tokens: Math.round(tokensByDay.get(dn) ?? 0),
+        cost: costByDay.get(dn) ?? 0
+      }
+    })
     data.daily = daily
+    console.log(`[Monitor] deepseek daily generated: ${daily.map((d) => `${d.date.slice(5)}:${d.tokens}`).join(' ')}`)
 
-    const today = daily.find((d) => d.date === todayKey)
+    const today = daily[6]
     data.todayTokens = today?.tokens ?? 0
     data.todayCost = today?.cost ?? 0
     // 当月汇总：amount.total 为当月全部 tokens，cost.total 为当月全部花费（近 7 日只是当月子集）

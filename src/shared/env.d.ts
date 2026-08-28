@@ -47,7 +47,7 @@ interface MoaAPI {
   getUsageToday: () => Promise<{ success: boolean; data: UsageToday; error?: string }>
 
   // Cloud Usage Monitoring (Command Code)
-  getMonitorStatus: (sourceId: string) =>
+  getMonitorStatus: (source: RemoteUsageSource) =>
     Promise<{ success: boolean; data: MonitorStatus; error?: string }>
   monitorLogin: (source: RemoteUsageSource) =>
     Promise<{ success: boolean; data: { success: boolean; cancelled?: boolean; error?: string }; error?: string }>
