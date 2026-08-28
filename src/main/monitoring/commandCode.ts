@@ -275,50 +275,60 @@ function parseWindows(body: unknown): WindowsParse | null {
   return hasWindow || hasCredits ? { ...(fiveHour ? { fiveHour } : {}), ...(weekly ? { weekly } : {}), ...(monthlyCredits !== undefined ? { monthlyCredits } : {}) } : null
 }
 
-interface ChartBucket {
-  model: string
-  timeBucket: string
-  requests: number
-  totalCost: number
-  tokensTotal: number
-  tokensIn: number
-  tokensOut: number
+/** 解析 /internal/usage 的单条用量记录（一条记录 = 一次请求；兼容 camelCase / snake_case 与 meta 嵌套） */
+function parseUsageRecord(raw: unknown): { model: string; tokensIn: number; tokensOut: number; tokensTotal: number; cost: number } | undefined {
+  if (!isObj(raw)) return undefined
+  const meta = isObj(raw.meta) ? raw.meta : null
+  const tokensIn = toNum(raw.tokensIn ?? raw.tokens_in) ?? 0
+  const tokensOut = toNum(raw.tokensOut ?? raw.tokens_out) ?? 0
+  const tokensTotal = toNum(raw.tokensTotal ?? raw.tokens_total) ?? tokensIn + tokensOut
+  // 成本优先取 creditsTotal，其次 meta.totalCost / meta.planPoolDraw，最后兜底 raw.cost
+  const cost =
+    toNum(raw.creditsTotal ?? raw.credits_total) ??
+    toNum(meta?.totalCost ?? meta?.total_cost) ??
+    toNum(meta?.planPoolDraw ?? meta?.plan_pool_draw) ??
+    toNum(raw.cost) ??
+    0
+  // 模型名在 meta.model / meta.modelName（顶层 model 作为兜底）
+  const model =
+    (typeof raw.model === 'string' && raw.model) ||
+    (typeof meta?.model === 'string' && meta.model) ||
+    (typeof meta?.modelName === 'string' && meta.modelName) ||
+    ''
+  if (!model) return undefined
+  return { model, tokensIn, tokensOut, tokensTotal, cost }
 }
 
-/** 聚合 /internal/usage/charts 的按模型明细行（按成本降序） */
-function aggregateCharts(body: unknown): NonNullable<CommandCodeUsage['models']> | undefined {
+/** 聚合 /internal/usage 的按模型明细行（请求数 / tokens / 成本，按成本降序） */
+function aggregateUsage(body: unknown): NonNullable<CommandCodeUsage['models']> | undefined {
   const unwrapped = unwrapSuccess(body)
-  // bucket 列表可能在根部、.data 或 .data.data
+  // 记录列表可能在根部、.usages / .items / .data，或嵌套在 .data.data / .data.usages
   const arr = Array.isArray(unwrapped)
     ? unwrapped
-    : isObj(unwrapped) && Array.isArray(unwrapped.data)
-      ? unwrapped.data
-      : isObj(unwrapped) && isObj(unwrapped.data) && Array.isArray(unwrapped.data.data)
-        ? unwrapped.data.data
-        : null
+    : isObj(unwrapped) && Array.isArray(unwrapped.usages)
+      ? unwrapped.usages
+      : isObj(unwrapped) && Array.isArray(unwrapped.items)
+        ? unwrapped.items
+        : isObj(unwrapped) && Array.isArray(unwrapped.data)
+          ? unwrapped.data
+          : isObj(unwrapped) && isObj(unwrapped.data) && Array.isArray(unwrapped.data.data)
+            ? unwrapped.data.data
+            : isObj(unwrapped) && isObj(unwrapped.data) && Array.isArray(unwrapped.data.usages)
+              ? unwrapped.data.usages
+              : null
   if (!arr || arr.length === 0) return undefined
 
   const map = new Map<string, { model: string; requests: number; cost: number; tokensIn: number; tokensOut: number; tokensTotal: number }>()
   for (const raw of arr) {
-    if (!isObj(raw)) continue
-    const model = typeof raw.model === 'string' ? raw.model : ''
-    if (!model) continue
-    const bucket: ChartBucket = {
-      model,
-      timeBucket: typeof raw.timeBucket === 'string' ? raw.timeBucket : '',
-      requests: toNum(raw.requests) ?? 0,
-      totalCost: toNum(raw.totalCost) ?? 0,
-      tokensTotal: toNum(raw.tokensTotal) ?? 0,
-      tokensIn: toNum(raw.tokensIn) ?? 0,
-      tokensOut: toNum(raw.tokensOut) ?? 0
-    }
-    const agg = map.get(model) ?? { model, requests: 0, cost: 0, tokensIn: 0, tokensOut: 0, tokensTotal: 0 }
-    agg.requests += bucket.requests
-    agg.cost += bucket.totalCost
-    agg.tokensIn += bucket.tokensIn
-    agg.tokensOut += bucket.tokensOut
-    agg.tokensTotal += bucket.tokensTotal
-    map.set(model, agg)
+    const rec = parseUsageRecord(raw)
+    if (!rec) continue
+    const agg = map.get(rec.model) ?? { model: rec.model, requests: 0, cost: 0, tokensIn: 0, tokensOut: 0, tokensTotal: 0 }
+    agg.requests += 1
+    agg.cost += rec.cost
+    agg.tokensIn += rec.tokensIn
+    agg.tokensOut += rec.tokensOut
+    agg.tokensTotal += rec.tokensTotal
+    map.set(rec.model, agg)
   }
   const rows = Array.from(map.values()).sort((a, b) => b.cost - a.cost)
   return rows.length > 0 ? rows : undefined
@@ -359,7 +369,8 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
 
   const requests: Array<Promise<CcResponse | null>> = [
     ccGet('/internal/usage/summary', { token }),
-    ccGet('/internal/usage/charts', { token }),
+    // 用量明细：Studio 侧按“请求记录”返回，limit 取最近 N 条再按模型聚合
+    ccGet('/internal/usage?limit=100', { token }),
     ccGet('/internal/billing/credits', { token }),
     apiKey ? ccGet('/alpha/billing/credits', { apiKey }) : Promise.resolve(null)
   ]
@@ -378,7 +389,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   const getStatus = (i: number): number | null => get(i)?.status ?? null
 
   console.log(
-    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} charts=${getStatus(1)} credits=${getStatus(2)} windows=${getStatus(3)}`
+    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} usage=${getStatus(1)} credits=${getStatus(2)} windows=${getStatus(3)}`
   )
 
   // 401/403 → 会话失效
@@ -389,14 +400,14 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   const sourcesAvailable = { summary: false, charts: false, credits: false, windows: false }
 
   const summaryRes = get(0)
-  const chartsRes = get(1)
+  const usageRes = get(1)
   const creditsRes = get(2)
   const windowsRes = get(3)
 
   const summary = summaryRes && summaryRes.status === 200 ? parseSummary(summaryRes.body) : undefined
   if (summary) sourcesAvailable.summary = true
 
-  const models = chartsRes && chartsRes.status === 200 ? aggregateCharts(chartsRes.body) : undefined
+  const models = usageRes && usageRes.status === 200 ? aggregateUsage(usageRes.body) : undefined
   if (models) sourcesAvailable.charts = true
 
   let credits: { monthlyCredits: number } | undefined

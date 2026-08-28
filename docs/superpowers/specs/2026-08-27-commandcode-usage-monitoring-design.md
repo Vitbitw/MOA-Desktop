@@ -26,7 +26,7 @@ MoA Desktop 已有本地用量统计（`request_logs` 表 + 用量页），但�
 | 端点 | 认证 | 返回 |
 |---|---|---|
 | `GET https://api.commandcode.ai/internal/usage/summary` | Cookie `__Secure-commandcode_prod_.session_token` | `{ totalCount, totalCost, totalTokens, successRate }` |
-| `GET https://api.commandcode.ai/internal/usage/charts` | 同上 | `{ data: [{ model, timeBucket, requests, totalCost, tokensTotal, tokensIn, tokensOut }] }` |
+| `GET https://api.commandcode.ai/internal/usage?limit=N` | 同上 | 用量请求记录列表（`{ usages: [{ id, createdAt, tokensIn, tokensOut, tokensTotal, creditsTotal, meta: { model, provider, planId, totalCost } }] }`），按 model 聚合为模型明细 |
 | `GET https://api.commandcode.ai/internal/billing/credits` | 同上 | `{ credits: { monthlyCredits } }` |
 | `GET https://api.commandcode.ai/alpha/billing/credits` | Bearer API Key（可选） | 5h/7d 窗口（`used_percent`/`reset_at` 等，字段需防御性解析）+ 月度余额 |
 
