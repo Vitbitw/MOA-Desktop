@@ -2,9 +2,10 @@ import React, { useEffect, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
 import { useConfigStore } from '../store/configStore'
 import { useConversationStore } from '../store/conversationStore'
-import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings } from '../../../shared/types'
-import { BUILT_IN_PROVIDER_TEMPLATES } from '../../../shared/defaults'
+import { useProbeStore } from '../store/probeStore'
+import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain } from 'lucide-react'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider } from '../../../shared/types'
+import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 
 type SettingsSection = 'moa' | 'providers' | 'proxy' | 'network' | 'display' | 'pricing' | 'currency' | 'title'
 
@@ -31,7 +32,7 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
     { key: 'network', label: '网络代理' },
     { key: 'title', label: '对话标题' },
     { key: 'display', label: '显示设置' },
-    { key: 'pricing', label: '定价覆盖' },
+    { key: 'pricing', label: '定价' },
     { key: 'currency', label: '货币单位' }
   ]
 
@@ -271,63 +272,8 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
         </div>
       )}
 
-      {/* Pricing Section */}
-      {activeSection === 'pricing' && (
-        <div className="max-w-xl">
-          <p className="text-sm text-muted-foreground mb-4">
-            按模型 ID 设置价格覆盖（USD / 1M tokens，输入/输出单价）。留空则使用厂商默认价格。
-          </p>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border">
-                <th className="text-left py-2 px-2 text-muted-foreground font-medium">模型 ID</th>
-                <th className="text-right py-2 px-2 text-muted-foreground font-medium">输入</th>
-                <th className="text-right py-2 px-2 text-muted-foreground font-medium">输出</th>
-                <th className="text-right py-2 px-2 text-muted-foreground font-medium">缓存读</th>
-                <th className="text-right py-2 px-2 text-muted-foreground font-medium">缓存写</th>
-                <th className="py-2 px-2 w-8"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(settings.pricing).map(([modelId, cfg]) => (
-                <PricingRow
-                  key={modelId}
-                  modelId={modelId}
-                  config={cfg}
-                  onChange={(newCfg) => {
-                    const next = { ...settings.pricing }
-                    next[modelId] = newCfg
-                    updateSetting('pricing', next)
-                  }}
-                  onRemove={() => {
-                    const next = { ...settings.pricing }
-                    delete next[modelId]
-                    updateSetting('pricing', next)
-                  }}
-                />
-              ))}
-              {Object.keys(settings.pricing).length === 0 && (
-                <tr>
-                  <td colSpan={6} className="text-center py-6 text-muted-foreground">
-                    暂无定价覆盖。添加模型以覆盖默认价格。
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-          <button
-            onClick={() => {
-              const next = { ...settings.pricing }
-              const key = `model-${Date.now()}`
-              next[key] = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }
-              updateSetting('pricing', next)
-            }}
-            className="mt-3 text-sm text-primary hover:underline"
-          >
-            + 添加模型
-          </button>
-        </div>
-      )}
+      {/* Pricing Section（每个定价源内含自动探查 + 手动定价覆盖） */}
+      {activeSection === 'pricing' && <ProbeSection />}
 
       {/* Currency Section */}
       {activeSection === 'currency' && (
@@ -553,6 +499,9 @@ function ProvidersSection() {
     await refresh()
   }
 
+  // 仅显示已配置 API Key 的厂商，未配置的（如内置模板占位）不展示
+  const keyedProviders = providers.filter((p) => p.apiKey)
+
   return (
     <div className="max-w-xl">
       <div className="flex items-center justify-between mb-3">
@@ -565,14 +514,14 @@ function ProvidersSection() {
         </button>
       </div>
 
-      {providers.length === 0 && (
+      {keyedProviders.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8 border border-dashed border-border rounded-md">
-          暂无厂商配置，点击上方按钮添加
+          暂无已配置 API Key 的厂商，点击上方按钮添加
         </p>
       )}
 
       <div className="space-y-2">
-        {providers.map((p) => (
+        {keyedProviders.map((p) => (
           <div key={p.id} className="rounded-lg border border-border p-3 text-sm space-y-1.5">
             <div className="flex items-center justify-between">
               <span className="font-medium text-foreground">{p.name}</span>
@@ -890,94 +839,837 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: (v: b
   )
 }
 
+/** 星期选择（显示顺序周一到周日），value 遵循 JS getDay()：0=周日..6=周六 */
+const WEEKDAY_LABELS: { label: string; value: number }[] = [
+  { label: '一', value: 1 },
+  { label: '二', value: 2 },
+  { label: '三', value: 3 },
+  { label: '四', value: 4 },
+  { label: '五', value: 5 },
+  { label: '六', value: 6 },
+  { label: '日', value: 0 }
+]
+const ALL_DAYS = WEEKDAY_LABELS.map((d) => d.value)
+
+/** 星期数组 → 可读文本：每天 / 工作日 / 周末 / 周一、周三 */
+const daysLabel = (days?: number[]): string => {
+  if (!days || days.length === 0) return '每天'
+  const set = new Set(days)
+  if (days.length === 5 && [1, 2, 3, 4, 5].every((d) => set.has(d))) return '工作日'
+  if (days.length === 2 && [0, 6].every((d) => set.has(d))) return '周末'
+  return [...days]
+    .sort((a, b) => {
+      const ra = a === 0 ? 7 : a
+      const rb = b === 0 ? 7 : b
+      return ra - rb
+    })
+    .map((d) => WEEKDAY_LABELS.find((x) => x.value === d)?.label ?? '')
+    .join('、')
+}
+
 function PricingRow({
   modelId,
   config,
   onChange,
-  onRemove
+  onRemove,
+  unitLabel = '$/M',
+  probedWindows,
+  probedTimezone
 }: {
   modelId: string
   config: PricingConfig
   onChange: (cfg: PricingConfig) => void
   onRemove: () => void
+  unitLabel?: string
+  /** 探查到的官方峰谷窗口（只读展示） */
+  probedWindows?: PricingWindow[]
+  probedTimezone?: string
 }) {
   const [editingKey, setEditingKey] = useState(false)
   const [keyDraft, setKeyDraft] = useState(modelId)
+  const [showWindows, setShowWindows] = useState(false)
+
+  const windows = config.windows ?? []
+  const timezone = config.timezone ?? probedTimezone ?? 'Asia/Shanghai'
+  const hasManualWindows = windows.length > 0
+  const hasProbedWindows = (probedWindows?.length ?? 0) > 0
+
+  const updateWindow = (idx: number, patch: Partial<PricingWindow>) => {
+    const next = windows.map((w, i) => (i === idx ? { ...w, ...patch } : w))
+    onChange({ ...config, windows: next, timezone })
+  }
+  const removeWindow = (idx: number) => {
+    const next = windows.filter((_, i) => i !== idx)
+    onChange({ ...config, windows: next.length ? next : undefined, timezone })
+  }
+  const addWindow = () => {
+    const next = [...windows, { start: '09:00', end: '23:00', input: 0, output: 0 }]
+    onChange({ ...config, windows: next, timezone })
+  }
+  /** 切换某窗口适用星期；全选后归一为 undefined（= 每天） */
+  const toggleWindowDay = (idx: number, day: number) => {
+    const cur = windows[idx].days ?? ALL_DAYS
+    const next = cur.includes(day) ? cur.filter((d) => d !== day) : [...cur, day]
+    updateWindow(idx, { days: next.length === ALL_DAYS.length ? undefined : next })
+  }
+
+  const numInputCls =
+    'min-w-0 flex-1 text-right rounded border border-input bg-background px-1.5 py-1 text-xs text-foreground placeholder:text-muted-foreground/60'
 
   return (
-    <tr className="border-b border-border/50 group hover:bg-accent/20">
-      <td className="py-1.5 px-2">
-        {editingKey ? (
-          <input
-            autoFocus
-            value={keyDraft}
-            onChange={(e) => setKeyDraft(e.target.value)}
-            onBlur={() => setEditingKey(false)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') setEditingKey(false)
-              if (e.key === 'Escape') { setKeyDraft(modelId); setEditingKey(false) }
-            }}
-            className="w-full rounded border border-input bg-background px-1.5 py-0.5 text-xs text-foreground"
-          />
-        ) : (
-          <button
-            onClick={() => setEditingKey(true)}
-            className="text-xs text-foreground hover:text-primary font-mono truncate max-w-[140px] block"
-            title="点击编辑模型 ID"
-          >
-            {modelId}
-          </button>
-        )}
-      </td>
-      <td className="py-1.5 px-2">
-        <input
-          type="number"
-          step="0.001"
-          min={0}
-          value={config.input || ''}
-          onChange={(e) => onChange({ ...config, input: Number(e.target.value) || 0 })}
-          className="w-full text-right rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
-        />
-      </td>
-      <td className="py-1.5 px-2">
-        <input
-          type="number"
-          step="0.001"
-          min={0}
-          value={config.output || ''}
-          onChange={(e) => onChange({ ...config, output: Number(e.target.value) || 0 })}
-          className="w-full text-right rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
-        />
-      </td>
-      <td className="py-1.5 px-2">
-        <input
-          type="number"
-          step="0.001"
-          min={0}
-          value={config.cacheRead || ''}
-          onChange={(e) => onChange({ ...config, cacheRead: Number(e.target.value) || 0 })}
-          className="w-full text-right rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
-        />
-      </td>
-      <td className="py-1.5 px-2">
-        <input
-          type="number"
-          step="0.001"
-          min={0}
-          value={config.cacheCreation || ''}
-          onChange={(e) => onChange({ ...config, cacheCreation: Number(e.target.value) || 0 })}
-          className="w-full text-right rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
-        />
-      </td>
-      <td className="py-1.5 px-2">
-        <button
-          onClick={onRemove}
-          className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity text-xs"
-          title="删除此定价覆盖"
+    <>
+      <tr className="border-b border-border/50 group hover:bg-accent/20">
+        <td className="py-1.5 px-2">
+          {editingKey ? (
+            <input
+              autoFocus
+              value={keyDraft}
+              onChange={(e) => setKeyDraft(e.target.value)}
+              onBlur={() => setEditingKey(false)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') setEditingKey(false)
+                if (e.key === 'Escape') { setKeyDraft(modelId); setEditingKey(false) }
+              }}
+              className="w-full rounded border border-input bg-background px-1.5 py-0.5 text-xs text-foreground"
+            />
+          ) : (
+            <button
+              onClick={() => setEditingKey(true)}
+              className="block w-full truncate text-left text-xs font-mono text-foreground hover:text-primary"
+              title="点击编辑模型 ID"
+            >
+              {modelId}
+            </button>
+          )}
+        </td>
+        <td className="py-1.5 px-1">
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              step="0.001"
+              min={0}
+              value={config.input ?? ''}
+              placeholder="未探到"
+              onChange={(e) => onChange({ ...config, input: e.target.value === '' ? undefined : Number(e.target.value) })}
+              className={numInputCls}
+            />
+            <span
+              className="shrink-0 text-[10px] text-muted-foreground whitespace-nowrap"
+              title={unitLabel}
+            >
+              {unitLabel}
+            </span>
+          </div>
+        </td>
+        <td className="py-1.5 px-1">
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              step="0.001"
+              min={0}
+              value={config.output ?? ''}
+              placeholder="未探到"
+              onChange={(e) => onChange({ ...config, output: e.target.value === '' ? undefined : Number(e.target.value) })}
+              className={numInputCls}
+            />
+            <span
+              className="shrink-0 text-[10px] text-muted-foreground whitespace-nowrap"
+              title={unitLabel}
+            >
+              {unitLabel}
+            </span>
+          </div>
+        </td>
+        <td className="py-1.5 px-1">
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              step="0.001"
+              min={0}
+              value={config.cacheRead ?? ''}
+              placeholder="未探到"
+              onChange={(e) => onChange({ ...config, cacheRead: e.target.value === '' ? undefined : Number(e.target.value) })}
+              className={numInputCls}
+            />
+            <span
+              className="shrink-0 text-[10px] text-muted-foreground whitespace-nowrap"
+              title={unitLabel}
+            >
+              {unitLabel}
+            </span>
+          </div>
+        </td>
+        <td className="py-1.5 px-1">
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              step="0.001"
+              min={0}
+              value={config.cacheCreation ?? ''}
+              placeholder="未探到"
+              onChange={(e) => onChange({ ...config, cacheCreation: e.target.value === '' ? undefined : Number(e.target.value) })}
+              className={numInputCls}
+            />
+            <span
+              className="shrink-0 text-[10px] text-muted-foreground whitespace-nowrap"
+              title={unitLabel}
+            >
+              {unitLabel}
+            </span>
+          </div>
+        </td>
+        <td className="py-1.5 px-1">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setShowWindows((v) => !v)}
+              className="text-muted-foreground hover:text-primary"
+              title="峰谷定价（多时段）"
+            >
+              <Mountain className={`w-3.5 h-3.5 ${showWindows ? 'text-primary' : ''}`} />
+            </button>
+            {(hasManualWindows || hasProbedWindows) && (
+              <span
+                className="text-[10px] text-muted-foreground whitespace-nowrap"
+                title={`手动 ${windows.length} 段 / 探查 ${probedWindows?.length ?? 0} 段`}
+              >
+                {windows.length + (probedWindows?.length ?? 0)}
+              </span>
+            )}
+            <button
+              onClick={onRemove}
+              className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity text-xs"
+              title="删除此定价覆盖"
+            >
+              ✕
+            </button>
+          </div>
+        </td>
+      </tr>
+      {showWindows && (
+        <tr className="border-b border-border/50 bg-accent/10">
+          <td colSpan={6} className="py-2 px-3">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-foreground">峰谷定价（多时段）</span>
+                <button
+                  onClick={addWindow}
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-primary"
+                  title="添加一个峰谷时段"
+                >
+                  <Plus className="w-3 h-3" /> 添加时段
+                </button>
+              </div>
+
+              {/* 时区 */}
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-muted-foreground">时区</span>
+                <input
+                  type="text"
+                  value={timezone}
+                  onChange={(e) => onChange({ ...config, timezone: e.target.value.trim() || undefined })}
+                  placeholder="Asia/Shanghai"
+                  className="w-44 rounded border border-input bg-background px-1.5 py-0.5 text-xs text-foreground placeholder:text-muted-foreground/60"
+                />
+                <span className="text-muted-foreground/70">命中窗口则用窗口价，否则用基础价</span>
+              </div>
+
+              {/* 手动峰谷窗口（多时段） */}
+              {windows.length > 0 && (
+                <div className="space-y-1">
+                  {windows.map((w, i) => (
+                    <div key={i} className="flex flex-wrap items-center gap-1.5">
+                      {/* 星期多选 + 快捷按钮 */}
+                      <div className="flex items-center gap-0.5" title={`适用星期：${daysLabel(w.days)}`}>
+                        {[
+                          { label: '工作日', days: [1, 2, 3, 4, 5] },
+                          { label: '周末', days: [0, 6] }
+                        ].map((q) => {
+                          const cur = w.days ?? ALL_DAYS
+                          const active =
+                            q.days.length === cur.length && q.days.every((d) => cur.includes(d))
+                          return (
+                            <button
+                              key={q.label}
+                              onClick={() => updateWindow(i, { days: q.days })}
+                              className={`h-5 rounded px-1 text-[10px] leading-none flex items-center justify-center border transition-colors ${
+                                active
+                                  ? 'bg-primary text-primary-foreground border-primary'
+                                  : 'border-input text-muted-foreground hover:bg-accent'
+                              }`}
+                              title={q.label}
+                            >
+                              {q.label}
+                            </button>
+                          )
+                        })}
+                        {WEEKDAY_LABELS.map((d) => {
+                          const active = (w.days ?? ALL_DAYS).includes(d.value)
+                          return (
+                            <button
+                              key={d.value}
+                              onClick={() => toggleWindowDay(i, d.value)}
+                              className={`h-5 min-w-5 rounded px-0.5 text-[10px] leading-none flex items-center justify-center border transition-colors ${
+                                active
+                                  ? 'bg-primary text-primary-foreground border-primary'
+                                  : 'border-input text-muted-foreground hover:bg-accent'
+                              }`}
+                              title={d.label}
+                            >
+                              {d.label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <input
+                        type="time"
+                        value={w.start}
+                        onChange={(e) => updateWindow(i, { start: e.target.value })}
+                        className="rounded border border-input bg-background px-1 py-0.5 text-xs text-foreground"
+                      />
+                      <span className="text-[10px] text-muted-foreground">至</span>
+                      <input
+                        type="time"
+                        value={w.end}
+                        onChange={(e) => updateWindow(i, { end: e.target.value })}
+                        className="rounded border border-input bg-background px-1 py-0.5 text-xs text-foreground"
+                      />
+                      <span className="ml-1 text-[10px] text-muted-foreground">输入</span>
+                      <input
+                        type="number"
+                        step="0.001"
+                        min={0}
+                        value={w.input}
+                        onChange={(e) => updateWindow(i, { input: Number(e.target.value) || 0 })}
+                        className="w-20 rounded border border-input bg-background px-1.5 py-0.5 text-xs text-foreground"
+                      />
+                      <span className="text-[10px] text-muted-foreground">{unitLabel}</span>
+                      <span className="ml-1 text-[10px] text-muted-foreground">输出</span>
+                      <input
+                        type="number"
+                        step="0.001"
+                        min={0}
+                        value={w.output}
+                        onChange={(e) => updateWindow(i, { output: Number(e.target.value) || 0 })}
+                        className="w-20 rounded border border-input bg-background px-1.5 py-0.5 text-xs text-foreground"
+                      />
+                      <span className="text-[10px] text-muted-foreground">{unitLabel}</span>
+                      <button
+                        onClick={() => removeWindow(i)}
+                        className="text-muted-foreground hover:text-destructive"
+                        title="删除该时段"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 探查到的官方峰谷（只读） */}
+              {hasProbedWindows && (
+                <div className="text-xs text-muted-foreground">
+                  <div className="mb-0.5 font-medium text-foreground">探查到的官方峰谷（只读）</div>
+                  {probedWindows!.map((w, i) => (
+                    <div key={i} className="tabular-nums">
+                      {daysLabel(w.days)}　{w.start}–{w.end}　输入 {w.input} / 输出 {w.output} {unitLabel}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+// ── Pricing Probe Section（官方定价探查）──
+
+function ProbeSection() {
+  const { settings, loadSettings, updateSetting } = useSettingsStore()
+  const providers = useConfigStore((s) => s.providers)
+  const probeCfg = settings.pricingProbe
+  const sources = probeCfg?.sources ?? []
+  const probed = Array.isArray(settings.probedPricing) ? settings.probedPricing : []
+  // 探查运行状态放全局 store：切换页面组件卸载后仍能保留"探查中"状态
+  const { busy, runningIds, messages, progress, setBusy, setRunningIds, setMessages, setProgress } = useProbeStore()
+
+  // 订阅 main 进程实时推送的探查进度（抓取/解析阶段）
+  useEffect(() => {
+    const off = window.moaAPI.onProbeProgress((p) => setProgress(p))
+    return off
+  }, [setProgress])
+
+  // 探查模型选项（仅列有 API Key 的 provider 的模型，探查需要真实调用）
+  const modelOptions = providers
+    .filter((p) => p.apiKey)
+    .flatMap((p) =>
+      (p.models || []).map((m) => ({
+        label: `${p.name} · ${m.id}`,
+        value: `${p.id}:${m.id}`
+      }))
+    )
+
+  // 已配置 API Key 的厂商（可绑定为定价源）
+  const keyedProviders = providers.filter((p) => p.apiKey)
+
+  /** 解析源绑定的厂商：优先 providerId，旧数据回退按名称匹配 */
+  const providerForSource = (source: PricingProbeSource): Provider | undefined => {
+    if (source.providerId) return providers.find((p) => p.id === source.providerId)
+    const n = source.name.trim().toLowerCase()
+    if (!n) return undefined
+    return keyedProviders.find((p) => {
+      const pn = p.name.trim().toLowerCase()
+      return pn === n || pn.includes(n) || n.includes(pn)
+    })
+  }
+
+  // 已配置 key 的厂商自动派生为源（无需手动添加）；派生源不持久化
+  const boundProviderIds = new Set<string>()
+  for (const s of sources) {
+    const pid = providerForSource(s)?.id
+    if (pid) boundProviderIds.add(pid)
+  }
+  const autoSources: PricingProbeSource[] = keyedProviders
+    .filter((p) => !boundProviderIds.has(p.id))
+    .map((p) => ({
+      id: `auto:${p.id}`,
+      name: p.name,
+      providerId: p.id,
+      url: defaultPricingProbeUrlByName(p.name),
+      enabled: true
+    }))
+
+  /** 展示的源 = 绑定已配置 key 厂商的手动源 ∪ 自动派生源；未配置 key 的来源不显示 */
+  const visibleSources = [...sources.filter((s) => !!providerForSource(s)), ...autoSources]
+  /** 自动源 = 未持久化的动态派生源（编辑后会物化进 sources 变为手动源） */
+  const isAutoSource = (sourceId: string): boolean => !sources.some((s) => s.id === sourceId)
+
+  const setSources = (next: PricingProbeSource[]) => {
+    updateSetting('pricingProbe', { ...probeCfg, sources: next })
+  }
+
+  const updateSource = (id: string, patch: Partial<PricingProbeSource>) => {
+    if (sources.some((s) => s.id === id)) {
+      // 手动（已持久化）源：直接更新
+      setSources(sources.map((s) => (s.id === id ? { ...s, ...patch } : s)))
+      return
+    }
+    // 自动派生源（auto:*）：首次编辑时物化为持久源，再应用修改
+    const auto = visibleSources.find((s) => s.id === id)
+    if (auto) setSources([...sources, { ...auto, ...patch }])
+  }
+
+  const runProbe = async (ids: string[] | 'all') => {
+    if (busy) return
+    setBusy(true)
+    setMessages({})
+    setProgress(null)
+    const targets =
+      ids === 'all' ? visibleSources.filter((s) => s.enabled) : visibleSources.filter((s) => ids.includes(s.id))
+    setRunningIds(new Set(targets.map((s) => s.id)))
+    try {
+      const res = await window.moaAPI.probePricing(targets)
+      if (res.success && res.data) {
+        const nextMsg: Record<string, string> = {}
+        for (const r of res.data.results) {
+          nextMsg[r.sourceId] = r.ok ? `已更新 ${r.entryCount} 条定价` : `失败：${r.error}`
+        }
+        setMessages(nextMsg)
+      } else {
+        setMessages({ __global: res.error || '探查失败' })
+      }
+      loadSettings()
+    } catch (err) {
+      setMessages({ __global: String(err) })
+    } finally {
+      setBusy(false)
+      setRunningIds(new Set())
+      setProgress(null)
+    }
+  }
+
+  const sourceMeta = (sourceId: string): { entries: ProbedPricingEntry[]; lastFetchedAt: number } => {
+    const entries = probed.filter((e) => e.sourceId === sourceId)
+    const lastFetchedAt = entries.reduce((max, e) => Math.max(max, e.fetchedAt), 0)
+    return { entries, lastFetchedAt }
+  }
+
+  // 添加源：选择一个已配置 key 的厂商绑定
+  const [addingForProvider, setAddingForProvider] = useState<string | null>(null)
+  const addSourceWithProvider = (providerId: string) => {
+    const p = providers.find((x) => x.id === providerId)
+    if (!p) return
+    if (sources.some((s) => s.providerId === providerId)) {
+      setAddingForProvider(null)
+      return
+    }
+    setSources([
+      ...sources,
+      {
+        id: `src-${Date.now()}`,
+        name: p.name,
+        providerId: p.id,
+        url: defaultPricingProbeUrlByName(p.name),
+        enabled: true
+      }
+    ])
+    setAddingForProvider(null)
+  }
+
+  // ── 手动定价覆盖（每个源内）──
+  /** 该源探查到的条目（前缀匹配模型 ID），用于默认填入与峰谷展示 */
+  const probedEntryFor = (sourceId: string, modelId: string): ProbedPricingEntry | undefined =>
+    probed.find(
+      (e) => e.sourceId === sourceId && (e.pattern === modelId || modelId.startsWith(e.pattern))
+    )
+
+  /** 该源探查到的价格（前缀匹配模型 ID），用于定价框默认填入 */
+  const probedPriceFor = (sourceId: string, modelId: string): PricingConfig | null => {
+    const hit = probedEntryFor(sourceId, modelId)
+    if (!hit) return null
+    return {
+      input: hit.input,
+      output: hit.output,
+      cacheRead: hit.cacheRead,
+      cacheCreation: hit.cacheCreation
+    }
+  }
+
+  /** 官方页计费单位 → 简短缩写（如 per 1M tokens → M；per 1K tokens → K；per request → req） */
+  const unitAbbrev = (unit?: string): string => {
+    if (!unit) return 'M'
+    const u = unit.trim().toLowerCase()
+    if (/1\s*m\s*tokens?|million/i.test(u)) return 'M'
+    if (/1\s*k\s*tokens?/i.test(u)) return 'K'
+    if (/request|call|query/i.test(u)) return 'req'
+    if (/hour/i.test(u)) return 'h'
+    if (/minute/i.test(u)) return 'min'
+    if (/day/i.test(u)) return 'd'
+    if (/image|photo|generation/i.test(u)) return 'img'
+    if (/character|char/i.test(u)) return 'char'
+    const m = u.match(/(\d+\s*[a-z]*)/i)
+    return m ? m[1].trim().replace(/\s+/g, '') : 'M'
+  }
+
+  /** 每条价格按「币种/单位」显示（如 $/M、¥/K）；无探查信息则默认 $/M */
+  const priceUnitLabel = (sourceId: string, modelId: string): string => {
+    const hit = probed.find(
+      (e) =>
+        e.sourceId === sourceId &&
+        (e.pattern === modelId || modelId.startsWith(e.pattern) || e.pattern.startsWith(modelId))
+    )
+    const sym = hit?.currency === 'CNY' ? '¥' : '$'
+    return `${sym}/${unitAbbrev(hit?.unit)}`
+  }
+
+  /** 定价框默认显示：手动覆盖 > 官方探查价 > 全空（用户一编辑即转手动覆盖）。空=未探到；0=免费 */
+  const manualPrice = (sourceId: string, modelId: string): PricingConfig =>
+    settings.pricing[modelId] ??
+    probedPriceFor(sourceId, modelId) ??
+    { input: undefined, output: undefined, cacheRead: undefined, cacheCreation: undefined }
+
+  const setManualPrice = (modelId: string, cfg: PricingConfig) => {
+    updateSetting('pricing', { ...settings.pricing, [modelId]: cfg })
+  }
+
+  /** 该源展示的模型 = 自动探查结果 pattern ∪ 绑定厂商 /models 模型名（去重保序，探查结果优先） */
+  const manualModelIds = (source: PricingProbeSource): string[] => {
+    const prov = providerForSource(source)
+    const provModels = (prov?.models ?? []).map((m) => m.id).filter(Boolean)
+    const probedModels = probed
+      .filter((e) => e.sourceId === source.id)
+      .map((e) => e.pattern.trim())
+      .filter(Boolean)
+    const seen = new Set<string>()
+    return [...probedModels, ...provModels].filter((m) => {
+      if (seen.has(m)) return false
+      seen.add(m)
+      return true
+    })
+  }
+
+  const removeManualModel = (modelId: string) => {
+    const next = { ...settings.pricing }
+    delete next[modelId]
+    updateSetting('pricing', next)
+  }
+
+  // 手动「更新模型」：重新调用该厂商 /models 拉取最新模型列表并刷新本地厂商数据
+  const setProviders = useConfigStore((s) => s.setProviders)
+  const [refreshingModels, setRefreshingModels] = useState<Set<string>>(new Set())
+  const refreshModels = async (providerId: string) => {
+    setRefreshingModels((prev) => new Set(prev).add(providerId))
+    try {
+      await window.moaAPI.getModels(providerId)
+      const res = await window.moaAPI.getProviders()
+      if (res.success) setProviders(res.data as Provider[])
+    } catch {
+      /* ignore */
+    } finally {
+      setRefreshingModels((prev) => {
+        const next = new Set(prev)
+        next.delete(providerId)
+        return next
+      })
+    }
+  }
+
+  return (
+    <div className="space-y-5 max-w-3xl">
+      <p className="text-sm text-muted-foreground">
+        抓取官方定价页并用大模型提取定价，写入独立「官方探查价」层（支持峰谷/错峰时段价）。
+        费用优先级：手动覆盖 &gt; 官方探查 &gt; 内置默认。
+      </p>
+
+      <SettingRow label="探查模型" hint="用于解析定价页的大模型（建议选便宜快速的）。留空则回退聚合模型">
+        <select
+          value={probeCfg?.probeModelId ?? ''}
+          onChange={(e) =>
+            updateSetting('pricingProbe', { ...probeCfg, probeModelId: e.target.value || undefined })
+          }
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
         >
-          ✕
+          <option value="">回退聚合模型</option>
+          {modelOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </SettingRow>
+
+      <SettingRow label="自动刷新间隔（天）" hint="0 = 关闭。开启后每 6 小时检查一次，过期源自动探查">
+        <input
+          type="number"
+          min={0}
+          step={1}
+          value={probeCfg?.autoRefreshDays ?? 0}
+          onChange={(e) =>
+            updateSetting('pricingProbe', {
+              ...probeCfg,
+              autoRefreshDays: Math.max(0, Math.floor(Number(e.target.value) || 0))
+            })
+          }
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+        />
+      </SettingRow>
+
+      {messages.__global && <p className="text-sm text-destructive">{messages.__global}</p>}
+
+      {/* 探查进度提示（多源"全部探查"时显示在顶部；单源探查显示在对应卡片内） */}
+      {busy && progress && progress.total > 1 && (
+        <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
+          <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
+          <span className="text-xs text-foreground whitespace-nowrap">
+            {progress.done
+              ? `${progress.sourceName} ${progress.ok ? `完成（${progress.entryCount} 条）` : `失败：${progress.error}`}`
+              : `正在探查 ${progress.sourceName}（${progress.index}/${progress.total}）… ${
+                  progress.stage === 'fetching' ? '抓取页面' : '大模型解析'
+                }`}
+          </span>
+          <div className="flex-1 h-1 min-w-[60px] bg-border rounded overflow-hidden">
+            <div
+              className="h-full bg-primary transition-all"
+              style={{
+                width: `${Math.min(100, Math.max(4, (progress.index / progress.total) * 100))}%`
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-foreground">定价探查源</h3>
+        <button
+          onClick={() => runProbe('all')}
+          disabled={busy}
+          className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 ${busy ? 'animate-spin' : ''}`} />
+          全部探查
         </button>
-      </td>
-    </tr>
+      </div>
+
+      <div className="space-y-4">
+        {visibleSources.map((s) => {
+          const meta = sourceMeta(s.id)
+          return (
+            <div key={s.id} className="rounded-lg border border-border p-4 space-y-3">
+              {/* 顶部：厂商名标题 + 结果提示 + 探查按钮 + 开关 + 删除 */}
+              <div className="flex items-center gap-3">
+                <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" title={s.name}>
+                  {s.name}
+                </h3>
+                {messages[s.id] && (
+                  <span
+                    className={`whitespace-nowrap text-xs ${
+                      messages[s.id].startsWith('已更新') ? 'text-primary' : 'text-destructive'
+                    }`}
+                  >
+                    {messages[s.id]}
+                  </span>
+                )}
+                <button
+                  onClick={() => runProbe([s.id])}
+                  disabled={busy || !s.url || !providerForSource(s)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-input px-3 py-1 text-sm text-foreground hover:bg-accent/50 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${runningIds.has(s.id) ? 'animate-spin' : ''}`} />
+                  探查并更新
+                </button>
+                <ToggleSwitch checked={!!s.enabled} onChange={(v) => updateSource(s.id, { enabled: v })} />
+                {!isAutoSource(s.id) && (
+                  <button
+                    onClick={() => setSources(sources.filter((x) => x.id !== s.id))}
+                    className="text-muted-foreground hover:text-destructive"
+                    title="删除源"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* 单源探查进度（仅当只探查这一个源时显示在该卡片内） */}
+              {busy && progress && progress.total === 1 && progress.sourceId === s.id && (
+                <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5">
+                  <RefreshCw className="w-3 h-3 shrink-0 animate-spin text-primary" />
+                  <span className="text-xs text-foreground whitespace-nowrap">
+                    {progress.done
+                      ? `${progress.sourceName} ${progress.ok ? `完成（${progress.entryCount} 条）` : `失败：${progress.error}`}`
+                      : `${progress.stage === 'fetching' ? '抓取页面' : '大模型解析'}…`}
+                  </span>
+                  <div className="flex-1 h-1 min-w-[40px] bg-border rounded overflow-hidden">
+                    <div className="h-full bg-primary transition-all" style={{ width: '100%' }} />
+                  </div>
+                </div>
+              )}
+
+              {/* 定价相关区域：仅绑定了已配置 API Key 厂商的来源显示 */}
+              {providerForSource(s) && (
+                <>
+                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                    <span>
+                      上次探查：
+                      {meta.lastFetchedAt ? new Date(meta.lastFetchedAt).toLocaleString() : '从未'}
+                    </span>
+                    <span>{meta.entries.length} 条定价</span>
+                    {meta.entries[0]?.currency && (
+                      <span className={meta.entries[0].currency === 'CNY' ? 'text-primary' : ''}>
+                        官方页币种：{meta.entries[0].currency}
+                        {meta.entries[0].currency === 'CNY' ? '（已折算 USD）' : ''}
+                      </span>
+                    )}
+                  </div>
+
+                  <label className="block">
+                    <span className="text-xs text-muted-foreground">官方定价页 URL</span>
+                    <input
+                      value={s.url}
+                      onChange={(e) => updateSource(s.id, { url: e.target.value })}
+                      className="mt-0.5 w-full rounded-md border border-input bg-background px-2 py-1 text-xs font-mono text-foreground"
+                      placeholder="https://..."
+                    />
+                  </label>
+
+                  {/* 定价：自动填入官方探查价，可直接编辑 */}
+                  <div className="border-t border-border pt-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="text-xs font-semibold text-muted-foreground">
+                        定价（自动填入官方探查价，可编辑）
+                      </h4>
+                      <button
+                        onClick={() => providerForSource(s) && refreshModels(providerForSource(s)!.id)}
+                        disabled={!providerForSource(s) || refreshingModels.has(providerForSource(s)!.id)}
+                        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                        title="重新调用该厂商 /models 获取最新模型列表"
+                      >
+                        <RefreshCw
+                          className={`w-3 h-3 ${providerForSource(s) && refreshingModels.has(providerForSource(s)!.id) ? 'animate-spin' : ''}`}
+                        />
+                        更新模型
+                      </button>
+                    </div>
+
+                    <table className="w-full text-sm table-fixed">
+                      <thead>
+                        <tr className="border-b border-border">
+                          <th className="text-left py-1 px-2 text-muted-foreground font-medium">模型 ID</th>
+                          <th className="text-right py-1 px-1 text-muted-foreground font-medium w-[96px]">输入</th>
+                          <th className="text-right py-1 px-1 text-muted-foreground font-medium w-[96px]">输出</th>
+                          <th className="text-right py-1 px-1 text-muted-foreground font-medium w-[96px]">缓存读</th>
+                          <th className="text-right py-1 px-1 text-muted-foreground font-medium w-[96px]">缓存写</th>
+                          <th className="py-1 px-1 w-6"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {manualModelIds(s).map((modelId) => (
+                          <PricingRow
+                            key={modelId}
+                            modelId={modelId}
+                            config={manualPrice(s.id, modelId)}
+                            onChange={(cfg) => setManualPrice(modelId, cfg)}
+                            onRemove={() => removeManualModel(modelId)}
+                            unitLabel={priceUnitLabel(s.id, modelId)}
+                            probedWindows={probedEntryFor(s.id, modelId)?.windows}
+                            probedTimezone={probedEntryFor(s.id, modelId)?.timezone}
+                          />
+                        ))}
+                        {manualModelIds(s).length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="text-center py-3 text-muted-foreground text-xs">
+                              暂无模型。点击「更新模型」从该厂商拉取模型列表后设置手动价格。
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )
+        })}
+
+        {visibleSources.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            暂无已配置 API Key 的定价源。请先在「厂商」中为对应来源配置 API Key 后显示。
+          </p>
+        )}
+      </div>
+
+      {addingForProvider !== null ? (
+        <div className="flex items-center gap-2">
+          <select
+            autoFocus
+            value=""
+            onChange={(e) => addSourceWithProvider(e.target.value)}
+            className="rounded-md border border-input bg-background px-2 py-1 text-xs font-mono text-foreground"
+          >
+            <option value="">选择要绑定的厂商...</option>
+            {keyedProviders.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => setAddingForProvider(null)}
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            取消
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => setAddingForProvider('')}
+          disabled={keyedProviders.length === 0}
+          className="text-sm text-primary hover:underline disabled:opacity-50"
+        >
+          + 添加源（绑定已配置 key 的厂商）
+        </button>
+      )}
+    </div>
   )
 }

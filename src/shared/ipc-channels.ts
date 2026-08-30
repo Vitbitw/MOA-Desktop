@@ -40,6 +40,9 @@ export const IPC = {
   MONITOR_LOGOUT: 'monitor:logout',
   MONITOR_SET_API_KEY: 'monitor:setApiKey',
   MONITOR_REFRESH: 'monitor:refresh',
+
+  // Pricing Probe
+  PRICING_PROBE_RUN: 'pricing:probeRun',
 } as const
 
 export const IPC_EVENT = {
@@ -47,6 +50,9 @@ export const IPC_EVENT = {
   MOA_AGGREGATION_START: 'moa:aggregationStart',
   MOA_AGGREGATION_CHUNK: 'moa:aggregationChunk',
   MOA_ALL_DONE: 'moa:allDone',
+
+  // 定价探查进度
+  PRICING_PROBE_PROGRESS: 'pricing:probeProgress',
 
   // Menu events
   MENU_NEW_CONVERSATION: 'menu:newConversation',

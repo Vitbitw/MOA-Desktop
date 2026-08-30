@@ -1,4 +1,4 @@
-import type { AppSettings, MonitoringSettings } from './types'
+import type { AppSettings, MonitoringSettings, PricingProbeSource } from './types'
 
 export const DEFAULT_PORT = 28888
 export const DEFAULT_HOST = '127.0.0.1'
@@ -47,6 +47,64 @@ export const DEFAULT_MONITORING: MonitoringSettings = {
   autoRefreshMinutes: 10
 }
 
+/** 定价探查默认源：官方定价页 URL（关键词自动取所绑定厂商 /models 的模型名，用户可在设置页修改/增删） */
+export const DEFAULT_PRICING_PROBE_SOURCES: PricingProbeSource[] = [
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    url: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing',
+    timezone: 'Asia/Shanghai',
+    enabled: true
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    url: 'https://openai.com/api/pricing/',
+    enabled: true
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    url: 'https://www.anthropic.com/pricing',
+    enabled: true
+  },
+  {
+    id: 'glm',
+    name: '智谱 GLM',
+    url: 'https://open.bigmodel.cn/pricing',
+    enabled: true
+  },
+  {
+    id: 'qwen',
+    name: '阿里云百炼 Qwen',
+    url: 'https://help.aliyun.com/zh/model-studio/models',
+    enabled: true
+  },
+  {
+    id: 'kimi',
+    name: '月之暗面 Kimi',
+    url: 'https://platform.moonshot.cn/docs/pricing/chat',
+    enabled: true
+  },
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    url: 'https://www.minimax.io/platform/document/price',
+    enabled: true
+  }
+]
+
+/** 按厂商名称返回预置的官方定价页 URL（新建源时用于预填），无匹配返回空串 */
+export function defaultPricingProbeUrlByName(name: string): string {
+  const n = name.trim().toLowerCase()
+  return DEFAULT_PRICING_PROBE_SOURCES.find((s) => s.name.trim().toLowerCase() === n)?.url ?? ''
+}
+
+export const DEFAULT_PRICING_PROBE = {
+  sources: DEFAULT_PRICING_PROBE_SOURCES,
+  autoRefreshDays: 0
+}
+
 export const DEFAULT_SETTINGS: AppSettings = {
   title: DEFAULT_TITLE_SETTINGS,
   proxy: {
@@ -74,7 +132,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   pricing: {},
   currency: 'USD',
-  monitoring: DEFAULT_MONITORING
+  monitoring: DEFAULT_MONITORING,
+  probedPricing: [],
+  pricingProbe: DEFAULT_PRICING_PROBE
 }
 
 // 部分厂商条目参考自 cc-switch (MIT) by farion1231

@@ -123,13 +123,22 @@ export interface AppSettings {
   currency: 'USD' | 'CNY'
   /** 云端用量监控（如 Command Code Studio） */
   monitoring: MonitoringSettings
+  /** 官方探查定价层（优先级：手动覆盖 > 官方探查 > 内置默认 > 0） */
+  probedPricing: ProbedPricingEntry[]
+  /** 定价探查配置（源 + 自动刷新 + 探查模型） */
+  pricingProbe: PricingProbeSettings
 }
 
 export interface PricingConfig {
-  input: number
-  output: number
-  cacheRead: number
-  cacheCreation: number
+  /** 单价（每 1M tokens）。undefined 表示未探到/未设置；0 表示免费 */
+  input?: number
+  output?: number
+  cacheRead?: number
+  cacheCreation?: number
+  /** 峰谷时段价（多时段窗口），请求时间命中窗口则用窗口价，否则用基础价 */
+  windows?: PricingWindow[]
+  /** 窗口时区（IANA），默认 Asia/Shanghai */
+  timezone?: string
 }
 
 // ─── IPC Streaming Events ───
@@ -297,4 +306,89 @@ export interface DeepSeekUsage {
   monthCost?: number
   models?: DeepSeekModelUsage[]
   daily?: DeepSeekDailyUsage[]
+}
+
+// ─── 定价探查（LLM 自动更新官方定价）───
+
+/** 峰谷时段价：请求时间落在 [start, end) 内且星期匹配则用窗口价，否则用基础价 */
+export interface PricingWindow {
+  /** 时段开始 'HH:mm'，24h */
+  start: string
+  /** 时段结束 'HH:mm'，24h；start > end 表示跨午夜 */
+  end: string
+  /** USD / 1M tokens */
+  input: number
+  output: number
+  /** 适用的星期：0=周日 .. 6=周六（JS Date.getDay() 语义）。缺省/空 = 每天 */
+  days?: number[]
+}
+
+/** 一条探查到的官方定价（统一存储为 USD / 1M tokens） */
+export interface ProbedPricingEntry {
+  /** 模型 ID 前缀（最长前缀匹配，与 DEFAULT_PRICING 语义一致） */
+  pattern: string
+  input: number
+  output: number
+  cacheRead?: number
+  cacheCreation?: number
+  /** 峰谷时段价（可空 = 无时段价） */
+  windows?: PricingWindow[]
+  /** 窗口时区（IANA），探查时从源写入，默认 Asia/Shanghai */
+  timezone?: string
+  /** 官方页原始币种（存储价格统一折算为 USD） */
+  currency?: 'USD' | 'CNY'
+  /** 官方页计费单位描述（如 "per 1M tokens" / "per 1K tokens" / "per request"）；空则按 1M tokens */
+  unit?: string
+  /** 来源与时间元数据（UI 展示 + 自动刷新判断） */
+  sourceId: string
+  sourceUrl: string
+  fetchedAt: number
+}
+
+/** 一个定价探查源 */
+export interface PricingProbeSource {
+  id: string
+  name: string
+  /** 绑定的厂商 ID（已配置 API Key 的 provider）；模型关键词自动取该厂商 /models 的模型名 */
+  providerId?: string
+  /** 官方定价页 URL */
+  url: string
+  /** 峰谷时段基准时区（IANA，默认 Asia/Shanghai） */
+  timezone?: string
+  enabled: boolean
+}
+
+/** 定价探查进度事件（main → renderer，探查过程中实时推送） */
+export interface ProbeProgressEvent {
+  /** 当前探查的源 ID（用于 UI 定位到对应源卡片） */
+  sourceId: string
+  /** 当前探查的源名 */
+  sourceName: string
+  /** 当前源序号（从 1 开始） */
+  index: number
+  /** 源总数 */
+  total: number
+  /** 当前阶段：抓取页面 / 大模型解析 */
+  stage: 'fetching' | 'extracting'
+  /** 该源是否已完成（最后一个进度事件，携带结果） */
+  done?: boolean
+  ok?: boolean
+  entryCount?: number
+  error?: string
+}
+
+export interface PricingProbeSettings {
+  sources: PricingProbeSource[]
+  /** 自动刷新间隔（天），0 = 关闭（默认 0） */
+  autoRefreshDays: number
+  /** 探查用模型（'providerId:modelId' 格式）；缺省回退聚合模型 */
+  probeModelId?: string
+}
+
+/** pricing:probeRun 返回的单个源探查结果 */
+export interface PricingProbeResultItem {
+  sourceId: string
+  ok: boolean
+  entryCount?: number
+  error?: string
 }

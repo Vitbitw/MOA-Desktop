@@ -3,7 +3,7 @@ import { app, BrowserWindow, ipcMain, Menu, clipboard } from 'electron'
 import path from 'path'
 import { getDatabase } from './db/database'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow } from '../shared/types'
+import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, ProbedPricingEntry, PricingProbeSource, ProbeProgressEvent } from '../shared/types'
 import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
@@ -16,6 +16,7 @@ import { invalidateProxyCache } from './local/fetchProxy'
 import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
 import { loginToMimo, refreshMimoUsage } from './monitoring/mimo'
 import { loginToDeepSeek, logoutDeepSeek, getDeepSeekStatus, refreshDeepSeekUsage } from './monitoring/deepseek'
+import { resolveProbeModel, probeSources, getPricingProbeConfig, sourceHasConfiguredKey } from './pricing/probe'
 import { saveUsageCredential } from './store/key-store'
 import type { RemoteUsageSource } from '../shared/types'
 
@@ -24,6 +25,9 @@ let mainWindow: BrowserWindow | null = null
 // ── 用量监控状态 ──
 // MoA 任务是否正在执行（用于今日用量悬浮窗的 running 状态）
 let moaRunning = false
+
+// ── 定价探查状态 ──
+let pricingProbeRunning = false
 
 /** request_logs 表行结构（含 models 列） */
 interface RequestLogRow {
@@ -547,7 +551,7 @@ function registerIpcHandlers() {
           completion: moaResult.aggregatorUsage.completion
         })
       }
-      const usageEntries = buildUsageEntries(usageInputs)
+      const usageEntries = buildUsageEntries(usageInputs, now)
       const usageTotals = sumUsage(usageEntries)
       db.exec(
         `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail, models)
@@ -784,6 +788,80 @@ function registerIpcHandlers() {
       return { success: false, error: String(err), code: 'unknown' }
     }
   })
+
+  // ── 定价探查（LLM 自动更新官方定价）──
+  ipcMain.handle(IPC.PRICING_PROBE_RUN, async (_e, sources?: PricingProbeSource[]) => {
+    if (pricingProbeRunning) return { success: false, error: '探查进行中' }
+    pricingProbeRunning = true
+    try {
+      // 直接探查调用方传入的源对象（已配置 key 的厂商可自动派生，无需持久化源）
+      const valid = (Array.isArray(sources) ? sources : []).filter(
+        (s) => s && s.enabled !== false && sourceHasConfiguredKey(s)
+      )
+      if (valid.length === 0) return { success: true, data: { results: [] } }
+      const model = resolveProbeModel()
+      if (!model) {
+        return { success: false, error: '未配置可用的大模型（请先配置带 API Key 的厂商，或在「定价探查」指定探查模型）' }
+      }
+      // 探查过程中向渲染进程实时推送进度事件
+      const emitProgress = (p: ProbeProgressEvent) => {
+        mainWindow?.webContents.send(IPC_EVENT.PRICING_PROBE_PROGRESS, p)
+      }
+      const results = await probeSources(valid, model, emitProgress)
+      return { success: true, data: { results } }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    } finally {
+      pricingProbeRunning = false
+    }
+  })
+}
+
+/** 定价探查自动刷新：启动后 10s 跑一次，之后每 6h 检查；仅探查 autoRefreshDays 过期且已启用的源 */
+function schedulePricingAutoRefresh(): void {
+  const runOnce = async () => {
+    if (pricingProbeRunning) return
+    try {
+      const { autoRefreshDays, sources } = getPricingProbeConfig()
+      if (autoRefreshDays <= 0) return
+      const enabled = sources.filter((s) => s.enabled && sourceHasConfiguredKey(s))
+      if (enabled.length === 0) return
+
+      let probed: ProbedPricingEntry[] = []
+      const row = getDatabase().queryOne<{ value: string }>(
+        "SELECT value FROM moa_config WHERE key = 'app_settings'"
+      )
+      if (row?.value) {
+        const parsed = JSON.parse(row.value) as Partial<AppSettings>
+        probed = Array.isArray(parsed.probedPricing) ? parsed.probedPricing : []
+      }
+
+      const cutoff = Date.now() - autoRefreshDays * 24 * 60 * 60 * 1000
+      const stale = enabled.filter((s) => {
+        const last = probed.filter((e) => e.sourceId === s.id).reduce((max, e) => Math.max(max, e.fetchedAt), 0)
+        return last < cutoff
+      })
+      if (stale.length === 0) return
+
+      const model = resolveProbeModel()
+      if (!model) {
+        console.warn('[PricingProbe] 自动刷新跳过：未配置可用的大模型')
+        return
+      }
+      console.log(`[PricingProbe] 自动刷新 ${stale.length} 个过期源`)
+      pricingProbeRunning = true
+      try {
+        await probeSources(stale, model)
+      } finally {
+        pricingProbeRunning = false
+      }
+    } catch (err) {
+      console.error('[PricingProbe] 自动刷新失败:', err)
+    }
+  }
+
+  setTimeout(runOnce, 10_000)
+  setInterval(runOnce, 6 * 60 * 60 * 1000)
 }
 
 app.whenReady().then(async () => {
@@ -812,6 +890,9 @@ app.whenReady().then(async () => {
 
   // Register IPC handlers
   registerIpcHandlers()
+
+  // 定价探查自动刷新（默认关闭，autoRefreshDays>0 时启用）
+  schedulePricingAutoRefresh()
 
   // Set up Chinese application menu
   createApplicationMenu()

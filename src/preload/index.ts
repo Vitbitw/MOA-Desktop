@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus } from '../shared/types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, ProbeProgressEvent } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
   // Config / Providers
@@ -58,6 +58,14 @@ contextBridge.exposeInMainWorld('moaAPI', {
   monitorSetApiKey: (sourceId: string, apiKey: string) => ipcRenderer.invoke(IPC.MONITOR_SET_API_KEY, sourceId, apiKey),
   monitorRefresh: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_REFRESH, source),
 
+  // Pricing Probe
+  probePricing: (sources: PricingProbeSource[]) => ipcRenderer.invoke(IPC.PRICING_PROBE_RUN, sources),
+  onProbeProgress: (callback: (data: ProbeProgressEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: ProbeProgressEvent) => callback(data)
+    ipcRenderer.on(IPC_EVENT.PRICING_PROBE_PROGRESS, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.PRICING_PROBE_PROGRESS, handler)
+  },
+
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: SubOutputUpdate) => callback(data)
@@ -88,6 +96,7 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.removeAllListeners(IPC_EVENT.MOA_AGGREGATION_START)
     ipcRenderer.removeAllListeners(IPC_EVENT.MOA_AGGREGATION_CHUNK)
     ipcRenderer.removeAllListeners(IPC_EVENT.MOA_ALL_DONE)
+    ipcRenderer.removeAllListeners(IPC_EVENT.PRICING_PROBE_PROGRESS)
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_NEW_CONVERSATION)
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_COPY_PROXY_URL)
     ipcRenderer.removeAllListeners(IPC_EVENT.TITLE_UPDATED)

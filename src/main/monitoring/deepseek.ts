@@ -507,7 +507,8 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
     const tokensByDay = new Map<number, number>()
     const amtDays = amtPayload?.days ?? []
     for (const day of amtDays) {
-      const dn = toDateNum(isObj(day) ? day.date : null)
+      if (!isObj(day)) continue
+      const dn = toDateNum(day.date)
       if (dn === null) continue
       let tokens = 0
       if (Array.isArray(day.data)) {

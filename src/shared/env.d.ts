@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent } from './types'
 
 interface MoaAPI {
   // Config / Providers
@@ -55,6 +55,11 @@ interface MoaAPI {
   monitorSetApiKey: (sourceId: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
   monitorRefresh: (source: RemoteUsageSource) =>
     Promise<{ success: boolean; data?: MonitorUsage; error?: string; code?: MonitorErrorCode }>
+
+  // Pricing Probe
+  probePricing: (sources: PricingProbeSource[]) =>
+    Promise<{ success: boolean; data?: { results: PricingProbeResultItem[] }; error?: string }>
+  onProbeProgress: (callback: (data: ProbeProgressEvent) => void) => () => void
 
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => () => void
