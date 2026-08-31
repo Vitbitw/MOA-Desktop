@@ -111,7 +111,7 @@ class ChunkedDecoder {
 /** 标记代理 HTTPS 不可用（30s 冷却期） */
 function markProxyBroken(): void {
   proxyBrokenUntil = Date.now() + 30_000
-  console.warn('[Network] 代理 HTTPS 不可用，30s 内直连')
+  console.warn('[Network] proxy HTTPS unavailable, direct connection for 30s')
 }
 
 function isProxyBroken(): boolean {
@@ -394,7 +394,7 @@ async function fetchOnce(
 
   const proxy = parseProxy(proxyUrl)
   if (!proxy) {
-    console.warn(`[Network] 代理地址格式错误: ${proxyUrl}，退化为直连`)
+    console.warn(`[Network] invalid proxy URL: ${proxyUrl}, fallback to direct`)
     return fetch(url, init)
   }
 
@@ -416,7 +416,7 @@ async function fetchOnce(
       throw err
     }
     if (isHttps) markProxyBroken()
-    console.warn(`[Network] 代理请求失败: ${msg}，退化为直连`)
+    console.warn(`[Network] proxy request failed: ${msg}, fallback to direct`)
     // 保留 init(含 headers/method/body/signal 未触发时也能响应后续取消)
     return fetch(url, init)
   }
@@ -540,7 +540,7 @@ export async function fetchProxy(
         attempt < maxAttempts
       ) {
         try { await resp.body?.cancel() } catch { /* ignore */ }
-        console.warn(`[Network] HTTP ${resp.status}，将重试（第 ${attempt}/${maxAttempts} 次尝试）: ${String(url)}`)
+        console.warn(`[Network] HTTP ${resp.status}, retrying (attempt ${attempt}/${maxAttempts}): ${String(url)}`)
         continue
       }
       return resp
@@ -549,7 +549,7 @@ export async function fetchProxy(
       if (callerSignal?.aborted) throw err instanceof Error ? err : new Error(String(err))
       lastError = err instanceof Error ? err : new Error(String(err))
       if (attempt < maxAttempts) {
-        console.warn(`[Network] ${timedOut ? '请求超时' : '请求失败'}，将重试（第 ${attempt}/${maxAttempts} 次尝试）: ${lastError.message}`)
+        console.warn(`[Network] ${timedOut ? 'request timed out' : 'request failed'}, retrying (attempt ${attempt}/${maxAttempts}): ${lastError.message}`)
       }
     } finally {
       clearTimeout(timer)

@@ -165,7 +165,7 @@ function logProxyRequest(entry: ProxyLogEntry): void {
       ]
     )
   } catch (err) {
-    console.error('[Proxy] 记录请求日志失败:', err)
+    console.error('[Proxy] failed to record request log:', err)
   }
 }
 

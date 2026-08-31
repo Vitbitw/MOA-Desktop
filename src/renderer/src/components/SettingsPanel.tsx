@@ -2,12 +2,12 @@ import React, { useEffect, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
 import { useConfigStore } from '../store/configStore'
 import { useConversationStore } from '../store/conversationStore'
-import { useProbeStore } from '../store/probeStore'
-import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain } from 'lucide-react'
+import { useProbeStore, type PricingSortKey } from '../store/probeStore'
+import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 
-type SettingsSection = 'moa' | 'providers' | 'proxy' | 'network' | 'display' | 'pricing' | 'currency' | 'title'
+type SettingsSection = 'moa' | 'providers' | 'proxy' | 'network' | 'display' | 'pricing' | 'title'
 
 export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const { settings, loaded, loadSettings, updateSetting } = useSettingsStore()
@@ -32,8 +32,7 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
     { key: 'network', label: '网络代理' },
     { key: 'title', label: '对话标题' },
     { key: 'display', label: '显示设置' },
-    { key: 'pricing', label: '定价' },
-    { key: 'currency', label: '货币单位' }
+    { key: 'pricing', label: '定价' }
   ]
 
   return (
@@ -274,36 +273,6 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
 
       {/* Pricing Section（每个定价源内含自动探查 + 手动定价覆盖） */}
       {activeSection === 'pricing' && <ProbeSection />}
-
-      {/* Currency Section */}
-      {activeSection === 'currency' && (
-        <div className="space-y-5 max-w-xl">
-          <SettingRow label="货币单位" hint="费用统计和显示使用的货币">
-            <div className="flex gap-2">
-              <button
-                onClick={() => updateSetting('currency', 'USD')}
-                className={`px-4 py-2 rounded-md text-sm border transition-colors ${
-                  settings.currency === 'USD'
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-input text-foreground hover:bg-accent/50'
-                }`}
-              >
-                USD ($)
-              </button>
-              <button
-                onClick={() => updateSetting('currency', 'CNY')}
-                className={`px-4 py-2 rounded-md text-sm border transition-colors ${
-                  settings.currency === 'CNY'
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-input text-foreground hover:bg-accent/50'
-                }`}
-              >
-                CNY (¥)
-              </button>
-            </div>
-          </SettingRow>
-        </div>
-      )}
 
       {/* Title Settings Section */}
       {activeSection === 'title' && <TitleSettingsSection />}
@@ -1193,7 +1162,8 @@ function ProbeSection() {
   const sources = probeCfg?.sources ?? []
   const probed = Array.isArray(settings.probedPricing) ? settings.probedPricing : []
   // 探查运行状态放全局 store：切换页面组件卸载后仍能保留"探查中"状态
-  const { busy, runningIds, messages, progress, setBusy, setRunningIds, setMessages, setProgress } = useProbeStore()
+  const { busy, runningIds, messages, progress, setBusy, setRunningIds, setMessages, setProgress, collapsed, toggleCollapsed, sorts, setSort } =
+    useProbeStore()
 
   // 订阅 main 进程实时推送的探查进度（抓取/解析阶段）
   useEffect(() => {
@@ -1396,6 +1366,48 @@ function ProbeSection() {
     updateSetting('pricing', next)
   }
 
+  // ── 表格排序（按模型 ID / 输入 / 输出 / 缓存读 / 缓存写）──
+  /** 可排序列定义（表头点击切换；同列再次点击切换升降序） */
+  const SORT_COLUMNS: { key: PricingSortKey; label: string }[] = [
+    { key: 'modelId', label: '模型 ID' },
+    { key: 'input', label: '输入' },
+    { key: 'output', label: '输出' },
+    { key: 'cacheRead', label: '缓存读' },
+    { key: 'cacheCreation', label: '缓存写' }
+  ]
+  /** 按当前排序状态重排模型 ID 列表；未设置排序时保持原顺序。价格取展示值（手动覆盖 > 探查价），undefined（未探到）恒排最后 */
+  const sortModelIds = (sourceId: string, ids: string[]): string[] => {
+    const sort = sorts[sourceId]
+    if (!sort) return ids
+    const dir = sort.dir === 'asc' ? 1 : -1
+    const originalIndex = new Map(ids.map((m, i) => [m, i]))
+    if (sort.key === 'modelId') {
+      return [...ids].sort((a, b) => {
+        const diff = a.localeCompare(b)
+        return diff !== 0 ? dir * diff : originalIndex.get(a)! - originalIndex.get(b)!
+      })
+    }
+    const priceKey = sort.key as Exclude<PricingSortKey, 'modelId'>
+    return [...ids].sort((a, b) => {
+      const va = manualPrice(sourceId, a)[priceKey]
+      const vb = manualPrice(sourceId, b)[priceKey]
+      if (va === undefined && vb === undefined) return originalIndex.get(a)! - originalIndex.get(b)!
+      if (va === undefined) return 1
+      if (vb === undefined) return -1
+      if (va === vb) return originalIndex.get(a)! - originalIndex.get(b)!
+      return dir * (va - vb)
+    })
+  }
+  /** 表头点击：切换该列排序（同列翻转方向） */
+  const handleSortClick = (sourceId: string, key: PricingSortKey) => setSort(sourceId, key)
+  const sortIndicator = (sourceId: string, key: PricingSortKey) => {
+    const cur = sorts[sourceId]
+    if (!cur || cur.key !== key) {
+      return <ArrowUpDown className="w-3 h-3 opacity-40" />
+    }
+    return cur.dir === 'asc' ? <ArrowUp className="w-3 h-3 text-primary" /> : <ArrowDown className="w-3 h-3 text-primary" />
+  }
+
   // 手动「更新模型」：重新调用该厂商 /models 拉取最新模型列表并刷新本地厂商数据
   const setProviders = useConfigStore((s) => s.setProviders)
   const [refreshingModels, setRefreshingModels] = useState<Set<string>>(new Set())
@@ -1440,7 +1452,7 @@ function ProbeSection() {
         </select>
       </SettingRow>
 
-      <SettingRow label="自动刷新间隔（天）" hint="0 = 关闭。开启后每 6 小时检查一次，过期源自动探查">
+      <SettingRow label="自动刷新间隔（天）" hint="0 = 关闭。开启后按该天数轮回探查，超期未更新的定价源自动重新探查">
         <input
           type="number"
           min={0}
@@ -1576,9 +1588,16 @@ function ProbeSection() {
                   {/* 定价：自动填入官方探查价，可直接编辑 */}
                   <div className="border-t border-border pt-3">
                     <div className="flex items-center justify-between mb-2">
-                      <h4 className="text-xs font-semibold text-muted-foreground">
+                      <button
+                        onClick={() => toggleCollapsed(s.id)}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-muted-foreground hover:text-foreground"
+                        title={collapsed.has(s.id) ? '展开模型列表' : '收起模型列表'}
+                      >
+                        <ChevronDown
+                          className={`w-3.5 h-3.5 transition-transform ${collapsed.has(s.id) ? '-rotate-90' : ''}`}
+                        />
                         定价（自动填入官方探查价，可编辑）
-                      </h4>
+                      </button>
                       <button
                         onClick={() => providerForSource(s) && refreshModels(providerForSource(s)!.id)}
                         disabled={!providerForSource(s) || refreshingModels.has(providerForSource(s)!.id)}
@@ -1592,19 +1611,35 @@ function ProbeSection() {
                       </button>
                     </div>
 
-                    <table className="w-full text-sm table-fixed">
+                    {!collapsed.has(s.id) && (
+                      <table className="w-full text-sm table-fixed">
                       <thead>
                         <tr className="border-b border-border">
-                          <th className="text-left py-1 px-2 text-muted-foreground font-medium">模型 ID</th>
-                          <th className="text-right py-1 px-1 text-muted-foreground font-medium w-[96px]">输入</th>
-                          <th className="text-right py-1 px-1 text-muted-foreground font-medium w-[96px]">输出</th>
-                          <th className="text-right py-1 px-1 text-muted-foreground font-medium w-[96px]">缓存读</th>
-                          <th className="text-right py-1 px-1 text-muted-foreground font-medium w-[96px]">缓存写</th>
+                          {SORT_COLUMNS.map((col) => {
+                            const isNum = col.key !== 'modelId'
+                            return (
+                              <th
+                                key={col.key}
+                                className={`py-1 text-muted-foreground font-medium ${isNum ? 'text-right px-1 w-[96px]' : 'text-left px-2'}`}
+                              >
+                                <button
+                                  onClick={() => handleSortClick(s.id, col.key)}
+                                  className={`inline-flex items-center gap-0.5 hover:text-foreground transition-colors ${
+                                    sorts[s.id]?.key === col.key ? 'text-primary' : ''
+                                  }`}
+                                  title={`按${col.label}排序`}
+                                >
+                                  {col.label}
+                                  {sortIndicator(s.id, col.key)}
+                                </button>
+                              </th>
+                            )
+                          })}
                           <th className="py-1 px-1 w-6"></th>
                         </tr>
                       </thead>
                       <tbody>
-                        {manualModelIds(s).map((modelId) => (
+                        {sortModelIds(s.id, manualModelIds(s)).map((modelId) => (
                           <PricingRow
                             key={modelId}
                             modelId={modelId}
@@ -1625,6 +1660,7 @@ function ProbeSection() {
                         )}
                       </tbody>
                     </table>
+                    )}
                   </div>
                 </>
               )}

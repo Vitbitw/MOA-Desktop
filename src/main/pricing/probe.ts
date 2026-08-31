@@ -435,7 +435,7 @@ export async function probeSource(
 ): Promise<ProbeSourceResult> {
   // 关键词自动取所绑定厂商 /models 的模型名
   const keywords = await getSourceKeywords(source)
-  console.log(`[PricingProbe] ${source.name}(${source.id}) 探查模型: ${model.baseUrl} / ${model.modelId}`)
+  console.log(`[PricingProbe] ${source.name}(${source.id}) probe model: ${model.baseUrl} / ${model.modelId}`)
   onStage?.('fetching')
   const pageText = await fetchPageText(source.url, keywords)
   if (!pageText) {
@@ -448,13 +448,13 @@ export async function probeSource(
   if (result.status !== 'success' || !result.content) {
     return { ok: false, error: `大模型调用失败: ${result.error || '空响应'}` }
   }
-  console.log(`[PricingProbe] ${source.name}(${source.id}) 页面 ${pageText.length} 字符，关键词 ${keywords.length} 个，LLM 响应 ${result.content.length} 字符`)
+  console.log(`[PricingProbe] ${source.name}(${source.id}) page ${pageText.length} chars, keywords ${keywords.length}, LLM response ${result.content.length} chars`)
 
   const entries = buildProbedEntries(source, extractJsonArray(result.content) ?? [])
   if (entries.length === 0) {
     // 失败时打印原始响应便于定位（可能是格式不符 / 页面无相关价格）
     console.warn(
-      `[PricingProbe] ${source.name}(${source.id}) 未解析出有效定价，LLM 原始响应: ${result.content.slice(0, 800)}`
+      `[PricingProbe] ${source.name}(${source.id}) no valid pricing parsed, LLM raw response: ${result.content.slice(0, 800)}`
     )
     return { ok: false, error: '未能从页面解析出有效定价' }
   }
@@ -560,7 +560,7 @@ async function callProbeLLM(model: ProbeModel, prompt: string): Promise<SubModel
     last = fallback
     const err = fallback.error || streamed.error || ''
     if (!isRetriableLLMError(err) || attempt === 2) return fallback
-    console.warn(`[PricingProbe] LLM 调用失败（可重试），${attempt + 1} 次尝试: ${err}`)
+    console.warn(`[PricingProbe] LLM call failed (retriable), attempt ${attempt + 1}: ${err}`)
     await sleep(2_000 * attempt)
   }
   return last ?? { modelId: model.modelId, providerId: model.providerId, content: '', status: 'error', error: 'unknown' }
@@ -599,7 +599,7 @@ export async function probeSources(
       entryCount: r.ok ? r.entries.length : undefined,
       error: r.ok ? undefined : r.error
     })
-    if (!r.ok) console.warn(`[PricingProbe] ${source.name}(${source.id}) 失败: ${r.error}`)
+    if (!r.ok) console.warn(`[PricingProbe] ${source.name}(${source.id}) failed: ${r.error}`)
   }
   return results
 }

@@ -139,7 +139,7 @@ export function loginToCommandCode(
               .get({})
               .then((all) => {
                 const names = all.map((c) => `${c.name}@${c.domain}`).join(', ')
-                console.warn(`[Monitor] 登录窗关闭且宽限期后仍未捕获到会话 cookie。分区现有: ${names || '(空)'}`)
+                console.warn(`[Monitor] login window closed and session cookie still not captured after grace period. current partitions: ${names || '(none)'}`)
               })
               .catch(() => {})
           }

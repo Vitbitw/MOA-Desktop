@@ -129,7 +129,7 @@ export function loginToMimo(
           if (attempts >= 8) {
             clearInterval(graceTimer)
             finish({ success: false, cancelled: true })
-            console.warn('[Monitor] MiMo 登录窗关闭且宽限期后仍未捕获到凭证 cookie')
+            console.warn('[Monitor] MiMo login window closed, credential cookie not captured after grace period')
           }
         }, 500)
         return

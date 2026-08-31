@@ -80,7 +80,7 @@ function recordTitleUsage(modelId: string, providerId: string, tokenUsage?: { pr
     )
     broadcastUsageUpdate()
   } catch (err) {
-    console.error('[Main] 记录标题用量失败:', err)
+    console.error('[Main] failed to record title usage:', err)
   }
 }
 
@@ -98,7 +98,7 @@ function maybeCreateUsageOverlay() {
       createUsageWindow(settings)
     }
   } catch (err) {
-    console.error('[Main] 创建用量悬浮窗失败:', err)
+    console.error('[Main] failed to create usage overlay:', err)
   }
 }
 
@@ -817,10 +817,11 @@ function registerIpcHandlers() {
   })
 }
 
-/** 定价探查自动刷新：启动后 10s 跑一次，之后每 6h 检查；仅探查 autoRefreshDays 过期且已启用的源 */
+/** 定价探查自动刷新：启动后先探查一次，之后严格按 autoRefreshDays（天）轮回；默认关闭（>0 时启用） */
 function schedulePricingAutoRefresh(): void {
+  let timer: NodeJS.Timeout | null = null
+
   const runOnce = async () => {
-    if (pricingProbeRunning) return
     try {
       const { autoRefreshDays, sources } = getPricingProbeConfig()
       if (autoRefreshDays <= 0) return
@@ -845,10 +846,10 @@ function schedulePricingAutoRefresh(): void {
 
       const model = resolveProbeModel()
       if (!model) {
-        console.warn('[PricingProbe] 自动刷新跳过：未配置可用的大模型')
+        console.warn('[PricingProbe] auto-refresh skipped: no probe model available')
         return
       }
-      console.log(`[PricingProbe] 自动刷新 ${stale.length} 个过期源`)
+      console.log(`[PricingProbe] auto-refresh ${stale.length} stale source(s)`)
       pricingProbeRunning = true
       try {
         await probeSources(stale, model)
@@ -856,12 +857,20 @@ function schedulePricingAutoRefresh(): void {
         pricingProbeRunning = false
       }
     } catch (err) {
-      console.error('[PricingProbe] 自动刷新失败:', err)
+      console.error('[PricingProbe] auto-refresh failed:', err)
+    } finally {
+      scheduleNext()
     }
   }
 
+  const scheduleNext = () => {
+    const { autoRefreshDays } = getPricingProbeConfig()
+    if (autoRefreshDays <= 0) return
+    timer = setTimeout(runOnce, autoRefreshDays * 24 * 60 * 60 * 1000)
+  }
+
+  // 启动后 10s 探查一次，之后按设置的天数轮回
   setTimeout(runOnce, 10_000)
-  setInterval(runOnce, 6 * 60 * 60 * 1000)
 }
 
 app.whenReady().then(async () => {

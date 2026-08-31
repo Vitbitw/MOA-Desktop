@@ -144,7 +144,7 @@ export function loginToDeepSeek(
           if (attempts >= 8) {
             clearInterval(graceTimer)
             finish({ success: false, cancelled: true })
-            console.warn('[Monitor] DeepSeek 登录窗关闭且宽限期后仍未捕获到 userToken')
+            console.warn('[Monitor] DeepSeek login window closed, userToken not captured after grace period')
           }
         }, 500)
         return

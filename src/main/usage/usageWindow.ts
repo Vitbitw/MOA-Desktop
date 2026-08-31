@@ -50,7 +50,7 @@ function patchDisplay(patch: Record<string, unknown>): void {
       [JSON.stringify({ ...current, display }), Date.now()]
     )
   } catch (err) {
-    console.error('[UsageOverlay] 保存设置失败:', err)
+    console.error('[UsageOverlay] failed to save settings:', err)
   }
 }
 

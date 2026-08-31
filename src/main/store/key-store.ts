@@ -26,7 +26,7 @@ function encryptValue(plain: string): string {
     }
   } catch (err) {
     // 加密失败回退明文
-    console.warn('[KeyStore] safeStorage 加密失败，API Key 明文落盘:', err)
+    console.warn('[KeyStore] safeStorage encryption failed, API key stored in plaintext:', err)
   }
   return plain
 }
@@ -37,13 +37,13 @@ function decryptValue(stored: unknown): string {
     try {
       if (!safeStorage.isEncryptionAvailable()) {
         // 系统密钥库不可用（如 Linux 无 keyring）：无法解密，明确提示，避免静默显示「未配置 Key」
-        console.warn('[KeyStore] safeStorage 不可用，无法解密 API Key（请重新填写）')
+        console.warn('[KeyStore] safeStorage unavailable, cannot decrypt API key (please re-enter)')
         return ''
       }
       return safeStorage.decryptString(Buffer.from(stored.slice(4), 'base64'))
     } catch (err) {
       // 解密失败（如系统密钥变化）：无法恢复旧密文，提示用户重新填写
-      console.warn('[KeyStore] API Key 解密失败（系统凭据可能已变化），请重新填写:', err)
+      console.warn('[KeyStore] API key decryption failed (system credentials may have changed), please re-enter:', err)
       return ''
     }
   }
@@ -74,9 +74,9 @@ function healCorruptStore(): void {
   } catch {
     try {
       fs.renameSync(p, `${p}.corrupt-${Date.now()}`)
-      console.warn('[KeyStore] moa-keys.json 损坏，已备份并重建，请重新填写 API Key')
+      console.warn('[KeyStore] moa-keys.json corrupted, backed up and rebuilt, please re-enter API key')
     } catch (err) {
-      console.error('[KeyStore] 备份损坏文件失败:', err)
+      console.error('[KeyStore] failed to back up corrupted file:', err)
     }
   }
 }
