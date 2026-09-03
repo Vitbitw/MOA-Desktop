@@ -3,7 +3,7 @@ import { app, BrowserWindow, ipcMain, Menu, clipboard } from 'electron'
 import path from 'path'
 import { getDatabase } from './db/database'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, ProbedPricingEntry, PricingProbeSource, ProbeProgressEvent } from '../shared/types'
+import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, ProbedPricingEntry, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
 import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
@@ -53,6 +53,11 @@ interface RequestLogRow {
 function broadcastUsageUpdate() {
   mainWindow?.webContents.send(IPC_EVENT.USAGE_UPDATED)
   syncUsageWindow()
+}
+
+/** 向主窗口推送一条悬浮通知（渲染进程全局 ToastCenter 展示） */
+function sendToastToRenderer(data: ToastData): void {
+  mainWindow?.webContents.send(IPC_EVENT.RENDERER_TOAST, data)
 }
 
 /** 记录一次标题生成的用量日志（source='title'）；tokenUsage 缺失则跳过 */
@@ -360,6 +365,11 @@ function registerIpcHandlers() {
       // ── 网络代理变更 → 清除代理缓存 ──
       if (key === 'network') {
         invalidateProxyCache()
+      }
+
+      // ── 定价探查设置变更 → 重新调度自动探查定时器（间隔/源变化即时生效）──
+      if (key === 'pricingProbe') {
+        reschedulePricingAutoRefresh()
       }
 
       // ── 桌面用量悬浮窗开关联动 ──
@@ -817,14 +827,27 @@ function registerIpcHandlers() {
   })
 }
 
-/** 定价探查自动刷新：启动后先探查一次，之后严格按 autoRefreshDays（天）轮回；默认关闭（>0 时启用） */
-function schedulePricingAutoRefresh(): void {
-  let timer: NodeJS.Timeout | null = null
+/** 定价探查自动刷新定时器句柄（模块级，设置变更时可重置） */
+let pricingAutoRefreshTimer: NodeJS.Timeout | null = null
+/** 调度世代：每次重新调度 +1，丢弃旧一轮仍在运行的任务对定时器的覆盖 */
+let pricingAutoRefreshEpoch = 0
+
+/**
+ * 定价探查自动刷新：先探查一次，之后严格按 autoRefreshSeconds（秒）轮回；默认关闭（>0 时启用）。
+ * 可重复调用以按最新配置重新调度（设置变更时由 reschedulePricingAutoRefresh 触发）。
+ */
+function schedulePricingAutoRefresh(initialDelayMs = 10_000): void {
+  const epoch = ++pricingAutoRefreshEpoch
+  if (pricingAutoRefreshTimer) {
+    clearTimeout(pricingAutoRefreshTimer)
+    pricingAutoRefreshTimer = null
+  }
 
   const runOnce = async () => {
+    if (epoch !== pricingAutoRefreshEpoch) return
     try {
-      const { autoRefreshDays, sources } = getPricingProbeConfig()
-      if (autoRefreshDays <= 0) return
+      const { autoRefreshSeconds, sources } = getPricingProbeConfig()
+      if (autoRefreshSeconds <= 0) return
       const enabled = sources.filter((s) => s.enabled && sourceHasConfiguredKey(s))
       if (enabled.length === 0) return
 
@@ -837,7 +860,7 @@ function schedulePricingAutoRefresh(): void {
         probed = Array.isArray(parsed.probedPricing) ? parsed.probedPricing : []
       }
 
-      const cutoff = Date.now() - autoRefreshDays * 24 * 60 * 60 * 1000
+      const cutoff = Date.now() - autoRefreshSeconds * 1000
       const stale = enabled.filter((s) => {
         const last = probed.filter((e) => e.sourceId === s.id).reduce((max, e) => Math.max(max, e.fetchedAt), 0)
         return last < cutoff
@@ -850,6 +873,12 @@ function schedulePricingAutoRefresh(): void {
         return
       }
       console.log(`[PricingProbe] auto-refresh ${stale.length} stale source(s)`)
+      // 执行前预警：后台自动刷新定价同样会调用大模型，弹悬浮通知告知
+      sendToastToRenderer({
+        type: 'warning',
+        title: '定价自动刷新将消耗 Token',
+        message: `将对 ${stale.length} 个过期定价源调用 "${model.modelId}" 探查，产生 Token 消耗`
+      })
       pricingProbeRunning = true
       try {
         await probeSources(stale, model)
@@ -859,18 +888,27 @@ function schedulePricingAutoRefresh(): void {
     } catch (err) {
       console.error('[PricingProbe] auto-refresh failed:', err)
     } finally {
-      scheduleNext()
+      if (epoch === pricingAutoRefreshEpoch) scheduleNext()
     }
   }
 
   const scheduleNext = () => {
-    const { autoRefreshDays } = getPricingProbeConfig()
-    if (autoRefreshDays <= 0) return
-    timer = setTimeout(runOnce, autoRefreshDays * 24 * 60 * 60 * 1000)
+    if (pricingAutoRefreshTimer) {
+      clearTimeout(pricingAutoRefreshTimer)
+      pricingAutoRefreshTimer = null
+    }
+    const { autoRefreshSeconds } = getPricingProbeConfig()
+    if (autoRefreshSeconds <= 0) return
+    pricingAutoRefreshTimer = setTimeout(runOnce, autoRefreshSeconds * 1000)
   }
 
-  // 启动后 10s 探查一次，之后按设置的天数轮回
-  setTimeout(runOnce, 10_000)
+  // 首次探查：启动后 10s（或设置变更后 5s），之后按设置的间隔轮回
+  pricingAutoRefreshTimer = setTimeout(runOnce, initialDelayMs)
+}
+
+/** 定价探查设置变更后重新调度：清旧定时器，约 5s 后先探查一次，再按最新间隔轮回 */
+function reschedulePricingAutoRefresh(): void {
+  schedulePricingAutoRefresh(5_000)
 }
 
 app.whenReady().then(async () => {
@@ -900,7 +938,7 @@ app.whenReady().then(async () => {
   // Register IPC handlers
   registerIpcHandlers()
 
-  // 定价探查自动刷新（默认关闭，autoRefreshDays>0 时启用）
+  // 定价探查自动刷新（默认关闭，autoRefreshSeconds>0 时启用）
   schedulePricingAutoRefresh()
 
   // Set up Chinese application menu

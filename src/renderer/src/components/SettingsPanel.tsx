@@ -3,6 +3,7 @@ import { useSettingsStore } from '../store/settingsStore'
 import { useConfigStore } from '../store/configStore'
 import { useConversationStore } from '../store/conversationStore'
 import { useProbeStore, type PricingSortKey } from '../store/probeStore'
+import { useNotificationStore } from '../store/notificationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
@@ -286,6 +287,7 @@ function MoASection() {
   const providers = useConfigStore((s) => s.providers)
   const setMoaMode = useConversationStore((s) => s.setMode)
   const moaMode = useConversationStore((s) => s.mode)
+  const notifySaveResult = useSettingsStore((s) => s.notifySaveResult)
 
   const [subModels, setSubModels] = useState<SubModelConfig[]>([])
   const [aggModelId, setAggModelId] = useState('')
@@ -356,8 +358,10 @@ function MoASection() {
         aggregator,
         aggregationPromptVariant: 'standard-zh'
       })
+      notifySaveResult(true)
     } catch (err) {
       console.error('Failed to save MoA config:', err)
+      notifySaveResult(false, String(err))
     } finally {
       setSaving(false)
     }
@@ -1239,12 +1243,29 @@ function ProbeSection() {
     const targets =
       ids === 'all' ? visibleSources.filter((s) => s.enabled) : visibleSources.filter((s) => ids.includes(s.id))
     setRunningIds(new Set(targets.map((s) => s.id)))
+    // 执行前预警：定价探查会调用大模型解析定价页，产生 Token 消耗
+    const probeModelLabel = (() => {
+      const pm = probeCfg?.probeModelId
+      if (!pm) return undefined
+      return modelOptions.find((o) => o.value === pm)?.label
+    })()
+    useNotificationStore.getState().push({
+      type: 'warning',
+      title: '定价探查将消耗 Token',
+      message: probeModelLabel
+        ? `将调用 ${probeModelLabel} 解析 ${targets.length} 个定价源，产生 Token 消耗`
+        : `将对 ${targets.length} 个定价源调用大模型解析，产生 Token 消耗`
+    })
     try {
       const res = await window.moaAPI.probePricing(targets)
       if (res.success && res.data) {
         const nextMsg: Record<string, string> = {}
         for (const r of res.data.results) {
-          nextMsg[r.sourceId] = r.ok ? `已更新 ${r.entryCount} 条定价` : `失败：${r.error}`
+          nextMsg[r.sourceId] = r.ok
+            ? r.skipped
+              ? `页面无变化（沿用 ${r.entryCount} 条）`
+              : `已更新 ${r.entryCount} 条定价`
+            : `失败：${r.error}`
         }
         setMessages(nextMsg)
       } else {
@@ -1452,20 +1473,37 @@ function ProbeSection() {
         </select>
       </SettingRow>
 
-      <SettingRow label="自动刷新间隔（天）" hint="0 = 关闭。开启后按该天数轮回探查，超期未更新的定价源自动重新探查">
-        <input
-          type="number"
-          min={0}
-          step={1}
-          value={probeCfg?.autoRefreshDays ?? 0}
-          onChange={(e) =>
-            updateSetting('pricingProbe', {
-              ...probeCfg,
-              autoRefreshDays: Math.max(0, Math.floor(Number(e.target.value) || 0))
-            })
-          }
-          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
-        />
+      <SettingRow label="自动刷新间隔" hint="时/分/秒全为 0 = 关闭。开启后按该间隔轮回探查，超期未更新的定价源自动重新探查">
+        {(() => {
+          const total = Math.max(0, Math.floor(probeCfg?.autoRefreshSeconds ?? 0))
+          const parts = [
+            { label: '时', value: Math.floor(total / 3600), factor: 3600 },
+            { label: '分', value: Math.floor(total / 60) % 60, factor: 60 },
+            { label: '秒', value: total % 60, factor: 1 }
+          ]
+          return (
+            <div className="flex items-stretch gap-2 w-full">
+              {parts.map(({ label, value, factor }) => (
+                <div key={label} className="flex-1 min-w-0 flex flex-col gap-1">
+                  <span className="text-center text-[10px] leading-none text-muted-foreground">{label}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={value}
+                    onChange={(e) =>
+                      updateSetting('pricingProbe', {
+                        ...probeCfg,
+                        autoRefreshSeconds: Math.max(0, total + ((Number(e.target.value) || 0) - value) * factor)
+                      })
+                    }
+                    className="w-full min-w-0 rounded-md border border-input bg-background px-1 py-1.5 text-center text-sm text-foreground"
+                  />
+                </div>
+              ))}
+            </div>
+          )
+        })()}
       </SettingRow>
 
       {messages.__global && <p className="text-sm text-destructive">{messages.__global}</p>}
@@ -1476,7 +1514,13 @@ function ProbeSection() {
           <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
           <span className="text-xs text-foreground whitespace-nowrap">
             {progress.done
-              ? `${progress.sourceName} ${progress.ok ? `完成（${progress.entryCount} 条）` : `失败：${progress.error}`}`
+              ? `${progress.sourceName} ${
+                  progress.ok
+                    ? progress.skipped
+                      ? `页面无变化（沿用 ${progress.entryCount} 条）`
+                      : `完成（${progress.entryCount} 条）`
+                    : `失败：${progress.error}`
+                }`
               : `正在探查 ${progress.sourceName}（${progress.index}/${progress.total}）… ${
                   progress.stage === 'fetching' ? '抓取页面' : '大模型解析'
                 }`}
@@ -1517,7 +1561,7 @@ function ProbeSection() {
                 {messages[s.id] && (
                   <span
                     className={`whitespace-nowrap text-xs ${
-                      messages[s.id].startsWith('已更新') ? 'text-primary' : 'text-destructive'
+                      messages[s.id].startsWith('失败') ? 'text-destructive' : 'text-primary'
                     }`}
                   >
                     {messages[s.id]}
@@ -1549,7 +1593,13 @@ function ProbeSection() {
                   <RefreshCw className="w-3 h-3 shrink-0 animate-spin text-primary" />
                   <span className="text-xs text-foreground whitespace-nowrap">
                     {progress.done
-                      ? `${progress.sourceName} ${progress.ok ? `完成（${progress.entryCount} 条）` : `失败：${progress.error}`}`
+                      ? `${progress.sourceName} ${
+                          progress.ok
+                            ? progress.skipped
+                              ? `页面无变化（沿用 ${progress.entryCount} 条）`
+                              : `完成（${progress.entryCount} 条）`
+                            : `失败：${progress.error}`
+                        }`
                       : `${progress.stage === 'fetching' ? '抓取页面' : '大模型解析'}…`}
                   </span>
                   <div className="flex-1 h-1 min-w-[40px] bg-border rounded overflow-hidden">
@@ -1574,6 +1624,17 @@ function ProbeSection() {
                       </span>
                     )}
                   </div>
+
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span>探查前更新模型 ID</span>
+                    <ToggleSwitch
+                      checked={s.fetchModelsBeforeProbe !== false}
+                      onChange={(v) => updateSource(s.id, { fetchModelsBeforeProbe: v })}
+                    />
+                    <span className="text-muted-foreground/70">
+                      探查时先调用 /models 获取/更新该厂商的模型名作为提取关键词
+                    </span>
+                  </label>
 
                   <label className="block">
                     <span className="text-xs text-muted-foreground">官方定价页 URL</span>

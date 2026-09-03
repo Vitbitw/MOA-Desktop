@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent, ToastData } from './types'
 
 interface MoaAPI {
   // Config / Providers
@@ -81,6 +81,9 @@ interface MoaAPI {
 
   // Usage event listeners
   onUsageUpdated: (callback: () => void) => () => void
+
+  // 主进程 → 渲染进程悬浮通知
+  onRendererToast: (callback: (data: ToastData) => void) => () => void
 }
 
 declare global {

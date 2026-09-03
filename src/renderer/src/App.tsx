@@ -12,6 +12,8 @@ import SettingsPanel from './components/SettingsPanel'
 import UsageView from './components/UsageView'
 import UsageBar from './components/UsageBar'
 import CloudMonitorView from './components/CloudMonitorView'
+import ToastCenter from './components/ToastCenter'
+import { useNotificationStore } from './store/notificationStore'
 
 function App() {
   const setProviders = useConfigStore((s) => s.setProviders)
@@ -83,6 +85,14 @@ function App() {
     const unsub = window.moaAPI.onTitleUpdated((data) => {
       const convs = ((data.conversations || []) as any[]).map(convFromRow)
       useConversationStore.getState().setConversations(convs)
+    })
+    return unsub
+  }, [])
+
+  // 主进程 → 渲染进程悬浮通知（如定价自动刷新等后台任务）
+  useEffect(() => {
+    const unsub = window.moaAPI.onRendererToast((data) => {
+      useNotificationStore.getState().push(data)
     })
     return unsub
   }, [])
@@ -162,6 +172,8 @@ function App() {
           )}
         </main>
       </div>
+      {/* 全局悬浮通知（右下角） */}
+      <ToastCenter />
     </ErrorBoundary>
   )
 }

@@ -127,6 +127,8 @@ export interface AppSettings {
   probedPricing: ProbedPricingEntry[]
   /** 定价探查配置（源 + 自动刷新 + 探查模型） */
   pricingProbe: PricingProbeSettings
+  /** 定价探查页面级缓存（页面哈希 + 定价区块锚句；独立持久化，不入 pricingProbe） */
+  pricingProbeCache?: Record<string, PricingPageCache>
 }
 
 export interface PricingConfig {
@@ -356,6 +358,18 @@ export interface PricingProbeSource {
   /** 峰谷时段基准时区（IANA，默认 Asia/Shanghai） */
   timezone?: string
   enabled: boolean
+  /** 探查前是否先执行 /models 获取/更新该厂商的模型 ID 作为提取关键词（缺省 = true） */
+  fetchModelsBeforeProbe?: boolean
+}
+
+/** 单个源的页面级探查缓存（独立于 sources 持久化，UI 编辑源时不会误覆盖） */
+export interface PricingPageCache {
+  /** 上次抓取全文本的哈希（空白归一化后）。相同 → 页面未变更，跳过 LLM 直接沿用旧结果 */
+  hash?: string
+  /** 定价区块起始锚文本（原文连续片段，用于下次定位时 indexOf 切取） */
+  fragmentFrom?: string
+  /** 定价区块结束锚文本 */
+  fragmentTo?: string
 }
 
 /** 定价探查进度事件（main → renderer，探查过程中实时推送） */
@@ -375,12 +389,14 @@ export interface ProbeProgressEvent {
   ok?: boolean
   entryCount?: number
   error?: string
+  /** 页面未变更、沿用旧结果（未调用 LLM） */
+  skipped?: boolean
 }
 
 export interface PricingProbeSettings {
   sources: PricingProbeSource[]
-  /** 自动刷新间隔（天），0 = 关闭（默认 0） */
-  autoRefreshDays: number
+  /** 自动刷新间隔（秒），0 = 关闭（默认 0）。UI 按时/分/秒拆分设置 */
+  autoRefreshSeconds: number
   /** 探查用模型（'providerId:modelId' 格式）；缺省回退聚合模型 */
   probeModelId?: string
 }
@@ -391,4 +407,19 @@ export interface PricingProbeResultItem {
   ok: boolean
   entryCount?: number
   error?: string
+  /** 页面未变更、沿用旧结果（未调用 LLM） */
+  skipped?: boolean
+}
+
+// ─── 悬浮通知（renderer Toast）───
+
+export type ToastType = 'info' | 'warning' | 'success' | 'error'
+
+/** 渲染进程悬浮通知内容（renderer store 内部使用 + 主进程经 IPC_EVENT.RENDERER_TOAST 推送） */
+export interface ToastData {
+  type: ToastType
+  title: string
+  message?: string
+  /** 展示时长（ms），<=0 或省略时用默认值 */
+  duration?: number
 }

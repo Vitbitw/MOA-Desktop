@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, ProbeProgressEvent } from '../shared/types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
   // Config / Providers
@@ -103,6 +103,7 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_OPEN_SETTINGS)
     ipcRenderer.removeAllListeners(IPC_EVENT.USAGE_OPEN)
     ipcRenderer.removeAllListeners(IPC_EVENT.USAGE_UPDATED)
+    ipcRenderer.removeAllListeners(IPC_EVENT.RENDERER_TOAST)
   },
 
   // Menu event listeners
@@ -143,5 +144,12 @@ contextBridge.exposeInMainWorld('moaAPI', {
     const handler = () => callback()
     ipcRenderer.on(IPC_EVENT.USAGE_UPDATED, handler)
     return () => ipcRenderer.removeListener(IPC_EVENT.USAGE_UPDATED, handler)
+  },
+
+  // 主进程 → 渲染进程悬浮通知
+  onRendererToast: (callback: (data: ToastData) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: ToastData) => callback(data)
+    ipcRenderer.on(IPC_EVENT.RENDERER_TOAST, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.RENDERER_TOAST, handler)
   }
 })

@@ -67,6 +67,9 @@ export const IPC_EVENT = {
 
   // Usage events
   USAGE_UPDATED: 'usage:updated',
+
+  // 主进程 → 渲染进程悬浮通知
+  RENDERER_TOAST: 'event:rendererToast',
 } as const
 
 export type IPCChannel = (typeof IPC)[keyof typeof IPC]

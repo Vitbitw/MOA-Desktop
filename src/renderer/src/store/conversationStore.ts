@@ -1,5 +1,17 @@
 import { create } from 'zustand'
 import type { Conversation, ChatMessage, MoAMode, SubModelOutput, SubOutputUpdate, AggregationChunk, TitleSettings } from '../../../shared/types'
+import { useNotificationStore } from './notificationStore'
+
+/** 自动标题生成前的 token 消耗预警（执行前弹悬浮通知，仅告知不阻止） */
+function notifyAutoTitleCost(titleSettings: TitleSettings): void {
+  useNotificationStore.getState().push({
+    type: 'warning',
+    title: '自动标题生成将消耗 Token',
+    message: titleSettings.modelId
+      ? `即将调用 "${titleSettings.modelId}" 生成对话标题，将产生 Token 消耗`
+      : '即将调用大模型生成对话标题，将产生 Token 消耗'
+  })
+}
 
 // ── Live streaming sub-output state (for Monitor View) ──
 export interface LiveSubOutput {
@@ -434,6 +446,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       const isFirstAllowed = titleSettings.autoMode === 'first_reply'
         || titleSettings.autoMode === 'first_and_manual'
       if (isDefaultTitle && isFirstAllowed) {
+        notifyAutoTitleCost(titleSettings)
         get().generateAndSetTitle(conversationId, messages, titleSettings)
         return
       }
@@ -441,11 +454,13 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       // ── Branch B: Realtime update ──
       if (!isDefaultTitle && titleSettings.realtimeMode !== 'off') {
         if (titleSettings.realtimeMode === 'every_reply') {
+          notifyAutoTitleCost(titleSettings)
           get().generateAndSetTitle(conversationId, messages, titleSettings)
         } else if (titleSettings.realtimeMode === 'every_n_rounds' && titleSettings.realtimeN > 0) {
           // A "round" = one user question + one assistant reply = 2 messages
           const msgCount = messages.length
           if (msgCount > 0 && msgCount % (titleSettings.realtimeN * 2) === 0) {
+            notifyAutoTitleCost(titleSettings)
             get().generateAndSetTitle(conversationId, messages, titleSettings)
           }
         }
