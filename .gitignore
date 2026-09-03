@@ -45,6 +45,7 @@ test-*/
 # Hermes / AI辅助开发
 .hermes/
 .superpowers/
+.trae/
 
 # 设计文档
 产品设计文档_v1.md
