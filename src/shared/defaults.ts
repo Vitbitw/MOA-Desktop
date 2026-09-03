@@ -102,7 +102,7 @@ export function defaultPricingProbeUrlByName(name: string): string {
 
 export const DEFAULT_PRICING_PROBE = {
   sources: DEFAULT_PRICING_PROBE_SOURCES,
-  autoRefreshDays: 0
+  autoRefreshSeconds: 0
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

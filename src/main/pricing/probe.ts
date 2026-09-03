@@ -11,7 +11,7 @@ import { getAllProviders, fetchAndCacheModels } from '../providers/providerManag
 import { getMoaConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
 import { defaultPricingProbeUrlByName } from '../../shared/defaults'
-import type { PricingProbeSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
+import type { PricingProbeSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
 
 const HTTP_TIMEOUT_MS = 20_000
 const BROWSER_LOAD_TIMEOUT_MS = 20_000
@@ -25,6 +25,8 @@ const LLM_TIMEOUT_MS = 150_000
  * 文本越小越不容易超时；官方直连源可接受更大的输入。
  */
 const MAX_PAGE_CHARS = 12_000
+/** 锚句定位定价区块时的前后安全边距（字符），保证锚所在的表头/行上下文完整 */
+const FRAGMENT_PAD = 400
 /** CNY → USD 固定折算率（与 usageFormat.ts 的 7.2 一致） */
 const CNY_TO_USD_RATE = 7.2
 const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
@@ -119,7 +121,7 @@ async function fetchPageText(url: string, keywords: string[]): Promise<string | 
     if (resp.ok) {
       const raw = await resp.text().catch(() => '')
       const text = raw.includes('<') ? htmlToText(raw) : raw
-      if (text && validate(text)) return text.slice(0, MAX_PAGE_CHARS)
+      if (text && validate(text)) return text
     }
   } catch {
     /* 失败 → 浏览器兜底 */
@@ -146,13 +148,123 @@ async function fetchPageText(url: string, keywords: string[]): Promise<string | 
     const text = await win.webContents
       .executeJavaScript('document.body ? (document.body.innerText || "") : ""')
       .catch(() => '')
-    if (text && validate(text)) return text.slice(0, MAX_PAGE_CHARS)
+    if (text && validate(text)) return text
     return null
   } catch {
     return null
   } finally {
     if (win && !win.isDestroyed()) win.destroy()
   }
+}
+
+// ─── 页面级缓存：哈希判变 + 锚句定位定价区块 ───
+
+/** 页面文本哈希（FNV-1a 32）：归一化空白与小写，屏蔽时间戳/渲染噪声造成的无效差异 */
+function hashPageText(text: string): string {
+  const norm = text.replace(/\s+/g, ' ').trim().toLowerCase()
+  let h = 0x811c9dc5
+  for (let i = 0; i < norm.length; i++) {
+    h ^= norm.charCodeAt(i)
+    h = (h * 0x01000193) >>> 0
+  }
+  return h.toString(36)
+}
+
+/** 读取全部源的页面级缓存（探出哈希 + 定价区块锚句） */
+function readPageCache(): Record<string, PricingPageCache> {
+  const cache = readAppSettings()?.pricingProbeCache
+  return cache && typeof cache === 'object' ? (cache as Record<string, PricingPageCache>) : {}
+}
+
+/** 更新单个源页面缓存（读最新 → 改 → 写回，避免覆盖探查期间其它写入） */
+function updatePageCache(sourceId: string, patch: PricingPageCache): void {
+  const row = getDatabase().queryOne<{ value: string }>(
+    "SELECT value FROM moa_config WHERE key = 'app_settings'"
+  )
+  const current = row?.value ? JSON.parse(row.value) : {}
+  const cache = (current.pricingProbeCache ?? {}) as Record<string, PricingPageCache>
+  cache[sourceId] = { ...cache[sourceId], ...patch }
+  current.pricingProbeCache = cache
+  getDatabase().exec(
+    "INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES ('app_settings', ?, ?)",
+    [JSON.stringify(current), Date.now()]
+  )
+}
+
+/** 读回某源已持久化的探查条目（页面未变更时直接沿用） */
+function readProbedPricingEntries(sourceId: string): ProbedPricingEntry[] {
+  const probed = readAppSettings()?.probedPricing
+  return Array.isArray(probed) ? (probed as ProbedPricingEntry[]).filter((e) => e.sourceId === sourceId) : []
+}
+
+/**
+ * 从全文定位定价区块文本（LLM 输入片段）：
+ * 1) 上次探查记录的锚句命中 → 精准切锚区间（页面变了但定价结构未大改，最快最准）
+ * 2) 无锚/失配时用关键词（模型名）首次出现的中间位置为中心截取，避免「定价表在页面下方、头部截断丢价」
+ * 3) 全部失败回退整页头部截断（原行为兜底）
+ */
+function locatePricingFragment(
+  fullText: string,
+  keywords: string[],
+  anchors?: Pick<PricingPageCache, 'fragmentFrom' | 'fragmentTo'>
+): string {
+  const from = anchors?.fragmentFrom?.trim()
+  const to = anchors?.fragmentTo?.trim()
+  if (from && to) {
+    const iFrom = fullText.indexOf(from)
+    const iTo = fullText.indexOf(to)
+    if (iFrom !== -1 && iTo !== -1 && iTo >= iFrom) {
+      return fullText
+        .slice(Math.max(0, iFrom - FRAGMENT_PAD), iTo + to.length + FRAGMENT_PAD)
+        .slice(0, MAX_PAGE_CHARS)
+    }
+  }
+  if (keywords.length > 0) {
+    const lower = fullText.toLowerCase()
+    const hits = keywords
+      .map((k) => (k ? lower.indexOf(k.toLowerCase()) : -1))
+      .filter((i) => i >= 0)
+    if (hits.length > 0) {
+      hits.sort((a, b) => a - b)
+      const center = hits[Math.floor(hits.length / 2)]
+      return fullText.slice(
+        Math.max(0, center - MAX_PAGE_CHARS / 2),
+        Math.min(fullText.length, center + MAX_PAGE_CHARS / 2)
+      )
+    }
+  }
+  return fullText.slice(0, MAX_PAGE_CHARS)
+}
+
+/** 清理锚文本：压缩空白。锚须是原文连续片段（indexOf 子串匹配），故不删内部字符 */
+function cleanAnchor(s: string): string {
+  return s.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 探查成功后从全文生成定价区块锚句：
+ * 取所有条目 pattern（模型名）在全文中的最小/最大出现位置，各截一段短原文作为起止锚；
+ * 下次页面变更时据此快速切出定价区块。模型名在正文中若出现，通常集中在定价表格区，首末位置近似区块边界。
+ */
+function deriveFragmentAnchors(
+  fullText: string,
+  entries: ProbedPricingEntry[]
+): { fragmentFrom?: string; fragmentTo?: string } {
+  if (entries.length === 0) return {}
+  const lower = fullText.toLowerCase()
+  let lo = -1
+  let hi = -1
+  for (const e of entries) {
+    if (!e.pattern) continue
+    const idx = lower.indexOf(e.pattern.toLowerCase())
+    if (idx < 0) continue
+    lo = lo === -1 ? idx : Math.min(lo, idx)
+    hi = Math.max(hi, idx)
+  }
+  if (lo === -1) return {}
+  const from = cleanAnchor(fullText.slice(Math.max(0, lo - 16), lo + 48))
+  const to = cleanAnchor(fullText.slice(Math.max(0, hi - 48), hi + 16))
+  return { fragmentFrom: from || undefined, fragmentTo: to || undefined }
 }
 
 // ─── 探查关键词：自动取所绑定厂商 /models 的模型名 ───
@@ -168,19 +280,18 @@ export function resolveSourceProviderId(source: PricingProbeSource): string | un
   })?.id
 }
 
-/** 探查关键词：自动取所绑定厂商 /models 的模型名；尚未拉取过则先调用 /models */
+/** 探查关键词：开关开启（缺省）则每次探查前调用 /models 刷新所绑定厂商的模型名缓存；关闭则直接用本地缓存 */
 async function getSourceKeywords(source: PricingProbeSource): Promise<string[]> {
   const providerId = resolveSourceProviderId(source)
   if (!providerId) return []
-  let provider = getAllProviders().find((p) => p.id === providerId)
-  if (provider && provider.models.length === 0) {
+  if (source.fetchModelsBeforeProbe !== false) {
     try {
       await fetchAndCacheModels(providerId)
-      provider = getAllProviders().find((p) => p.id === providerId)
     } catch {
-      /* 忽略：保留空列表 */
+      /* 忽略 /models 失败：回落到已有缓存列表 */
     }
   }
+  const provider = getAllProviders().find((p) => p.id === providerId)
   return (provider?.models ?? []).map((m) => m.id).filter((id): id is string => !!id)
 }
 
@@ -423,7 +534,7 @@ function persistProbedPricing(sourceId: string, entries: ProbedPricingEntry[]): 
 // ─── 探查入口 ───
 
 export type ProbeSourceResult =
-  | { ok: true; entries: ProbedPricingEntry[] }
+  | { ok: true; entries: ProbedPricingEntry[]; skipped?: boolean }
   | { ok: false; error: string }
 
 export type ProbeStage = 'fetching' | 'extracting'
@@ -437,18 +548,33 @@ export async function probeSource(
   const keywords = await getSourceKeywords(source)
   console.log(`[PricingProbe] ${source.name}(${source.id}) probe model: ${model.baseUrl} / ${model.modelId}`)
   onStage?.('fetching')
-  const pageText = await fetchPageText(source.url, keywords)
-  if (!pageText) {
+  const fullText = await fetchPageText(source.url, keywords)
+  if (!fullText) {
     return { ok: false, error: '抓取失败（HTTP 与浏览器均无法获取有效页面文本）' }
   }
 
+  // 页面级缓存：哈希相同 → 页面未变更，沿用上次结果、跳过 LLM 调用
+  const cache = readPageCache()[source.id]
+  const hash = hashPageText(fullText)
+  if (cache?.hash && cache.hash === hash) {
+    const existing = readProbedPricingEntries(source.id)
+    if (existing.length > 0) {
+      console.log(
+        `[PricingProbe] ${source.name}(${source.id}) page unchanged (${fullText.length} chars), reuse ${existing.length} entries, skip LLM`
+      )
+      return { ok: true, entries: existing, skipped: true }
+    }
+  }
+
+  // 定位定价区块（锚句 → 关键词居中 → 整页头部），避免全页送入 LLM
+  const pageText = locatePricingFragment(fullText, keywords, cache)
   const prompt = buildProbePrompt(source, keywords, pageText)
   onStage?.('extracting')
   const result = await callProbeLLM(model, prompt)
   if (result.status !== 'success' || !result.content) {
     return { ok: false, error: `大模型调用失败: ${result.error || '空响应'}` }
   }
-  console.log(`[PricingProbe] ${source.name}(${source.id}) page ${pageText.length} chars, keywords ${keywords.length}, LLM response ${result.content.length} chars`)
+  console.log(`[PricingProbe] ${source.name}(${source.id}) page ${fullText.length} chars, fragment ${pageText.length} chars, keywords ${keywords.length}, LLM response ${result.content.length} chars`)
 
   const entries = buildProbedEntries(source, extractJsonArray(result.content) ?? [])
   if (entries.length === 0) {
@@ -460,6 +586,8 @@ export async function probeSource(
   }
 
   persistProbedPricing(source.id, entries)
+  // 记录页面哈希与定价区块锚句：下次哈希不变直接沿用；变则按锚切片段快速解析
+  updatePageCache(source.id, { hash, ...deriveFragmentAnchors(fullText, entries) })
   return { ok: true, entries }
 }
 
@@ -571,6 +699,8 @@ export interface ProbeBatchResultItem {
   ok: boolean
   entryCount?: number
   error?: string
+  /** 页面未变更、沿用旧结果（未调用 LLM） */
+  skipped?: boolean
 }
 
 /** 顺序探查（避免并发 LLM 调用 / 触发限流）。onProgress 在每个源的阶段变化与完成时回调 */
@@ -589,7 +719,8 @@ export async function probeSources(
       sourceId: source.id,
       ok: r.ok,
       entryCount: r.ok ? r.entries.length : undefined,
-      error: r.ok ? undefined : r.error
+      error: r.ok ? undefined : r.error,
+      skipped: r.ok ? r.skipped : undefined
     })
     onProgress?.({
       ...base,
@@ -597,7 +728,8 @@ export async function probeSources(
       done: true,
       ok: r.ok,
       entryCount: r.ok ? r.entries.length : undefined,
-      error: r.ok ? undefined : r.error
+      error: r.ok ? undefined : r.error,
+      skipped: r.ok ? r.skipped : undefined
     })
     if (!r.ok) console.warn(`[PricingProbe] ${source.name}(${source.id}) failed: ${r.error}`)
   }
@@ -605,14 +737,18 @@ export async function probeSources(
 }
 
 /** 读取定价探查配置；自动并入所有已配置 API Key 厂商的派生源（未手动创建源的厂商自动可用，不持久化） */
-export function getPricingProbeConfig(): { autoRefreshDays: number; sources: PricingProbeSource[] } {
+export function getPricingProbeConfig(): { autoRefreshSeconds: number; sources: PricingProbeSource[] } {
   const settings = readAppSettings()
   const pp = (settings?.pricingProbe ?? {}) as Partial<PricingProbeSettings>
   const configSources = Array.isArray(pp.sources) ? (pp.sources as PricingProbeSource[]) : []
-  const autoRefreshDays =
-    typeof pp.autoRefreshDays === 'number' && Number.isFinite(pp.autoRefreshDays) && pp.autoRefreshDays >= 0
-      ? pp.autoRefreshDays
-      : 0
+  // 自动刷新间隔（秒）；兼容旧配置 autoRefreshDays（天 → 秒）
+  const legacyDays = (pp as { autoRefreshDays?: unknown }).autoRefreshDays
+  const legacy =
+    typeof legacyDays === 'number' && Number.isFinite(legacyDays) && legacyDays > 0 ? Math.round(legacyDays * 24 * 60 * 60) : 0
+  const autoRefreshSeconds =
+    typeof pp.autoRefreshSeconds === 'number' && Number.isFinite(pp.autoRefreshSeconds) && pp.autoRefreshSeconds >= 0
+      ? pp.autoRefreshSeconds
+      : legacy
 
   // 已配置 API Key 的厂商自动派生为源（无需手动添加）
   const keyedProviders = getAllProviders().filter((p) => p.apiKey && p.enabled)
@@ -631,7 +767,7 @@ export function getPricingProbeConfig(): { autoRefreshDays: number; sources: Pri
       enabled: true
     }))
 
-  return { autoRefreshDays, sources: [...configSources, ...autoSources] }
+  return { autoRefreshSeconds, sources: [...configSources, ...autoSources] }
 }
 
 /**
