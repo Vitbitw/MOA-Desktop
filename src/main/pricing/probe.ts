@@ -6,7 +6,7 @@
 // 探查模型要求 OpenAI 兼容端点（同标题生成假设）；网络请求统一走 fetchProxy。
 
 import { BrowserWindow } from 'electron'
-import { getDatabase } from '../db/database'
+import { readAppSettings, updateRawAppSettings } from '../config/appSettings'
 import { getAllProviders, fetchAndCacheModels } from '../providers/providerManager'
 import { getMoaConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
@@ -40,26 +40,11 @@ export interface ProbeModel {
   modelId: string
 }
 
-// ─── 设置读取 ───
-
-function readAppSettings(): Record<string, unknown> | null {
-  try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    if (!row?.value) return null
-    return JSON.parse(row.value) as Record<string, unknown>
-  } catch {
-    return null
-  }
-}
-
 // ─── 探查模型解析 ───
 
 /** 解析探查用模型：显式配置 > 聚合模型 > 首个已启用且有 apiKey 的 provider */
 export function resolveProbeModel(): ProbeModel | null {
-  const settings = readAppSettings()
-  const probeModelId = (settings?.pricingProbe as { probeModelId?: string } | undefined)?.probeModelId
+  const probeModelId = readAppSettings().pricingProbe.probeModelId
   const providers = getAllProviders()
 
   if (probeModelId && probeModelId.includes(':')) {
@@ -259,29 +244,23 @@ function hashPageText(text: string): string {
 
 /** 读取全部源的页面级缓存（探出哈希 + 定价区块锚句） */
 function readPageCache(): Record<string, PricingPageCache> {
-  const cache = readAppSettings()?.pricingProbeCache
-  return cache && typeof cache === 'object' ? (cache as Record<string, PricingPageCache>) : {}
+  const cache = readAppSettings().pricingProbeCache
+  return cache && typeof cache === 'object' ? cache : {}
 }
 
 /** 更新单个源页面缓存（读最新 → 改 → 写回，避免覆盖探查期间其它写入） */
 function updatePageCache(sourceId: string, patch: PricingPageCache): void {
-  const row = getDatabase().queryOne<{ value: string }>(
-    "SELECT value FROM moa_config WHERE key = 'app_settings'"
-  )
-  const current = row?.value ? JSON.parse(row.value) : {}
-  const cache = (current.pricingProbeCache ?? {}) as Record<string, PricingPageCache>
-  cache[sourceId] = { ...cache[sourceId], ...patch }
-  current.pricingProbeCache = cache
-  getDatabase().exec(
-    "INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES ('app_settings', ?, ?)",
-    [JSON.stringify(current), Date.now()]
-  )
+  updateRawAppSettings((raw) => {
+    const cache = (raw.pricingProbeCache ?? {}) as Record<string, PricingPageCache>
+    cache[sourceId] = { ...cache[sourceId], ...patch }
+    raw.pricingProbeCache = cache
+  })
 }
 
 /** 读回某源已持久化的探查条目（页面未变更时直接沿用） */
 function readProbedPricingEntries(sourceId: string): ProbedPricingEntry[] {
-  const probed = readAppSettings()?.probedPricing
-  return Array.isArray(probed) ? (probed as ProbedPricingEntry[]).filter((e) => e.sourceId === sourceId) : []
+  const probed = readAppSettings().probedPricing
+  return Array.isArray(probed) ? probed.filter((e) => e.sourceId === sourceId) : []
 }
 
 /**
@@ -683,18 +662,10 @@ function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[]): P
 // ─── 持久化（读 → 删旧源条目 → 追加 → 写回）───
 
 function persistProbedPricing(sourceId: string, entries: ProbedPricingEntry[]): void {
-  const row = getDatabase().queryOne<{ value: string }>(
-    "SELECT value FROM moa_config WHERE key = 'app_settings'"
-  )
-  const current = row?.value ? JSON.parse(row.value) : {}
-  const existing = Array.isArray(current.probedPricing)
-    ? (current.probedPricing as ProbedPricingEntry[])
-    : []
-  current.probedPricing = [...existing.filter((e) => e.sourceId !== sourceId), ...entries]
-  getDatabase().exec(
-    "INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES ('app_settings', ?, ?)",
-    [JSON.stringify(current), Date.now()]
-  )
+  updateRawAppSettings((raw) => {
+    const existing = Array.isArray(raw.probedPricing) ? (raw.probedPricing as ProbedPricingEntry[]) : []
+    raw.probedPricing = [...existing.filter((e) => e.sourceId !== sourceId), ...entries]
+  })
 }
 
 // ─── 探查入口 ───

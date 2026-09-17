@@ -11,7 +11,7 @@
 import http from 'node:http'
 import tls from 'node:tls'
 import { Readable } from 'node:stream'
-import { getDatabase } from '../db/database'
+import { readAppSettings } from '../config/appSettings'
 
 // ─── 代理状态 ───
 /** 代理 HTTPS 不可用的过期时间戳（0 = 可用） */
@@ -21,17 +21,8 @@ let proxyBrokenUntil = 0
  * 从 DB 读取 network 设置（同步，sql.js 内存库）。
  */
 function getProxyUrl(): string {
-  try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    if (!row?.value) return ''
-    const settings = JSON.parse(row.value)
-    if (settings?.network?.enabled && settings?.network?.proxyUrl) {
-      return settings.network.proxyUrl as string
-    }
-  } catch { /* 静默 */ }
-  return ''
+  const { enabled, proxyUrl } = readAppSettings().network
+  return enabled && proxyUrl ? proxyUrl : ''
 }
 
 function parseProxy(url: string): { host: string; port: number } | null {
@@ -432,29 +423,20 @@ function isIdempotentMethod(method?: string): boolean {
   return m === 'GET' || m === 'HEAD' || m === 'OPTIONS'
 }
 
-/** 读取 DB 中 network.timeoutMs / network.retryCount（同步，sql.js 内存库） */
+/** 读取 network.timeoutMs / network.retryCount（同步，sql.js 内存库） */
 function getApiRequestConfig(): { timeoutMs: number; retryCount: number } {
   const DEFAULT_TIMEOUT_MS = 15_000
   const DEFAULT_RETRY_COUNT = 2
-  try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    if (!row?.value) return { timeoutMs: DEFAULT_TIMEOUT_MS, retryCount: DEFAULT_RETRY_COUNT }
-    const settings = JSON.parse(row.value)
-    const network = settings?.network
-    const timeoutMs =
-      typeof network?.timeoutMs === 'number' && Number.isFinite(network.timeoutMs) && network.timeoutMs >= 0
-        ? network.timeoutMs
-        : DEFAULT_TIMEOUT_MS
-    const retryCount =
-      typeof network?.retryCount === 'number' && Number.isFinite(network.retryCount) && network.retryCount >= 0
-        ? Math.floor(network.retryCount)
-        : DEFAULT_RETRY_COUNT
-    return { timeoutMs, retryCount }
-  } catch {
-    return { timeoutMs: DEFAULT_TIMEOUT_MS, retryCount: DEFAULT_RETRY_COUNT }
-  }
+  const network = readAppSettings().network
+  const timeoutMs =
+    typeof network.timeoutMs === 'number' && Number.isFinite(network.timeoutMs) && network.timeoutMs >= 0
+      ? network.timeoutMs
+      : DEFAULT_TIMEOUT_MS
+  const retryCount =
+    typeof network.retryCount === 'number' && Number.isFinite(network.retryCount) && network.retryCount >= 0
+      ? Math.floor(network.retryCount)
+      : DEFAULT_RETRY_COUNT
+  return { timeoutMs, retryCount }
 }
 
 function sleep(ms: number): Promise<void> {

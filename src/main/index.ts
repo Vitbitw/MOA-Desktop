@@ -2,9 +2,10 @@ import crypto from 'node:crypto'
 import { app, BrowserWindow, ipcMain, Menu, clipboard } from 'electron'
 import path from 'path'
 import { getDatabase } from './db/database'
+import { readAppSettings, updateRawAppSettings } from './config/appSettings'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
 import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, ProbedPricingEntry, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
-import { DEFAULT_SETTINGS, DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
+import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
@@ -93,14 +94,11 @@ function recordTitleUsage(modelId: string, providerId: string, tokenUsage?: { pr
 
 /**
  * 读取设置；若已启用桌面用量悬浮窗则创建（app.whenReady / activate 时调用）。
+ * 悬浮窗创建失败不阻塞启动，故保留兜底捕获。
  */
 function maybeCreateUsageOverlay() {
   try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    const saved = row?.value ? JSON.parse(row.value) : {}
-    const settings = { ...DEFAULT_SETTINGS, ...saved } as AppSettings
+    const settings = readAppSettings()
     if (settings.display?.usageOverlay) {
       createUsageWindow(settings)
     }
@@ -207,19 +205,8 @@ function createApplicationMenu() {
         {
           label: 'API 代理地址',
           click: () => {
-            // 从 DB 读真实代理设置（用户可能改过 host/port/关闭代理），与 SETTINGS_GET_ALL 一致
-            let proxy = DEFAULT_SETTINGS.proxy
-            try {
-              const row = getDatabase().queryOne<{ value: string }>(
-                "SELECT value FROM moa_config WHERE key = 'app_settings'"
-              )
-              if (row?.value) {
-                const saved = JSON.parse(row.value)
-                proxy = { ...DEFAULT_SETTINGS.proxy, ...(saved.proxy || {}) }
-              }
-            } catch {
-              // 读取失败回退默认值
-            }
+            // 从 DB 读真实代理设置（用户可能改过 host/port/关闭代理）
+            const { proxy } = readAppSettings()
             const url = proxy.enabled
               ? `http://${proxy.host}:${proxy.port}`
               : `http://${DEFAULT_HOST}:${DEFAULT_PORT} (代理未启用)`
@@ -337,32 +324,14 @@ function registerIpcHandlers() {
 
   // ── Settings ──
   ipcMain.handle(IPC.SETTINGS_GET_ALL, () => {
-    try {
-      const row = getDatabase().queryOne<{ value: string }>(
-        "SELECT value FROM moa_config WHERE key = 'app_settings'"
-      )
-      if (row?.value) {
-        const saved = JSON.parse(row.value)
-        return { success: true, data: { ...DEFAULT_SETTINGS, ...saved } }
-      }
-      return { success: true, data: DEFAULT_SETTINGS }
-    } catch (err) {
-      return { success: true, data: DEFAULT_SETTINGS }
-    }
+    return { success: true, data: readAppSettings() }
   })
 
   ipcMain.handle(IPC.SETTINGS_SET, (_e, key: string, value: unknown) => {
     try {
-      // Load current, update, save
-      const row = getDatabase().queryOne<{ value: string }>(
-        "SELECT value FROM moa_config WHERE key = 'app_settings'"
-      )
-      const current = row?.value ? JSON.parse(row.value) : {}
-      current[key] = value
-      getDatabase().exec(
-        'INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES (\'app_settings\', ?, ?)',
-        [JSON.stringify(current), Date.now()]
-      )
+      const current = updateRawAppSettings((raw) => {
+        raw[key] = value
+      })
 
       // ── 网络代理变更 → 清除代理缓存 ──
       if (key === 'network') {
@@ -378,7 +347,7 @@ function registerIpcHandlers() {
       if (key === 'display') {
         const display = (value as Partial<AppSettings['display']>) ?? {}
         if (display.usageOverlay === true) {
-          createUsageWindow({ ...DEFAULT_SETTINGS, ...current } as AppSettings)
+          createUsageWindow(current)
         } else if (display.usageOverlay === false) {
           destroyUsageWindow()
         }
@@ -441,11 +410,8 @@ function registerIpcHandlers() {
         // 此处必须排除，否则默认 first_and_manual 下两端会重复生成标题（双倍 API 调用）。
         ;(async () => {
           try {
-            const settingsRow = db.queryOne<{ value: string }>("SELECT value FROM moa_config WHERE key = 'app_settings'")
-            if (!settingsRow?.value) return
-            const appSettings = JSON.parse(settingsRow.value)
-            const ts = appSettings?.title
-            if (!ts?.providerId || !ts?.modelId) return
+            const ts = readAppSettings().title
+            if (!ts.providerId || !ts.modelId) return
             if (ts.autoMode !== 'first_message') return
             const genResult = await generateTitle({
               messages: [{ role: 'user', content: msg.content }],
@@ -873,14 +839,8 @@ function schedulePricingAutoRefresh(initialDelayMs = 10_000): void {
       const enabled = sources.filter((s) => s.enabled && sourceHasConfiguredKey(s))
       if (enabled.length === 0) return
 
-      let probed: ProbedPricingEntry[] = []
-      const row = getDatabase().queryOne<{ value: string }>(
-        "SELECT value FROM moa_config WHERE key = 'app_settings'"
-      )
-      if (row?.value) {
-        const parsed = JSON.parse(row.value) as Partial<AppSettings>
-        probed = Array.isArray(parsed.probedPricing) ? parsed.probedPricing : []
-      }
+      const parsed = readAppSettings()
+      const probed: ProbedPricingEntry[] = Array.isArray(parsed.probedPricing) ? parsed.probedPricing : []
 
       const cutoff = Date.now() - autoRefreshSeconds * 1000
       const stale = enabled.filter((s) => {

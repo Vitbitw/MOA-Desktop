@@ -8,7 +8,7 @@
 //   - 每分钟检查一次是否需要采集，间隔从设置读取 → 改设置无需重启应用
 //   - 与手动刷新共用 refreshCommandCodeUsage，因此同样走 fetchProxy（尊重网络代理设置）
 
-import { getDatabase } from '../db/database'
+import { readAppSettings } from '../config/appSettings'
 import { getUsageCredential } from '../store/key-store'
 import { refreshCommandCodeUsage, usageTokenKey } from './commandCode'
 import { getCumulativeUsage, recordCollectorRun } from './usageAccumulator'
@@ -42,19 +42,6 @@ let firstRunTimer: ReturnType<typeof setTimeout> | null = null
 let lastCollectedAt = 0
 let lastError: string | null = null
 let running = false
-
-/** 从 DB 读取应用设置（与 fetchProxy 相同的读取方式） */
-function readSettings(): AppSettings | null {
-  try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    if (!row?.value) return null
-    return JSON.parse(row.value) as AppSettings
-  } catch {
-    return null
-  }
-}
 
 /**
  * 合并默认值后的 monitoring 设置。
@@ -90,7 +77,7 @@ async function collectOnce(trigger: 'first' | 'timer'): Promise<void> {
   if (running) return
   running = true
   try {
-    const settings = readSettings()
+    const settings = readAppSettings()
     const sources = commandCodeSources(settings)
     for (const source of sources) {
       if (!getUsageCredential(usageTokenKey(source.id))) continue
@@ -139,7 +126,7 @@ export function startUsageCollector(): void {
   }, FIRST_RUN_DELAY_MS)
 
   timer = setInterval(() => {
-    const minutes = effectiveIntervalMinutes(readSettings())
+    const minutes = effectiveIntervalMinutes(readAppSettings())
     if (minutes <= 0) return
     if (lastCollectedAt > 0 && Date.now() - lastCollectedAt < minutes * 60_000) return
     void collectOnce('timer')
@@ -156,7 +143,7 @@ export function stopUsageCollector(): void {
 
 /** 当前采集器状态（供 UI 展示"是否在采集/上次采集时间/错误"） */
 export function getCollectorStatus(): CollectorStatus {
-  const settings = readSettings()
+  const settings = readAppSettings()
   const intervalMinutes = effectiveIntervalMinutes(settings)
   const hasSource = commandCodeSources(settings).length > 0
   return { enabled: intervalMinutes > 0 && hasSource, intervalMinutes, lastCollectedAt, lastError, running }

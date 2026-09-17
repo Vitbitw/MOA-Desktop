@@ -3,9 +3,9 @@
 //             > DEFAULT_PRICING 前缀匹配 > 0。
 // 设置存储于 moa_config 表 key='app_settings'（JSON），与主进程 IPC 读取方式一致。
 
-import { getDatabase } from '../db/database'
+import { readAppSettings } from '../config/appSettings'
 import { lookupPrice } from '../../shared/pricing'
-import type { AppSettings, ProbedPricingEntry, PricingWindow } from '../../shared/types'
+import type { ProbedPricingEntry, PricingWindow } from '../../shared/types'
 
 export interface UsageEntry {
   modelId: string
@@ -24,33 +24,24 @@ interface Price {
 
 /** 读取用户自定义定价（settings.pricing[modelId]），读取失败或未配置时返回 null；命中手动峰谷窗口则用窗口价 */
 function getCustomPrice(modelId: string, timestamp: number): Price | null {
-  try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    if (!row?.value) return null
-    const settings = JSON.parse(row.value) as Partial<AppSettings>
-    const cfg = settings.pricing?.[modelId]
-    if (!cfg) return null
-    // 仅当 input/output 为有效数值时采用自定义定价
-    if (typeof cfg.input !== 'number' || !Number.isFinite(cfg.input) ||
-        typeof cfg.output !== 'number' || !Number.isFinite(cfg.output)) {
-      return null
-    }
-    // 命中手动配置的峰谷窗口（多时段 + 按星期）则用窗口价，否则用基础价
-    if (Array.isArray(cfg.windows) && cfg.windows.length > 0) {
-      const tz = cfg.timezone || 'Asia/Shanghai'
-      const tod = minutesOf(timeOfDay(tz, timestamp))
-      const wd = dayOfWeek(tz, timestamp)
-      const hit = cfg.windows.find((w) => inWindow(tod, w, wd))
-      if (hit && typeof hit.input === 'number' && typeof hit.output === 'number') {
-        return { input: hit.input, output: hit.output }
-      }
-    }
-    return { input: cfg.input, output: cfg.output }
-  } catch {
+  const cfg = readAppSettings().pricing[modelId]
+  if (!cfg) return null
+  // 仅当 input/output 为有效数值时采用自定义定价
+  if (typeof cfg.input !== 'number' || !Number.isFinite(cfg.input) ||
+      typeof cfg.output !== 'number' || !Number.isFinite(cfg.output)) {
     return null
   }
+  // 命中手动配置的峰谷窗口（多时段 + 按星期）则用窗口价，否则用基础价
+  if (Array.isArray(cfg.windows) && cfg.windows.length > 0) {
+    const tz = cfg.timezone || 'Asia/Shanghai'
+    const tod = minutesOf(timeOfDay(tz, timestamp))
+    const wd = dayOfWeek(tz, timestamp)
+    const hit = cfg.windows.find((w) => inWindow(tod, w, wd))
+    if (hit && typeof hit.input === 'number' && typeof hit.output === 'number') {
+      return { input: hit.input, output: hit.output }
+    }
+  }
+  return { input: cfg.input, output: cfg.output }
 }
 
 // ─── 峰谷时段定价 ───
@@ -116,33 +107,24 @@ function resolveWindow(entry: ProbedPricingEntry, ts: number): Price {
 
 /** 读取官方探查定价（settings.probedPricing），最长前缀匹配 + 多源取最新 */
 function getProbedPrice(modelId: string, timestamp: number): Price | null {
-  try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    if (!row?.value) return null
-    const settings = JSON.parse(row.value) as Partial<AppSettings>
-    const list = settings.probedPricing
-    if (!Array.isArray(list) || list.length === 0) return null
+  const list = readAppSettings().probedPricing
+  if (!Array.isArray(list) || list.length === 0) return null
 
-    let best: ProbedPricingEntry | null = null
-    for (const e of list) {
-      if (!e?.pattern) continue
-      if (e.pattern !== modelId && !modelId.startsWith(e.pattern)) continue
-      // 最长前缀优先；同前缀取 fetchedAt 最新
-      if (
-        !best ||
-        e.pattern.length > best.pattern.length ||
-        (e.pattern.length === best.pattern.length && e.fetchedAt > best.fetchedAt)
-      ) {
-        best = e
-      }
+  let best: ProbedPricingEntry | null = null
+  for (const e of list) {
+    if (!e?.pattern) continue
+    if (e.pattern !== modelId && !modelId.startsWith(e.pattern)) continue
+    // 最长前缀优先；同前缀取 fetchedAt 最新
+    if (
+      !best ||
+      e.pattern.length > best.pattern.length ||
+      (e.pattern.length === best.pattern.length && e.fetchedAt > best.fetchedAt)
+    ) {
+      best = e
     }
-    if (!best) return null
-    return resolveWindow(best, timestamp)
-  } catch {
-    return null
   }
+  if (!best) return null
+  return resolveWindow(best, timestamp)
 }
 
 /**

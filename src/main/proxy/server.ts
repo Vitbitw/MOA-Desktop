@@ -6,6 +6,7 @@ import { getAllProviders } from '../providers/providerManager'
 import { getMoaConfig } from '../moa/moaConfig'
 import { executeMoA } from '../moa/moaEngine'
 import { getDatabase } from '../db/database'
+import { readAppSettings } from '../config/appSettings'
 import { buildUsageEntries, sumUsage } from '../moa/usage'
 import type { Provider, SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
@@ -25,19 +26,8 @@ const waiters: Array<() => void> = []
 
 /** 读取代理最大并发数（settings.proxy.maxConcurrency），无效/未配置回退默认。 */
 function getMaxConcurrency(): number {
-  try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    if (row?.value) {
-      const saved = JSON.parse(row.value)
-      const n = Number(saved?.proxy?.maxConcurrency)
-      if (Number.isFinite(n) && n > 0) return n
-    }
-  } catch {
-    // 读取失败回退默认
-  }
-  return DEFAULT_MAX_CONCURRENCY
+  const n = Number(readAppSettings().proxy.maxConcurrency)
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_CONCURRENCY
 }
 
 /** 获取并发许可；超限则进入 FIFO 等待队列。 */
@@ -66,19 +56,8 @@ function release(): void {
 // settings.proxy.authEnabled + proxyKey 均配置时，/v1/* 请求必须携带相同密钥
 // （请求头 x-api-key 或 Authorization: Bearer <key>）。
 function getProxyAuth(): { enabled: boolean; key: string } {
-  try {
-    const row = getDatabase().queryOne<{ value: string }>(
-      "SELECT value FROM moa_config WHERE key = 'app_settings'"
-    )
-    if (row?.value) {
-      const proxy = JSON.parse(row.value)?.proxy
-      if (proxy?.authEnabled && proxy?.proxyKey) {
-        return { enabled: true, key: String(proxy.proxyKey) }
-      }
-    }
-  } catch {
-    // 读取失败视为未启用鉴权
-  }
+  const { authEnabled, proxyKey } = readAppSettings().proxy
+  if (authEnabled && proxyKey) return { enabled: true, key: String(proxyKey) }
   return { enabled: false, key: '' }
 }
 

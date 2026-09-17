@@ -1,6 +1,6 @@
 import { app, BrowserWindow, Menu, screen } from 'electron'
 import path from 'path'
-import { getDatabase } from '../db/database'
+import { updateRawAppSettings } from '../config/appSettings'
 import { IPC_EVENT } from '../../shared/ipc-channels'
 import type { AppSettings } from '../../shared/types'
 
@@ -28,27 +28,12 @@ export function getUsageWindow(): BrowserWindow | null {
   return usageWin
 }
 
-/** 读取当前 app_settings（DB 最新值，避免读到旧快照）。 */
-function readAppSettings(): Record<string, unknown> {
-  try {
-    const db = getDatabase()
-    const row = db.queryOne<{ value: string }>("SELECT value FROM moa_config WHERE key = 'app_settings'")
-    return row?.value ? JSON.parse(row.value) : {}
-  } catch {
-    return {}
-  }
-}
-
 /** 原子 patch app_settings 的 display 段（读最新 → 合并 → 写回），避免与 SETTINGS_SET 并发互相覆盖。 */
 function patchDisplay(patch: Record<string, unknown>): void {
   try {
-    const db = getDatabase()
-    const current = readAppSettings()
-    const display = { ...(current.display as Record<string, unknown> | undefined), ...patch }
-    db.exec(
-      "INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES ('app_settings', ?, ?)",
-      [JSON.stringify({ ...current, display }), Date.now()]
-    )
+    updateRawAppSettings((raw) => {
+      raw.display = { ...(raw.display as Record<string, unknown> | undefined), ...patch }
+    })
   } catch (err) {
     console.error('[UsageOverlay] failed to save settings:', err)
   }
