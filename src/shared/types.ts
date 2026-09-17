@@ -212,13 +212,33 @@ export interface UsageWindowInfo {
   resetAt?: number
 }
 
+/** Command Code 订阅套餐信息（/internal/billing/subscriptions 归一化；字段缺失时省略） */
+export interface CommandCodeSubscription {
+  /** 套餐 ID（如 individual-pro / individual-goat / individual-max / teams-pro） */
+  planId?: string
+  /** 订阅状态（active / trialing / past_due / canceled / inactive，未知值原样保留） */
+  status?: string
+  /** 当前计费周期结束（套餐到期）时间：ISO 原样保留（若有） */
+  currentPeriodEnd?: string
+  /** 到期时间归一化（epoch 秒；兼容 ISO / epoch 秒 / epoch 毫秒来源） */
+  currentPeriodEndTs?: number
+  /** 已排定取消（到期后不再续费） */
+  cancelScheduled?: boolean
+  /** 排定取消时间（epoch 秒；cancelAt 存在时） */
+  cancelAtTs?: number
+  /** 计划变更过渡（如降级排定在周期末生效） */
+  pendingPhase?: { unitAmount?: number; currency?: string; effectiveDateTs?: number }
+}
+
 /** Command Code 用量归一化数据。区块可选：对应端点失败时 absent（见 sourcesAvailable） */
 export interface CommandCodeUsage {
   fetchedAt: number
-  sourcesAvailable: { summary: boolean; charts: boolean; credits: boolean; windows: boolean }
+  sourcesAvailable: { summary: boolean; charts: boolean; credits: boolean; windows: boolean; subscription: boolean }
   summary?: { totalCount: number; totalCost: number; totalTokens: number; successRate: number }
   credits?: { monthlyCredits: number }
   windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo }
+  /** 订阅套餐（含到期时间）；无订阅时 absent（sourcesAvailable.subscription 仍为 true） */
+  subscription?: CommandCodeSubscription
   models?: Array<{
     model: string
     requests: number

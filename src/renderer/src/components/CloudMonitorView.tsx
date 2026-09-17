@@ -4,6 +4,7 @@ import { useSettingsStore } from '../store/settingsStore'
 import { formatCost } from '../lib/usageFormat'
 import { ExternalLink, KeyRound, Loader2, LogOut, RefreshCw } from 'lucide-react'
 import type {
+  CommandCodeSubscription,
   CommandCodeUsage,
   DeepSeekBalanceInfo,
   DeepSeekUsage,
@@ -79,6 +80,113 @@ function StatCard({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg border border-border bg-card px-4 py-3">
       <div className="text-xs text-muted-foreground mb-1">{label}</div>
       <div className="text-lg font-semibold tabular-nums text-foreground">{value}</div>
+    </div>
+  )
+}
+
+// ─── Command Code 订阅套餐展示辅助 ───
+
+/** 套餐 ID → 展示名（与 Studio 套餐层级一致；未知 ID 原样显示） */
+const CC_PLAN_NAMES: Record<string, string> = {
+  'individual-go': 'Go',
+  'individual-goat': 'GOAT',
+  'individual-pro': 'Pro',
+  'individual-pro-v1': 'Pro',
+  'individual-provider': 'Provider',
+  'individual-max': 'Max 10×',
+  'individual-ultra': 'Max 20×',
+  'teams-pro': 'Teams Pro'
+}
+
+/** 订阅状态 → 展示文案（未知状态原样显示） */
+const CC_STATUS_LABELS: Record<string, string> = {
+  active: '使用中',
+  trialing: '试用中',
+  past_due: '逾期未付',
+  canceled: '已取消',
+  inactive: '未激活'
+}
+
+/** epoch 秒 → 日期文案（UTC 口径，与 Studio 显示一致，避免时区导致差一天） */
+function fmtDateUtc(sec: number): string {
+  return new Date(sec * 1000).toLocaleDateString('zh-CN', {
+    timeZone: 'UTC',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  })
+}
+
+/** 订阅套餐区：套餐名 / 状态 / 到期时间（含剩余天数与排定取消提示） */
+function SubscriptionSection({ subscription, available }: { subscription?: CommandCodeSubscription; available: boolean }) {
+  if (!available && !subscription) {
+    return (
+      <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+        暂无数据
+      </div>
+    )
+  }
+  if (!subscription) {
+    return (
+      <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+        当前账号未订阅套餐（免费账号或订阅已结束）
+      </div>
+    )
+  }
+
+  const planName = subscription.planId ? CC_PLAN_NAMES[subscription.planId] ?? subscription.planId : '—'
+  const statusLabel = subscription.status ? CC_STATUS_LABELS[subscription.status] ?? subscription.status : '—'
+  const statusTone =
+    subscription.status === 'active' || subscription.status === 'trialing'
+      ? 'text-green-600'
+      : subscription.status === 'past_due'
+        ? 'text-destructive'
+        : 'text-muted-foreground'
+
+  // 到期时间 + 剩余天数/取消提示
+  const endTs = subscription.currentPeriodEndTs
+  const endLabel = endTs !== undefined ? fmtDateUtc(endTs) : '—'
+  let endNote: string | null = null
+  let endTone = 'text-muted-foreground'
+  if (endTs !== undefined) {
+    const remainDays = Math.ceil((endTs * 1000 - Date.now()) / 86_400_000)
+    if (subscription.cancelScheduled) {
+      endNote = '已排定取消，到期后不再续费'
+      endTone = 'text-yellow-600'
+    } else if (remainDays < 0) {
+      endNote = '已到期'
+      endTone = 'text-destructive'
+    } else if (remainDays <= 7) {
+      endNote = `剩余 ${remainDays} 天，即将到期`
+      endTone = 'text-destructive'
+    } else {
+      endNote = `剩余 ${remainDays} 天，到期自动续费`
+    }
+  }
+
+  const phaseNote = subscription.pendingPhase
+    ? subscription.pendingPhase.effectiveDateTs !== undefined
+      ? `套餐将于 ${fmtDateUtc(subscription.pendingPhase.effectiveDateTs)} 变更`
+      : '套餐变更已排定'
+    : null
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="rounded-lg border border-border bg-card px-4 py-3">
+        <div className="text-xs text-muted-foreground mb-1">当前套餐</div>
+        <div className="text-lg font-semibold text-foreground">{planName}</div>
+        {subscription.planId && <div className="text-xs text-muted-foreground mt-0.5">{subscription.planId}</div>}
+      </div>
+      <div className="rounded-lg border border-border bg-card px-4 py-3">
+        <div className="text-xs text-muted-foreground mb-1">订阅状态</div>
+        <div className={`text-lg font-semibold ${statusTone}`}>{statusLabel}</div>
+        {phaseNote && <div className="text-xs text-muted-foreground mt-0.5">{phaseNote}</div>}
+      </div>
+      <div className="rounded-lg border border-border bg-card px-4 py-3">
+        <div className="text-xs text-muted-foreground mb-1">到期时间</div>
+        <div className="text-lg font-semibold tabular-nums text-foreground">{endLabel}</div>
+        {endNote && <div className={`text-xs mt-0.5 ${endTone}`}>{endNote}</div>}
+      </div>
     </div>
   )
 }
@@ -344,6 +452,12 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
 
       {loggedIn && usage && (
         <>
+          {/* 订阅套餐（含到期时间） */}
+          <section>
+            <h3 className="text-xs font-semibold text-muted-foreground mb-2">订阅套餐</h3>
+            <SubscriptionSection subscription={usage.subscription} available={usage.sourcesAvailable.subscription} />
+          </section>
+
           {/* 额度区：5h / 7d / 月度余额 */}
           <section>
             <h3 className="text-xs font-semibold text-muted-foreground mb-2">额度</h3>

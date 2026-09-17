@@ -14,6 +14,7 @@ import {
 } from '../store/key-store'
 import type {
   CommandCodeUsage,
+  CommandCodeSubscription,
   MonitorStatus,
   RemoteUsageSource,
   UsageWindowInfo
@@ -351,6 +352,96 @@ function parseSummary(body: unknown): CommandCodeUsage['summary'] {
   }
 }
 
+// ─── 订阅套餐解析 ───
+
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() !== '' ? v : undefined
+}
+
+/** 时间字段归一化为 epoch 秒：兼容 ISO 字符串 / epoch 秒 / epoch 毫秒（与 UsageWindowInfo.resetAt 同口径） */
+function toEpochSec(v: unknown): number | undefined {
+  let n: number | undefined
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    n = v
+  } else if (typeof v === 'string' && v.trim() !== '') {
+    const num = Number(v)
+    n = Number.isFinite(num) && num > 1e6 ? num : Date.parse(v)
+  }
+  if (n === undefined || !Number.isFinite(n)) return undefined
+  return n > 1e12 ? Math.round(n / 1000) : Math.round(n)
+}
+
+interface SubscriptionParse {
+  /** 明确无订阅（data 为 null / 空） */
+  none: boolean
+  subscription?: CommandCodeSubscription
+}
+
+/**
+ * 解析订阅端点响应。真实结构（Studio 前端已确认，2026-09-17）：
+ *   { success: true, data: { planId, status, currentPeriodEnd(ISO), cancelAt, pendingPhase } | null }
+ * data 为 null → 无订阅；另兼容数组形态（多订阅取活跃优先）、{ data: { subscription } } 嵌套与 snake_case。
+ * 返回 null 表示响应结构无法识别（区块标记为不可用，不展示「无订阅」）。
+ */
+function parseSubscription(body: unknown): SubscriptionParse | null {
+  // body 为 null（响应非 JSON / 解析失败）→ 结构无法识别，区块标记为不可用
+  if (body === null || body === undefined) return null
+  if (isObj(body) && body.success === false) return null
+  const root = unwrapSuccess(body)
+  // { success:true, data:null } → 明确无订阅
+  if (root === null || root === undefined) return { none: true }
+
+  let obj: Record<string, unknown> | null = null
+  if (Array.isArray(root)) {
+    const items = root.filter(isObj)
+    obj = items.find((o) => str(o.status) === 'active' || str(o.status) === 'trialing') ?? items[0] ?? null
+    if (!obj) return { none: true }
+  } else if (isObj(root)) {
+    obj = isObj(root.subscription) ? root.subscription : root
+  } else {
+    return null
+  }
+
+  const sub: CommandCodeSubscription = {}
+  const planId = str(obj.planId ?? obj.plan_id ?? obj.plan)
+  if (planId) sub.planId = planId
+  const status = str(obj.status)
+  if (status) sub.status = status
+
+  const periodEndRaw = obj.currentPeriodEnd ?? obj.current_period_end ?? obj.periodEnd ?? obj.period_end
+  if (typeof periodEndRaw === 'string' && periodEndRaw.trim() !== '') sub.currentPeriodEnd = periodEndRaw
+  const periodEndTs = toEpochSec(periodEndRaw)
+  if (periodEndTs !== undefined) sub.currentPeriodEndTs = periodEndTs
+
+  // cancelAt / cancel_at：null → 明确未排定取消；有值 → 已排定取消
+  // 注意用显式 undefined 判断：API 可能同时返回 cancelAt: null 与缺失的 cancel_at，`??` 会把 null 短路掉
+  const cancelRaw = obj.cancelAt !== undefined ? obj.cancelAt : obj.cancel_at
+  if (cancelRaw === null) {
+    sub.cancelScheduled = false
+  } else {
+    const cancelTs = toEpochSec(cancelRaw)
+    if (cancelTs !== undefined) {
+      sub.cancelScheduled = true
+      sub.cancelAtTs = cancelTs
+    }
+  }
+
+  const phaseRaw = isObj(obj.pendingPhase) ? obj.pendingPhase : isObj(obj.pending_phase) ? obj.pending_phase : null
+  if (phaseRaw) {
+    const phase: NonNullable<CommandCodeSubscription['pendingPhase']> = {}
+    const effectiveTs = toEpochSec(phaseRaw.effectiveDate ?? phaseRaw.effective_date)
+    if (effectiveTs !== undefined) phase.effectiveDateTs = effectiveTs
+    const unitAmount = toNum(phaseRaw.unitAmount ?? phaseRaw.unit_amount)
+    if (unitAmount !== undefined) phase.unitAmount = unitAmount
+    const currency = str(phaseRaw.currency)
+    if (currency) phase.currency = currency
+    if (Object.keys(phase).length > 0) sub.pendingPhase = phase
+  }
+
+  if (Object.keys(sub).length === 0) return { none: true }
+  return { none: false, subscription: sub }
+}
+
 // ─── 主入口：拉取并归一化 ───
 
 export type RefreshResult =
@@ -359,7 +450,7 @@ export type RefreshResult =
 
 /**
  * 拉取某监控源的云端用量。
- * 并行请求 4 个端点，任一 401/403 → session_expired；
+ * 并行请求 6 个端点，任一 401/403 → session_expired；
  * 网络异常 → network；其余 → unknown。
  */
 export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promise<RefreshResult> {
@@ -372,7 +463,10 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     // 用量明细：Studio 侧按“请求记录”返回，limit 取最近 N 条再按模型聚合
     ccGet('/internal/usage?limit=100', { token }),
     ccGet('/internal/billing/credits', { token }),
-    apiKey ? ccGet('/alpha/billing/credits', { apiKey }) : Promise.resolve(null)
+    apiKey ? ccGet('/alpha/billing/credits', { apiKey }) : Promise.resolve(null),
+    // 订阅套餐（含到期时间）；withPending=true 让响应带计划变更过渡信息
+    ccGet('/internal/billing/subscriptions?withPending=true', { token }),
+    apiKey ? ccGet('/alpha/billing/subscriptions', { apiKey }) : Promise.resolve(null)
   ]
 
   let results: Array<PromiseSettledResult<CcResponse | null>>
@@ -389,15 +483,15 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   const getStatus = (i: number): number | null => get(i)?.status ?? null
 
   console.log(
-    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} usage=${getStatus(1)} credits=${getStatus(2)} windows=${getStatus(3)}`
+    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} usage=${getStatus(1)} credits=${getStatus(2)} windows=${getStatus(3)} subscription=${getStatus(4)} subAlpha=${getStatus(5)}`
   )
 
   // 401/403 → 会话失效
-  if ([0, 1, 2, 3].some((i) => getStatus(i) === 401 || getStatus(i) === 403)) {
+  if (results.some((r) => r.status === 'fulfilled' && r.value && (r.value.status === 401 || r.value.status === 403))) {
     return { ok: false, code: 'session_expired' }
   }
 
-  const sourcesAvailable = { summary: false, charts: false, credits: false, windows: false }
+  const sourcesAvailable = { summary: false, charts: false, credits: false, windows: false, subscription: false }
 
   const summaryRes = get(0)
   const usageRes = get(1)
@@ -448,12 +542,25 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     }
   }
 
+  // ③ 订阅套餐（含到期时间）：Cookie 端点为主，API Key 端点兜底（主端点结构无法识别时）
+  const subRes = get(4)
+  const subAlphaRes = get(5)
+  let subscription: CommandCodeSubscription | undefined
+  const parsedSub =
+    (subRes && subRes.status === 200 ? parseSubscription(subRes.body) : null) ??
+    (subAlphaRes && subAlphaRes.status === 200 ? parseSubscription(subAlphaRes.body) : null)
+  if (parsedSub) {
+    sourcesAvailable.subscription = true
+    if (!parsedSub.none && parsedSub.subscription) subscription = parsedSub.subscription
+  }
+
   const data: CommandCodeUsage = {
     fetchedAt: Date.now(),
     sourcesAvailable,
     ...(summary ? { summary } : {}),
     ...(credits ? { credits } : {}),
     ...(windows ? { windows } : {}),
+    ...(subscription ? { subscription } : {}),
     ...(models ? { models } : {})
   }
 
