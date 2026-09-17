@@ -10,7 +10,6 @@ import { readAppSettings } from '../config/appSettings'
 import { buildUsageEntries, sumUsage } from '../moa/usage'
 import type { Provider, SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
-import { DEFAULT_MAX_CONCURRENCY } from '../../shared/defaults'
 
 let server: Server | null = null
 
@@ -24,10 +23,9 @@ let activeRequests = 0
 let queueLength = 0
 const waiters: Array<() => void> = []
 
-/** 读取代理最大并发数（settings.proxy.maxConcurrency），无效/未配置回退默认。 */
+/** 读取代理最大并发数（settings.proxy.maxConcurrency；UI 写入保证 ≥1）。 */
 function getMaxConcurrency(): number {
-  const n = Number(readAppSettings().proxy.maxConcurrency)
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_CONCURRENCY
+  return readAppSettings().proxy.maxConcurrency
 }
 
 /** 获取并发许可；超限则进入 FIFO 等待队列。 */

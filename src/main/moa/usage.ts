@@ -25,21 +25,15 @@ interface Price {
 /** 读取用户自定义定价（settings.pricing[modelId]），读取失败或未配置时返回 null；命中手动峰谷窗口则用窗口价 */
 function getCustomPrice(modelId: string, timestamp: number): Price | null {
   const cfg = readAppSettings().pricing[modelId]
-  if (!cfg) return null
-  // 仅当 input/output 为有效数值时采用自定义定价
-  if (typeof cfg.input !== 'number' || !Number.isFinite(cfg.input) ||
-      typeof cfg.output !== 'number' || !Number.isFinite(cfg.output)) {
-    return null
-  }
+  // input/output 任一未配置 → 未设置自定义定价
+  if (!cfg || cfg.input === undefined || cfg.output === undefined) return null
   // 命中手动配置的峰谷窗口（多时段 + 按星期）则用窗口价，否则用基础价
-  if (Array.isArray(cfg.windows) && cfg.windows.length > 0) {
+  if (cfg.windows?.length) {
     const tz = cfg.timezone || 'Asia/Shanghai'
     const tod = minutesOf(timeOfDay(tz, timestamp))
     const wd = dayOfWeek(tz, timestamp)
     const hit = cfg.windows.find((w) => inWindow(tod, w, wd))
-    if (hit && typeof hit.input === 'number' && typeof hit.output === 'number') {
-      return { input: hit.input, output: hit.output }
-    }
+    if (hit) return { input: hit.input, output: hit.output }
   }
   return { input: cfg.input, output: cfg.output }
 }
@@ -108,11 +102,11 @@ function resolveWindow(entry: ProbedPricingEntry, ts: number): Price {
 /** 读取官方探查定价（settings.probedPricing），最长前缀匹配 + 多源取最新 */
 function getProbedPrice(modelId: string, timestamp: number): Price | null {
   const list = readAppSettings().probedPricing
-  if (!Array.isArray(list) || list.length === 0) return null
+  if (list.length === 0) return null
 
   let best: ProbedPricingEntry | null = null
   for (const e of list) {
-    if (!e?.pattern) continue
+    if (!e.pattern) continue
     if (e.pattern !== modelId && !modelId.startsWith(e.pattern)) continue
     // 最长前缀优先；同前缀取 fetchedAt 最新
     if (

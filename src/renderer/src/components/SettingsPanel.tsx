@@ -1491,7 +1491,7 @@ function ProbeSection() {
       const res = await window.moaAPI.getProviders()
       if (res.success) setProviders(res.data as Provider[])
     } catch {
-      /* ignore */
+      /* 刷新失败保持现有列表即可 */
     } finally {
       setRefreshingModels((prev) => {
         const next = new Set(prev)

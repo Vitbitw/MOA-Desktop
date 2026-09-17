@@ -156,7 +156,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         })
       }
     } catch {
-      // silent
+      // 后台刷新失败保持旧列表即可（下次操作会自然重试）
     }
   },
 
@@ -192,7 +192,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         set({ currentConversationId: null, messages: [] })
       }
     } catch {
-      // silent
+      // 删除失败保持现状（列表未刷新），用户可重试
     }
   },
 

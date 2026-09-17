@@ -11,7 +11,7 @@ import { getAllProviders, fetchAndCacheModels } from '../providers/providerManag
 import { getMoaConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
 import { defaultPricingProbeUrlByName } from '../../shared/defaults'
-import type { PricingProbeSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
+import type { ProbedPricingEntry, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
 
 const HTTP_TIMEOUT_MS = 20_000
 const BROWSER_LOAD_TIMEOUT_MS = 20_000
@@ -244,8 +244,7 @@ function hashPageText(text: string): string {
 
 /** 读取全部源的页面级缓存（探出哈希 + 定价区块锚句） */
 function readPageCache(): Record<string, PricingPageCache> {
-  const cache = readAppSettings().pricingProbeCache
-  return cache && typeof cache === 'object' ? cache : {}
+  return readAppSettings().pricingProbeCache ?? {}
 }
 
 /** 更新单个源页面缓存（读最新 → 改 → 写回，避免覆盖探查期间其它写入） */
@@ -259,8 +258,7 @@ function updatePageCache(sourceId: string, patch: PricingPageCache): void {
 
 /** 读回某源已持久化的探查条目（页面未变更时直接沿用） */
 function readProbedPricingEntries(sourceId: string): ProbedPricingEntry[] {
-  const probed = readAppSettings().probedPricing
-  return Array.isArray(probed) ? probed.filter((e) => e.sourceId === sourceId) : []
+  return readAppSettings().probedPricing.filter((e) => e.sourceId === sourceId)
 }
 
 /**
@@ -901,9 +899,8 @@ export async function probeSources(
 
 /** 读取定价探查配置；自动并入所有已配置 API Key 厂商的派生源（未手动创建源的厂商自动可用，不持久化） */
 export function getPricingProbeConfig(): { autoRefreshSeconds: number; sources: PricingProbeSource[] } {
-  const settings = readAppSettings()
-  const pp = (settings?.pricingProbe ?? {}) as Partial<PricingProbeSettings>
-  const configSources = Array.isArray(pp.sources) ? (pp.sources as PricingProbeSource[]) : []
+  const pp = readAppSettings().pricingProbe
+  const configSources = pp.sources
   // 自动刷新间隔（秒）；兼容旧配置 autoRefreshDays（天 → 秒）
   const legacyDays = (pp as { autoRefreshDays?: unknown }).autoRefreshDays
   const legacy =

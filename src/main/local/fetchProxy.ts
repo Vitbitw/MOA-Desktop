@@ -425,17 +425,7 @@ function isIdempotentMethod(method?: string): boolean {
 
 /** 读取 network.timeoutMs / network.retryCount（同步，sql.js 内存库） */
 function getApiRequestConfig(): { timeoutMs: number; retryCount: number } {
-  const DEFAULT_TIMEOUT_MS = 15_000
-  const DEFAULT_RETRY_COUNT = 2
-  const network = readAppSettings().network
-  const timeoutMs =
-    typeof network.timeoutMs === 'number' && Number.isFinite(network.timeoutMs) && network.timeoutMs >= 0
-      ? network.timeoutMs
-      : DEFAULT_TIMEOUT_MS
-  const retryCount =
-    typeof network.retryCount === 'number' && Number.isFinite(network.retryCount) && network.retryCount >= 0
-      ? Math.floor(network.retryCount)
-      : DEFAULT_RETRY_COUNT
+  const { timeoutMs, retryCount } = readAppSettings().network
   return { timeoutMs, retryCount }
 }
 

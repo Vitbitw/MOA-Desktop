@@ -1,7 +1,7 @@
 # 防御边界规范（Defensive Boundary Policy）
 
 - 日期：2026-09-17
-- 状态：生效（B1 已完成，B2 待做）
+- 状态：生效（B1–B4 已完成）
 - 项目：MOA Desktop
 - 适用范围：全部后续代码 + 存量分批清理
 
@@ -117,9 +117,9 @@ export function handleIpc(channel: string, fn: (event: IpcMainInvokeEvent, ...ar
 | 批次 | 内容 | 性质 | 验收 |
 |---|---|---|---|
 | B1 ✅ | 配置读取收敛：新建 `src/main/config/appSettings.ts`，替换 17 处散装读取 | 纯重构，行为不变 | tsc + build 通过 |
-| B2 | IPC 包装器：新建 `src/main/ipc/handle.ts`，收敛 22 个模板 handler | 纯重构，行为不变 | tsc + build + 功能抽查 |
-| B3 | 内部冗余清理：删「自读自防」校验（usage.ts / fetchProxy / probe / collector） | 删代码 | tsc + build |
-| B4 | renderer 静默 catch 审计：12 处逐个判定（保留 + 注释 / 删除冒泡） | 删代码 + 注释 | tsc + build |
+| B2 ✅ | IPC 包装器：新建 `src/main/ipc/handle.ts`（handleIpc / handleIpcRaw），收敛 24 个模板 handler | 纯重构，行为不变 | tsc + build 通过 |
+| B3 ✅ | 内部冗余清理：防线内移到 mergeSettings（深合并 + 类型规范化），删除各消费点自读自防校验 | 删代码 | tsc + build 通过 |
+| B4 ✅ | renderer 静默 catch 审计：12 处判定为「UI 容错，保留」并规范化注释 | 注释 | tsc + build 通过 |
 
 依赖：B3 依赖 B1；B2、B4 独立。
 

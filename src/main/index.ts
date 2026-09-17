@@ -3,8 +3,9 @@ import { app, BrowserWindow, ipcMain, Menu, clipboard } from 'electron'
 import path from 'path'
 import { getDatabase } from './db/database'
 import { readAppSettings, updateRawAppSettings } from './config/appSettings'
+import { handleIpc, handleIpcRaw } from './ipc/handle'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, ProbedPricingEntry, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
+import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
@@ -223,139 +224,84 @@ function createApplicationMenu() {
 
 function registerIpcHandlers() {
   // ── Config / Providers ──
-  ipcMain.handle(IPC.CONFIG_GET_PROVIDERS, () => {
-    try {
-      return { success: true, data: getAllProviders() }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
+  handleIpc(IPC.CONFIG_GET_PROVIDERS, () => getAllProviders())
+
+  handleIpc(IPC.CONFIG_ADD_PROVIDER, (_e, data: { name: string; baseUrl: string; apiKey: string }) =>
+    addProvider(data.name, data.baseUrl, data.apiKey)
+  )
+
+  handleIpc(IPC.CONFIG_REMOVE_PROVIDER, (_e, id: string) => {
+    removeProvider(id)
   })
 
-  ipcMain.handle(IPC.CONFIG_ADD_PROVIDER, (_e, data: { name: string; baseUrl: string; apiKey: string }) => {
-    try {
-      const { name, baseUrl, apiKey } = data
-      const result = addProvider(name, baseUrl, apiKey)
-      return { success: true, data: result }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.CONFIG_REMOVE_PROVIDER, (_e, id: string) => {
-    try {
-      removeProvider(id)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.CONFIG_GET_MODELS, async (_e, providerId: string) => {
-    try {
-      const models = await fetchAndCacheModels(providerId)
-      return { success: true, data: models }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
+  handleIpc(IPC.CONFIG_GET_MODELS, (_e, providerId: string) => fetchAndCacheModels(providerId))
 
   // ── Conversations ──
-  ipcMain.handle(IPC.DB_GET_CONVERSATIONS, () => {
-    try {
-      const convs = getDatabase().query('SELECT * FROM conversations ORDER BY updated_at DESC')
-      return { success: true, data: convs }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
+  handleIpc(IPC.DB_GET_CONVERSATIONS, () =>
+    getDatabase().query('SELECT * FROM conversations ORDER BY updated_at DESC')
+  )
+
+  handleIpc(IPC.DB_CREATE_CONVERSATION, (_e, data: { title: string; mode: string }) => {
+    const id = crypto.randomUUID()
+    const now = Date.now()
+    getDatabase().exec(
+      'INSERT INTO conversations (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      [id, data.title, data.mode, now, now]
+    )
+    return { id, ...data, createdAt: now }
   })
 
-  ipcMain.handle(IPC.DB_CREATE_CONVERSATION, (_e, data: { title: string; mode: string }) => {
-    try {
-      const id = crypto.randomUUID()
-      const now = Date.now()
-      getDatabase().exec(
-        'INSERT INTO conversations (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-        [id, data.title, data.mode, now, now]
-      )
-      return { success: true, data: { id, ...data, createdAt: now } }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
+  handleIpc(IPC.DB_DELETE_CONVERSATION, (_e, id: string) => {
+    getDatabase().exec('DELETE FROM messages WHERE conversation_id = ?', [id])
+    getDatabase().exec('DELETE FROM conversations WHERE id = ?', [id])
   })
 
-  ipcMain.handle(IPC.DB_DELETE_CONVERSATION, (_e, id: string) => {
-    try {
-      getDatabase().exec('DELETE FROM messages WHERE conversation_id = ?', [id])
-      getDatabase().exec('DELETE FROM conversations WHERE id = ?', [id])
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
+  handleIpc(IPC.DB_GET_MESSAGES, (_e, conversationId: string) =>
+    getDatabase().query(
+      'SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp',
+      [conversationId]
+    )
+  )
 
-  ipcMain.handle(IPC.DB_GET_MESSAGES, (_e, conversationId: string) => {
-    try {
-      const msgs = getDatabase().query(
-        'SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp',
-        [conversationId]
-      )
-      return { success: true, data: msgs }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.DB_ADD_MESSAGE, (_e, msg: {
+  handleIpc(IPC.DB_ADD_MESSAGE, (_e, msg: {
     conversationId: string; role: string; content: string; mode: string; subOutputs?: string; tokenUsage?: string
   }) => {
-    try {
-      const id = crypto.randomUUID()
-      getDatabase().exec(
-        `INSERT INTO messages (id, conversation_id, role, content, mode, sub_outputs, token_usage, timestamp)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, msg.conversationId, msg.role, msg.content, msg.mode, msg.subOutputs || null, msg.tokenUsage || null, Date.now()]
-      )
-      getDatabase().exec('UPDATE conversations SET message_count = message_count + 1, updated_at = ? WHERE id = ?', [Date.now(), msg.conversationId])
-      return { success: true, data: { id } }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
+    const id = crypto.randomUUID()
+    getDatabase().exec(
+      `INSERT INTO messages (id, conversation_id, role, content, mode, sub_outputs, token_usage, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, msg.conversationId, msg.role, msg.content, msg.mode, msg.subOutputs || null, msg.tokenUsage || null, Date.now()]
+    )
+    getDatabase().exec('UPDATE conversations SET message_count = message_count + 1, updated_at = ? WHERE id = ?', [Date.now(), msg.conversationId])
+    return { id }
   })
 
   // ── Settings ──
-  ipcMain.handle(IPC.SETTINGS_GET_ALL, () => {
-    return { success: true, data: readAppSettings() }
-  })
+  handleIpc(IPC.SETTINGS_GET_ALL, () => readAppSettings())
 
-  ipcMain.handle(IPC.SETTINGS_SET, (_e, key: string, value: unknown) => {
-    try {
-      const current = updateRawAppSettings((raw) => {
-        raw[key] = value
-      })
+  handleIpc(IPC.SETTINGS_SET, (_e, key: string, value: unknown) => {
+    const current = updateRawAppSettings((raw) => {
+      raw[key] = value
+    })
 
-      // ── 网络代理变更 → 清除代理缓存 ──
-      if (key === 'network') {
-        invalidateProxyCache()
+    // ── 网络代理变更 → 清除代理缓存 ──
+    if (key === 'network') {
+      invalidateProxyCache()
+    }
+
+    // ── 定价探查设置变更 → 重新调度自动探查定时器（间隔/源变化即时生效）──
+    if (key === 'pricingProbe') {
+      reschedulePricingAutoRefresh()
+    }
+
+    // ── 桌面用量悬浮窗开关联动 ──
+    if (key === 'display') {
+      const display = (value as Partial<AppSettings['display']>) ?? {}
+      if (display.usageOverlay === true) {
+        createUsageWindow(current)
+      } else if (display.usageOverlay === false) {
+        destroyUsageWindow()
       }
-
-      // ── 定价探查设置变更 → 重新调度自动探查定时器（间隔/源变化即时生效）──
-      if (key === 'pricingProbe') {
-        reschedulePricingAutoRefresh()
-      }
-
-      // ── 桌面用量悬浮窗开关联动 ──
-      if (key === 'display') {
-        const display = (value as Partial<AppSettings['display']>) ?? {}
-        if (display.usageOverlay === true) {
-          createUsageWindow(current)
-        } else if (display.usageOverlay === false) {
-          destroyUsageWindow()
-        }
-      }
-
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
     }
   })
 
@@ -374,7 +320,7 @@ function registerIpcHandlers() {
   })
 
   // ── MoA Send Message ──
-  ipcMain.handle(IPC.MOA_SEND_MESSAGE, async (_e, msg: {
+  handleIpcRaw(IPC.MOA_SEND_MESSAGE, async (_e, msg: {
     conversationId?: string
     title?: string
     content: string
@@ -554,15 +500,13 @@ function registerIpcHandlers() {
       }
 
       return { success: true, data: { conversationId: convId, moaResult, conversations } }
-    } catch (err) {
-      return { success: false, error: String(err) }
     } finally {
       moaRunning = false
     }
   })
 
   // ── Title Generate ──
-  ipcMain.handle(IPC.TITLE_GENERATE, async (_e, data: {
+  handleIpcRaw(IPC.TITLE_GENERATE, async (_e, data: {
     conversationId: string
     messages: Array<{ role: string; content: string }>
     providerId: string
@@ -570,225 +514,166 @@ function registerIpcHandlers() {
     maxLength: number
     language: 'auto' | 'zh' | 'en'
   }) => {
-    try {
-      const result = await generateTitle({
-        messages: data.messages,
-        providerId: data.providerId,
-        modelId: data.modelId,
-        maxLength: data.maxLength,
-        language: data.language
-      })
-      if (result.title === null) {
-        return { success: false, error: '标题生成失败：模型返回空或未配置正确（请检查厂商 API Key 和模型 ID）' }
-      }
-      // 渲染端手动/首次标题生成同样记录用量，与主进程 first_message 路径口径一致
-      recordTitleUsage(data.modelId, data.providerId, result.tokenUsage)
-      return { success: true, title: result.title }
-    } catch (err) {
-      return { success: false, error: String(err) }
+    const result = await generateTitle({
+      messages: data.messages,
+      providerId: data.providerId,
+      modelId: data.modelId,
+      maxLength: data.maxLength,
+      language: data.language
+    })
+    if (result.title === null) {
+      return { success: false, error: '标题生成失败：模型返回空或未配置正确（请检查厂商 API Key 和模型 ID）' }
     }
+    // 渲染端手动/首次标题生成同样记录用量，与主进程 first_message 路径口径一致
+    recordTitleUsage(data.modelId, data.providerId, result.tokenUsage)
+    return { success: true, title: result.title }
   })
 
   // ── Update Conversation Title ──
-  ipcMain.handle(IPC.DB_UPDATE_CONVERSATION_TITLE, (_e, conversationId: string, title: string, titleEdited?: boolean) => {
-    try {
-      const db = getDatabase()
-      // Only update title & title_edited — never touch updated_at;
-      // sort order must reflect real activity, not metadata changes.
-      db.exec(
-        'UPDATE conversations SET title = ?, title_edited = ? WHERE id = ?',
-        [title, titleEdited ? 1 : 0, conversationId]
-      )
-      const conversations = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
-      return { success: true, conversations }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
+  handleIpcRaw(IPC.DB_UPDATE_CONVERSATION_TITLE, (_e, conversationId: string, title: string, titleEdited?: boolean) => {
+    const db = getDatabase()
+    // Only update title & title_edited — never touch updated_at;
+    // sort order must reflect real activity, not metadata changes.
+    db.exec(
+      'UPDATE conversations SET title = ?, title_edited = ? WHERE id = ?',
+      [title, titleEdited ? 1 : 0, conversationId]
+    )
+    const conversations = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
+    return { success: true, conversations }
   })
 
   // ── Usage Monitoring ──
-  ipcMain.handle(IPC.USAGE_GET_SUMMARY, (_e, params: { range: UsageRange; groupBy: UsageGroupBy }) => {
-    try {
-      const { range, groupBy } = params
-      const now = Date.now()
-      let since: number | null = null
-      if (range === 'today') since = new Date().setHours(0, 0, 0, 0)
-      else if (range === 'week') since = now - 7 * 86400000
-      else if (range === 'month') since = now - 30 * 86400000
-      // range === 'all' → 不限时间范围
+  handleIpc(IPC.USAGE_GET_SUMMARY, (_e, params: { range: UsageRange; groupBy: UsageGroupBy }) => {
+    const { range, groupBy } = params
+    const now = Date.now()
+    let since: number | null = null
+    if (range === 'today') since = new Date().setHours(0, 0, 0, 0)
+    else if (range === 'week') since = now - 7 * 86400000
+    else if (range === 'month') since = now - 30 * 86400000
+    // range === 'all' → 不限时间范围
 
-      const rows = since === null
-        ? getDatabase().query<RequestLogRow>('SELECT * FROM request_logs')
-        : getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
+    const rows = since === null
+      ? getDatabase().query<RequestLogRow>('SELECT * FROM request_logs')
+      : getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
 
-      // 厂商 ID → 厂商名称（getAllProviders 依赖 DB 已初始化，故在 handler 内调用）
-      const providerNameMap = new Map(getAllProviders().map((p) => [p.id, p.name] as const))
-      const MODE_LABELS: Record<string, string> = {
-        aggregate: '聚合',
-        compare: '对比',
-        direct: '直通',
-        passthrough: '透传'
-      }
-
-      // 总量：行数 / 成功行数 / 各列累加
-      const totals = { requests: 0, success: 0, prompt: 0, completion: 0, cost: 0 }
-      // 分组明细：Map<key, UsageRow>
-      const rowMap = new Map<string, UsageRow>()
-
-      for (const row of rows) {
-        totals.requests += 1
-        if (row.success === 1) totals.success += 1
-        totals.prompt += row.prompt_tokens || 0
-        totals.completion += row.completion_tokens || 0
-        totals.cost += row.cost || 0
-
-        // 解析 models 列；null/空/损坏则跳过明细（仅计入 totals）
-        let models: Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null = null
-        try {
-          models = row.models ? JSON.parse(row.models) : null
-        } catch {
-          models = null
-        }
-        if (!models || models.length === 0) continue
-
-        // 按 groupBy 归组：model→modelId；provider→真实厂商名（providerId 缺失时兜底 modelId）；mode→中文模式标签
-        for (const m of models) {
-          let key: string
-          if (groupBy === 'model') {
-            key = m.modelId
-          } else if (groupBy === 'provider') {
-            // providerId 缺失或厂商已删除 → 兜底显示模型名，避免 UUID
-            key = m.providerId ? (providerNameMap.get(m.providerId) ?? m.modelId) : m.modelId
-          } else {
-            // 标题生成日志（source='title'）单独归组，避免污染「直通」模式
-            key = row.source === 'title' ? '标题' : (MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct')
-          }
-          const agg = rowMap.get(key) || { key, requests: 0, success: 0, prompt: 0, completion: 0, cost: 0 }
-          agg.requests += 1
-          agg.success += row.success === 1 ? 1 : 0
-          agg.prompt += m.prompt || 0
-          agg.completion += m.completion || 0
-          agg.cost += m.cost || 0
-          rowMap.set(key, agg)
-        }
-      }
-
-      return {
-        success: true,
-        data: {
-          range,
-          groupBy,
-          totals,
-          rows: Array.from(rowMap.values())
-        } satisfies UsageSummary
-      }
-    } catch (err) {
-      return { success: false, error: String(err) }
+    // 厂商 ID → 厂商名称（getAllProviders 依赖 DB 已初始化，故在 handler 内调用）
+    const providerNameMap = new Map(getAllProviders().map((p) => [p.id, p.name] as const))
+    const MODE_LABELS: Record<string, string> = {
+      aggregate: '聚合',
+      compare: '对比',
+      direct: '直通',
+      passthrough: '透传'
     }
+
+    // 总量：行数 / 成功行数 / 各列累加
+    const totals = { requests: 0, success: 0, prompt: 0, completion: 0, cost: 0 }
+    // 分组明细：Map<key, UsageRow>
+    const rowMap = new Map<string, UsageRow>()
+
+    for (const row of rows) {
+      totals.requests += 1
+      if (row.success === 1) totals.success += 1
+      totals.prompt += row.prompt_tokens || 0
+      totals.completion += row.completion_tokens || 0
+      totals.cost += row.cost || 0
+
+      // 解析 models 列；null/空/损坏则跳过明细（仅计入 totals）
+      let models: Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null = null
+      try {
+        models = row.models ? JSON.parse(row.models) : null
+      } catch {
+        models = null
+      }
+      if (!models || models.length === 0) continue
+
+      // 按 groupBy 归组：model→modelId；provider→真实厂商名（providerId 缺失时兜底 modelId）；mode→中文模式标签
+      for (const m of models) {
+        let key: string
+        if (groupBy === 'model') {
+          key = m.modelId
+        } else if (groupBy === 'provider') {
+          // providerId 缺失或厂商已删除 → 兜底显示模型名，避免 UUID
+          key = m.providerId ? (providerNameMap.get(m.providerId) ?? m.modelId) : m.modelId
+        } else {
+          // 标题生成日志（source='title'）单独归组，避免污染「直通」模式
+          key = row.source === 'title' ? '标题' : (MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct')
+        }
+        const agg = rowMap.get(key) || { key, requests: 0, success: 0, prompt: 0, completion: 0, cost: 0 }
+        agg.requests += 1
+        agg.success += row.success === 1 ? 1 : 0
+        agg.prompt += m.prompt || 0
+        agg.completion += m.completion || 0
+        agg.cost += m.cost || 0
+        rowMap.set(key, agg)
+      }
+    }
+
+    return {
+      range,
+      groupBy,
+      totals,
+      rows: Array.from(rowMap.values())
+    } satisfies UsageSummary
   })
 
-  ipcMain.handle(IPC.USAGE_GET_TODAY, () => {
-    try {
-      // today 范围：当天 0 点起
-      const since = new Date().setHours(0, 0, 0, 0)
-      const rows = getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
-      let prompt = 0
-      let completion = 0
-      let cost = 0
-      for (const row of rows) {
-        prompt += row.prompt_tokens || 0
-        completion += row.completion_tokens || 0
-        cost += row.cost || 0
-      }
-      return {
-        success: true,
-        data: { prompt, completion, cost, running: moaRunning } satisfies UsageToday
-      }
-    } catch (err) {
-      return { success: false, error: String(err) }
+  handleIpc(IPC.USAGE_GET_TODAY, () => {
+    // today 范围：当天 0 点起
+    const since = new Date().setHours(0, 0, 0, 0)
+    const rows = getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
+    let prompt = 0
+    let completion = 0
+    let cost = 0
+    for (const row of rows) {
+      prompt += row.prompt_tokens || 0
+      completion += row.completion_tokens || 0
+      cost += row.cost || 0
     }
+    return { prompt, completion, cost, running: moaRunning } satisfies UsageToday
   })
 
   // ── Cloud Usage Monitoring (Command Code / MiMo / DeepSeek) ──
-  ipcMain.handle(IPC.MONITOR_GET_STATUS, (_e, source: RemoteUsageSource) => {
-    try {
-      const status = source.type === 'deepseek' ? getDeepSeekStatus(source.id) : getMonitorStatus(source.id)
-      return { success: true, data: status }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
+  handleIpc(IPC.MONITOR_GET_STATUS, (_e, source: RemoteUsageSource) =>
+    source.type === 'deepseek' ? getDeepSeekStatus(source.id) : getMonitorStatus(source.id)
+  )
+
+  handleIpc(IPC.MONITOR_LOGIN, (_e, source: RemoteUsageSource) =>
+    source.type === 'mimo'
+      ? loginToMimo(source, mainWindow)
+      : source.type === 'deepseek'
+        ? loginToDeepSeek(source, mainWindow)
+        : loginToCommandCode(source, mainWindow)
+  )
+
+  handleIpc(IPC.MONITOR_LOGOUT, (_e, sourceId: string) => {
+    logoutCommandCode(sourceId)
+    logoutDeepSeek(sourceId)
   })
 
-  ipcMain.handle(IPC.MONITOR_LOGIN, async (_e, source: RemoteUsageSource) => {
-    try {
-      const result =
-        source.type === 'mimo'
-          ? await loginToMimo(source, mainWindow)
-          : source.type === 'deepseek'
-            ? await loginToDeepSeek(source, mainWindow)
-            : await loginToCommandCode(source, mainWindow)
-      return { success: true, data: result }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.MONITOR_LOGOUT, (_e, sourceId: string) => {
-    try {
-      logoutCommandCode(sourceId)
-      logoutDeepSeek(sourceId)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle(IPC.MONITOR_SET_API_KEY, (_e, sourceId: string, apiKey: string) => {
-    try {
-      saveUsageCredential(usageApiKeyKey(sourceId), apiKey)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
+  handleIpc(IPC.MONITOR_SET_API_KEY, (_e, sourceId: string, apiKey: string) => {
+    saveUsageCredential(usageApiKeyKey(sourceId), apiKey)
   })
 
   // 本地累计（Command Code）：多次采集去重累积的按模型用量
-  ipcMain.handle(IPC.MONITOR_GET_CUMULATIVE, (_e, sourceId: string) => {
-    try {
-      return { success: true, data: getCumulativeUsage(sourceId) }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
+  handleIpc(IPC.MONITOR_GET_CUMULATIVE, (_e, sourceId: string) => getCumulativeUsage(sourceId))
 
   // 后台采集器状态（是否启用 / 间隔 / 上次采集时间 / 上次错误）
-  ipcMain.handle(IPC.MONITOR_COLLECTOR_STATUS, () => {
-    try {
-      return { success: true, data: getCollectorStatus() }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
+  handleIpc(IPC.MONITOR_COLLECTOR_STATUS, () => getCollectorStatus())
 
-  ipcMain.handle(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
-    try {
-      const result =
-        source.type === 'mimo'
-          ? await refreshMimoUsage(source)
-          : source.type === 'deepseek'
-            ? await refreshDeepSeekUsage(source)
-            : await refreshCommandCodeUsage(source)
-      if (result.ok) {
-        return { success: true, data: result.data }
-      }
-      return { success: false, error: result.error, code: result.code }
-    } catch (err) {
-      return { success: false, error: String(err), code: 'unknown' }
+  handleIpcRaw(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
+    const result =
+      source.type === 'mimo'
+        ? await refreshMimoUsage(source)
+        : source.type === 'deepseek'
+          ? await refreshDeepSeekUsage(source)
+          : await refreshCommandCodeUsage(source)
+    if (result.ok) {
+      return { success: true, data: result.data }
     }
+    return { success: false, error: result.error, code: result.code }
   })
 
   // ── 定价探查（LLM 自动更新官方定价）──
-  ipcMain.handle(IPC.PRICING_PROBE_RUN, async (_e, sources?: PricingProbeSource[], force?: boolean) => {
+  handleIpcRaw(IPC.PRICING_PROBE_RUN, async (_e, sources?: PricingProbeSource[], force?: boolean) => {
     if (pricingProbeRunning) return { success: false, error: '探查进行中' }
     pricingProbeRunning = true
     try {
@@ -807,8 +692,6 @@ function registerIpcHandlers() {
       }
       const results = await probeSources(valid, model, emitProgress, force === true)
       return { success: true, data: { results } }
-    } catch (err) {
-      return { success: false, error: String(err) }
     } finally {
       pricingProbeRunning = false
     }
@@ -839,8 +722,7 @@ function schedulePricingAutoRefresh(initialDelayMs = 10_000): void {
       const enabled = sources.filter((s) => s.enabled && sourceHasConfiguredKey(s))
       if (enabled.length === 0) return
 
-      const parsed = readAppSettings()
-      const probed: ProbedPricingEntry[] = Array.isArray(parsed.probedPricing) ? parsed.probedPricing : []
+      const probed = readAppSettings().probedPricing
 
       const cutoff = Date.now() - autoRefreshSeconds * 1000
       const stale = enabled.filter((s) => {

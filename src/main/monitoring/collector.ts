@@ -12,11 +12,8 @@ import { readAppSettings } from '../config/appSettings'
 import { getUsageCredential } from '../store/key-store'
 import { refreshCommandCodeUsage, usageTokenKey } from './commandCode'
 import { getCumulativeUsage, recordCollectorRun } from './usageAccumulator'
-import { DEFAULT_MONITORING } from '../../shared/defaults'
-import type { AppSettings, MonitoringSettings, RemoteUsageSource } from '../../shared/types'
+import type { AppSettings, RemoteUsageSource } from '../../shared/types'
 
-/** 缺省采集间隔（分钟）；设置项缺失或非法时使用 */
-const DEFAULT_INTERVAL_MINUTES = 15
 /** 检查周期（毫秒）：每分钟判断一次是否到点 */
 const CHECK_PERIOD_MS = 60_000
 /** 启动后首次采集的延迟（毫秒）：避开启动高峰 */
@@ -43,33 +40,15 @@ let lastCollectedAt = 0
 let lastError: string | null = null
 let running = false
 
-/**
- * 合并默认值后的 monitoring 设置。
- * 关键：DB 里的 app_settings 只保存用户改过的字段（实测 monitoring 常常整体缺失，
- * 渲染层是靠 DEFAULT_SETTINGS 补齐才显示三个监控源的），后台采集必须做同样的合并，
- * 否则 sources 为空 → 采集器永不启用。
- * 注意：显式空数组视为用户主动清空，不再回退默认（只有字段缺失才用默认）。
- */
-function mergedMonitoring(settings: AppSettings | null): MonitoringSettings {
-  const raw = settings?.monitoring
-  if (!raw) return DEFAULT_MONITORING
-  return {
-    sources: Array.isArray(raw.sources) ? raw.sources : DEFAULT_MONITORING.sources,
-    autoRefreshMinutes: raw.autoRefreshMinutes ?? DEFAULT_MONITORING.autoRefreshMinutes,
-    collectIntervalMinutes: raw.collectIntervalMinutes ?? DEFAULT_MONITORING.collectIntervalMinutes
-  }
-}
-
-/** 生效的采集间隔（分钟）：设置缺失/非法 → 默认值；<0 → 0（关闭） */
-export function effectiveIntervalMinutes(settings?: AppSettings | null): number {
-  const raw = mergedMonitoring(settings ?? null).collectIntervalMinutes
-  if (raw === undefined || raw === null || !Number.isFinite(Number(raw))) return DEFAULT_INTERVAL_MINUTES
-  const n = Math.floor(Number(raw))
+/** 生效的采集间隔（分钟）：<0 → 0（关闭） */
+export function effectiveIntervalMinutes(settings: AppSettings): number {
+  // readAppSettings 已保证字段存在（DEFAULT_MONITORING.collectIntervalMinutes = 15）
+  const n = Math.floor(settings.monitoring.collectIntervalMinutes!)
   return n < 0 ? 0 : n
 }
 
-function commandCodeSources(settings?: AppSettings | null): RemoteUsageSource[] {
-  return mergedMonitoring(settings ?? null).sources.filter((s) => s.enabled && s.type === 'commandcode')
+function commandCodeSources(settings: AppSettings): RemoteUsageSource[] {
+  return settings.monitoring.sources.filter((s) => s.enabled && s.type === 'commandcode')
 }
 
 /** 执行一轮采集（同一时刻只允许一轮；失败只记录错误码，不影响应用其余功能） */
