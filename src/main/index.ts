@@ -269,16 +269,6 @@ function registerIpcHandlers() {
     getDatabase().query('SELECT * FROM conversations ORDER BY updated_at DESC')
   )
 
-  handleIpc(IPC.DB_CREATE_CONVERSATION, (_e, data: { title: string; mode: string }) => {
-    const id = crypto.randomUUID()
-    const now = Date.now()
-    getDatabase().exec(
-      'INSERT INTO conversations (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-      [id, data.title, data.mode, now, now]
-    )
-    return { id, ...data, createdAt: now }
-  })
-
   handleIpc(IPC.DB_DELETE_CONVERSATION, (_e, id: string) => {
     getDatabase().exec('DELETE FROM messages WHERE conversation_id = ?', [id])
     getDatabase().exec('DELETE FROM conversations WHERE id = ?', [id])
@@ -290,19 +280,6 @@ function registerIpcHandlers() {
       [conversationId]
     )
   )
-
-  handleIpc(IPC.DB_ADD_MESSAGE, (_e, msg: {
-    conversationId: string; role: string; content: string; mode: string; subOutputs?: string; tokenUsage?: string
-  }) => {
-    const id = crypto.randomUUID()
-    getDatabase().exec(
-      `INSERT INTO messages (id, conversation_id, role, content, mode, sub_outputs, token_usage, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, msg.conversationId, msg.role, msg.content, msg.mode, msg.subOutputs || null, msg.tokenUsage || null, Date.now()]
-    )
-    getDatabase().exec('UPDATE conversations SET message_count = message_count + 1, updated_at = ? WHERE id = ?', [Date.now(), msg.conversationId])
-    return { id }
-  })
 
   // ── Settings ──
   handleIpc(IPC.SETTINGS_GET_ALL, () => readAppSettings())
@@ -363,11 +340,6 @@ function registerIpcHandlers() {
         destroyUsageWindow()
       }
     }
-  })
-
-  // ── App ──
-  ipcMain.handle(IPC.APP_GET_VERSION, () => {
-    return app.getVersion()
   })
 
   // ── MoA Config ──
@@ -939,7 +911,33 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('before-quit', () => {
+// ── 退出时等待进行中的 MoA 执行完成（防丢结果）──
+// 首次退出：执行中则拦下等待（toast 提示；再次退出 = 强制放行）；
+// 等待结束后 app.quit() 重入本回调走正常清理；兜底超时 120s 强退
+let quitWaitStarted = false
+
+app.on('before-quit', (e) => {
+  if (moaRunning && !quitWaitStarted) {
+    e.preventDefault()
+    quitWaitStarted = true
+    sendToastToRenderer({
+      type: 'info',
+      title: '等待 MoA 执行完成',
+      message: '当前回复生成中，完成后将自动退出；再次退出可强制关闭',
+      duration: 6000
+    })
+    const waitTimer = setInterval(() => {
+      if (!moaRunning) {
+        clearInterval(waitTimer)
+        app.quit()
+      }
+    }, 250)
+    setTimeout(() => {
+      clearInterval(waitTimer)
+      app.quit()
+    }, 120_000)
+    return
+  }
   stopUsageCollector()
   stopGatewayServer()
   // 退出前清掉定价自动刷新定时器：避免退出流程中仍有探查任务在跑

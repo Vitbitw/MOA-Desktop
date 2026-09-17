@@ -9,10 +9,8 @@ interface MoaAPI {
 
   // Conversations
   getConversations: () => Promise<{ success: boolean; data: unknown; error?: string }>
-  createConversation: (data: { title: string; mode: string }) => Promise<{ success: boolean; data: unknown; error?: string }>
   deleteConversation: (id: string) => Promise<{ success: boolean; error?: string }>
   getMessages: (conversationId: string) => Promise<{ success: boolean; data: unknown; error?: string }>
-  addMessage: (msg: { conversationId: string; role: string; content: string; mode: string }) => Promise<{ success: boolean; data: unknown; error?: string }>
 
   // Settings
   getSettings: () => Promise<{ success: boolean; data: unknown; error?: string }>
@@ -37,9 +35,6 @@ interface MoaAPI {
     maxLength: number
     language: 'auto' | 'zh' | 'en'
   }) => Promise<{ success: boolean; title?: string; error?: string }>
-
-  // App
-  getVersion: () => Promise<string>
 
   // Usage Monitoring
   getUsageSummary: (params: { range: UsageRange; groupBy: UsageGroupBy }) =>
@@ -75,7 +70,6 @@ interface MoaAPI {
   onAggregationStart: (callback: () => void) => () => void
   onAggregationChunk: (callback: (data: AggregationChunk) => void) => () => void
   onAllDone: (callback: (data: { conversationId: string; conversations: unknown[] }) => void) => () => void
-  removeAllListeners: () => void
 
   // Menu event listeners
   onMenuNewConversation: (callback: () => void) => () => void

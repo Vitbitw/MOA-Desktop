@@ -56,7 +56,6 @@ export interface ChatMessage {
   content: string
   mode: MoAMode
   subModelOutputs?: SubModelOutput[]
-  tokenUsage?: TokenUsage
   timestamp: number
 }
 
@@ -76,20 +75,10 @@ export interface Conversation {
   id: string
   title: string
   mode: MoAMode
-  subModels: SubModelConfig[]
-  aggregatorConfig?: AggregatorConfig
   createdAt: number
   updatedAt: number
   messageCount: number
   titleEdited?: boolean
-}
-
-// ─── Token / Usage ───
-export interface TokenUsage {
-  subModels: Record<string, { prompt: number; completion: number }>
-  aggregator?: { prompt: number; completion: number }
-  total: { prompt: number; completion: number }
-  cost?: number
 }
 
 // ─── Title Settings ───

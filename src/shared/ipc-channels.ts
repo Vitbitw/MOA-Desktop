@@ -7,10 +7,8 @@ export const IPC = {
 
   // Conversations
   DB_GET_CONVERSATIONS: 'db:getConversations',
-  DB_CREATE_CONVERSATION: 'db:createConversation',
   DB_DELETE_CONVERSATION: 'db:deleteConversation',
   DB_GET_MESSAGES: 'db:getMessages',
-  DB_ADD_MESSAGE: 'db:addMessage',
 
   // Settings
   SETTINGS_GET_ALL: 'settings:getAll',
@@ -26,9 +24,6 @@ export const IPC = {
   // Title
   TITLE_GENERATE: 'title:generate',
   DB_UPDATE_CONVERSATION_TITLE: 'db:updateConversationTitle',
-
-  // App
-  APP_GET_VERSION: 'app:getVersion',
 
   // Usage Monitoring
   USAGE_GET_SUMMARY: 'usage:getSummary',

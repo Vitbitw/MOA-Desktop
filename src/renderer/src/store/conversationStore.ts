@@ -31,7 +31,6 @@ interface ConversationRow {
   id: string
   title?: string | null
   mode?: string | null
-  sub_models?: string | null
   created_at: number
   updated_at: number
   message_count?: number | null
@@ -44,7 +43,6 @@ export function convFromRow(c: ConversationRow): Conversation {
     id: c.id,
     title: c.title || '',
     mode: (c.mode as Conversation['mode']) || 'aggregate',
-    subModels: c.sub_models ? JSON.parse(c.sub_models) : [],
     createdAt: c.created_at,
     updatedAt: c.updated_at,
     messageCount: c.message_count || 0,
@@ -68,12 +66,7 @@ interface ConversationState {
   titleLoading: Record<string, boolean>
 
   setConversations: (convs: Conversation[]) => void
-  setCurrentConversation: (id: string | null) => void
-  setMessages: (msgs: ChatMessage[]) => void
-  addMessage: (msg: ChatMessage) => void
   setMode: (mode: MoAMode) => void
-  setLoading: (loading: boolean) => void
-  setError: (error: string | null) => void
   setFailedDraft: (draft: string | null) => void
 
   // ── Live streaming state ──
@@ -84,10 +77,7 @@ interface ConversationState {
   liveCleanupRef: (() => void) | null
 
   // ── Live streaming actions ──
-  setLiveSubOutputs: (outputs: LiveSubOutput[]) => void
   updateLiveSubOutput: (index: number, update: Partial<LiveSubOutput>) => void
-  setAggregatorText: (text: string) => void
-  setAggregatorRunning: (running: boolean) => void
   clearLiveState: () => void
   cleanupLiveEvents: () => void
 
@@ -117,12 +107,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   titleLoading: {},
 
   setConversations: (conversations) => set({ conversations }),
-  setCurrentConversation: (currentConversationId) => set({ currentConversationId }),
-  setMessages: (messages) => set({ messages }),
-  addMessage: (msg) => set((state) => ({ messages: [...state.messages, msg] })),
   setMode: (mode) => set({ mode }),
-  setLoading: (loading) => set({ loading }),
-  setError: (error) => set({ error }),
   setFailedDraft: (failedDraft) => set({ failedDraft }),
 
   // ── Live streaming initial values ──
@@ -132,15 +117,12 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   liveCleanupRef: null,
 
   // ── Live streaming actions ──
-  setLiveSubOutputs: (liveSubOutputs) => set({ liveSubOutputs }),
   updateLiveSubOutput: (index, update) =>
     set((state) => ({
       liveSubOutputs: state.liveSubOutputs.map((o) =>
         o.index === index ? { ...o, ...update } : o
       )
     })),
-  setAggregatorText: (aggregatorText) => set({ aggregatorText }),
-  setAggregatorRunning: (aggregatorRunning) => set({ aggregatorRunning }),
   clearLiveState: () => set({
     liveSubOutputs: [],
     aggregatorText: '',
@@ -213,10 +195,6 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   sendMessage: async (content) => {
     const { mode, currentConversationId } = get()
     if (!content.trim()) return
-
-    // 0. 每次请求唯一 ID：防止上一次 onAllDone 的 cleanup 清掉本次请求的监听
-    //    （连续快速发两条消息时，第一次的 onAllDone 会 cleanup 掉第二次刚注册的监听）
-    const requestId = crypto.randomUUID()
 
     // 请求发起时的会话切换序号快照：响应回来时据此判断用户是否已切换/新建会话（F4）。
     // 用序号而非会话 id 比较——「新会话首发（null）」与「期间又点新建（仍 null）」无法用 id 区分

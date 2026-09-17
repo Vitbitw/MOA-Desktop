@@ -236,7 +236,8 @@ export function createGatewayServer(): Express {
       activeRequests,
       queueLength,
       moaConfig: { subCount: config.subModels.length, mode: config.mode },
-      providers: [{ name: 'default', status: provider ? 'ok' : 'no_key', model: config.mode }]
+      // model 字段透出实际可用的首个模型名（旧实现误填 config.mode，与字段语义不符）
+      providers: [{ name: 'default', status: provider ? 'ok' : 'no_key', model: provider?.models[0]?.id ?? '' }]
     })
   })
 

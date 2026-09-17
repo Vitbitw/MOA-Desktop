@@ -2,6 +2,7 @@ import { getAllProviders } from '../providers/providerManager'
 import { callSubModel, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, buildCommitteeMessages, getAggregationPrompt, CHAIR_PROMPT_ZH } from './aggregationPrompt'
 import { getRoleTemplate } from '../../shared/moaRoles'
+import { DEFAULT_SUB_MODEL_TIMEOUT, DEFAULT_AGGREGATOR_TIMEOUT } from '../../shared/defaults'
 import { fetchProxy } from '../local/fetchProxy'
 import type { SubModelConfig, AggregatorConfig, SubModelOutput, MoaArchitecture, SubModelRole } from '../../shared/types'
 
@@ -154,7 +155,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
 
   // ── Call sub-models in parallel, emitting each result as it completes ──
   const subOutputs: SubModelOutput[] = []
-  const timeoutMs = req.subTimeoutMs ?? 60_000
+  const timeoutMs = req.subTimeoutMs ?? DEFAULT_SUB_MODEL_TIMEOUT
 
   // direct 模式只用首个可用子模型（subOutputs[0]）：只调用它，其余子模型不发起请求，
   // 避免白付 N-1 份调用费用。index 语义不变——direct 时仅 index 0 有事件与输出
@@ -268,7 +269,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
       )
 
   // Call aggregator
-  const aggResult = await callAggregator(aggInfo, aggMessages, req.aggTimeoutMs ?? 120_000)
+  const aggResult = await callAggregator(aggInfo, aggMessages, req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT)
 
   if (!aggResult.success) {
     // Try fallback aggregator if configured
@@ -278,7 +279,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
         primaryProviderId: req.aggregator.fallbackProviderId
       })
       if (fallbackAgg) {
-        const fallbackResult = await callAggregator(fallbackAgg, aggMessages, req.aggTimeoutMs ?? 120_000)
+        const fallbackResult = await callAggregator(fallbackAgg, aggMessages, req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT)
         if (fallbackResult.success) {
           try { events?.emitAggregationChunk(fallbackResult.content, true) } catch { /* 忽略事件失败 */ }
           return {

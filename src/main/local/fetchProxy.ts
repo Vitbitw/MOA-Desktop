@@ -135,7 +135,11 @@ function fetchViaConnect(
       fn()
     }
 
-    const cleanup = () => safeDestroy(tlsSocket, rawSocket)
+    const cleanup = (): void => {
+      safeDestroy(tlsSocket, rawSocket)
+      // 清理 abort 监听：{ once: true } 仅在触发时自清，正常结束路径需显式移除（防长寿命 signal 积累）
+      init?.signal?.removeEventListener('abort', onAbort)
+    }
 
     // ── AbortSignal ──
     // 注意:不能包在 settle 里——响应建立(settled)后 abort 仍需销毁底层流,
@@ -332,9 +336,13 @@ function fetchViaHttpProxy(
       }
       // ── 响应建立后的 abort:销毁 res 流,让 reader.read() 抛错(否则取消下载失效)──
       if (init?.signal) {
-        const destroyRes = () => { res.destroy(new Error('The operation was aborted')) }
+        const destroyRes = (): void => { res.destroy(new Error('The operation was aborted')) }
         if (init.signal.aborted) destroyRes()
-        else init.signal.addEventListener('abort', destroyRes, { once: true })
+        else {
+          init.signal.addEventListener('abort', destroyRes, { once: true })
+          // 流结束后移除监听（防长寿命 signal 积累）
+          res.on('close', () => init.signal?.removeEventListener('abort', destroyRes))
+        }
       }
       // safeStatus 防护(与 fetchViaConnect 对齐):服务器在发状态行前关闭连接时
       // res.statusCode 为 undefined,new Response({status: undefined}) 会抛 TypeError;

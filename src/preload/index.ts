@@ -11,13 +11,8 @@ contextBridge.exposeInMainWorld('moaAPI', {
 
   // Conversations
   getConversations: () => ipcRenderer.invoke('db:getConversations'),
-  createConversation: (data: { title: string; mode: string }) =>
-    ipcRenderer.invoke('db:createConversation', data),
   deleteConversation: (id: string) => ipcRenderer.invoke('db:deleteConversation', id),
   getMessages: (conversationId: string) => ipcRenderer.invoke('db:getMessages', conversationId),
-  addMessage: (msg: {
-    conversationId: string; role: string; content: string; mode: string
-  }) => ipcRenderer.invoke('db:addMessage', msg),
 
   // Settings
   getSettings: () => ipcRenderer.invoke('settings:getAll'),
@@ -42,9 +37,6 @@ contextBridge.exposeInMainWorld('moaAPI', {
     maxLength: number
     language: 'auto' | 'zh' | 'en'
   }) => ipcRenderer.invoke('title:generate', data),
-
-  // App
-  getVersion: () => ipcRenderer.invoke('app:getVersion'),
 
   // Usage Monitoring
   getUsageSummary: (params: { range: UsageRange; groupBy: UsageGroupBy }) =>
@@ -91,21 +83,6 @@ contextBridge.exposeInMainWorld('moaAPI', {
     const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; conversations: unknown[] }) => callback(data)
     ipcRenderer.on(IPC_EVENT.MOA_ALL_DONE, handler)
     return () => ipcRenderer.removeListener(IPC_EVENT.MOA_ALL_DONE, handler)
-  },
-
-  removeAllListeners: () => {
-    ipcRenderer.removeAllListeners(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE)
-    ipcRenderer.removeAllListeners(IPC_EVENT.MOA_AGGREGATION_START)
-    ipcRenderer.removeAllListeners(IPC_EVENT.MOA_AGGREGATION_CHUNK)
-    ipcRenderer.removeAllListeners(IPC_EVENT.MOA_ALL_DONE)
-    ipcRenderer.removeAllListeners(IPC_EVENT.PRICING_PROBE_PROGRESS)
-    ipcRenderer.removeAllListeners(IPC_EVENT.MENU_NEW_CONVERSATION)
-    ipcRenderer.removeAllListeners(IPC_EVENT.MENU_COPY_GATEWAY_URL)
-    ipcRenderer.removeAllListeners(IPC_EVENT.TITLE_UPDATED)
-    ipcRenderer.removeAllListeners(IPC_EVENT.MENU_OPEN_SETTINGS)
-    ipcRenderer.removeAllListeners(IPC_EVENT.USAGE_OPEN)
-    ipcRenderer.removeAllListeners(IPC_EVENT.USAGE_UPDATED)
-    ipcRenderer.removeAllListeners(IPC_EVENT.RENDERER_TOAST)
   },
 
   // Menu event listeners

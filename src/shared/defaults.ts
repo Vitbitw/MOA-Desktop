@@ -5,9 +5,6 @@ export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_MAX_CONCURRENCY = 3
 export const DEFAULT_SUB_MODEL_TIMEOUT = 60_000
 export const DEFAULT_AGGREGATOR_TIMEOUT = 120_000
-export const DEFAULT_SUB_OUTPUT_ESTIMATE = 500
-export const DEFAULT_AGG_OUTPUT_ESTIMATE = 800
-export const DEFAULT_QUEUE_MAX = 50
 
 export const DEFAULT_TITLE_SETTINGS = {
   autoMode: 'first_and_manual' as const,

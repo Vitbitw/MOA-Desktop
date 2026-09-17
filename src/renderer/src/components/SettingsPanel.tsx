@@ -6,7 +6,7 @@ import { useNotificationStore } from '../store/notificationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, MoAMode, SubModelRole } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
-import { MOA_ROLE_TEMPLATES, getRoleTemplate } from '../../../shared/moaRoles'
+import { MOA_ROLE_TEMPLATES } from '../../../shared/moaRoles'
 
 type SettingsSection = 'moa' | 'providers' | 'network' | 'display' | 'pricing' | 'title'
 
@@ -188,7 +188,7 @@ function MoASection() {
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [architecture, setArchitecture] = useState<MoaArchitecture>('election')
-  const [editPromptIdx, setEditPromptIdx] = useState<number | null>(null)
+  const [editPromptKey, setEditPromptKey] = useState<string | null>(null)
 
   // Load existing config on mount
   useEffect(() => {
@@ -334,8 +334,10 @@ function MoASection() {
 
         {subModels.map((sm, i) => {
           const p = providers.find((pr) => pr.id === sm.providerId)
+          // 稳定 key（providerId:modelId）：删除中间项后索引前移不会让展开态/key 窜到别的子模型
+          const k = `${sm.providerId}:${sm.modelId}`
           return (
-            <div key={i} className="rounded-md border border-border bg-muted/30 p-2 mb-1 text-sm">
+            <div key={k} className="rounded-md border border-border bg-muted/30 p-2 mb-1 text-sm">
               <div className="flex items-center justify-between">
                 <span className="text-foreground">{p?.name || sm.providerId} · {sm.modelId}</span>
                 <button onClick={() => removeSubModel(i)} className="text-muted-foreground hover:text-destructive">✕</button>
@@ -353,16 +355,16 @@ function MoASection() {
                     ))}
                   </select>
                   <button
-                    onClick={() => setEditPromptIdx(editPromptIdx === i ? null : i)}
+                    onClick={() => setEditPromptKey(editPromptKey === k ? null : k)}
                     className="text-xs text-muted-foreground hover:text-foreground"
                   >
-                    {editPromptIdx === i
+                    {editPromptKey === k
                       ? '收起自定义提示词'
                       : sm.systemPrompt
                         ? '编辑自定义提示词（已设置）'
                         : '自定义提示词…'}
                   </button>
-                  {editPromptIdx === i && (
+                  {editPromptKey === k && (
                     <textarea
                       value={sm.systemPrompt ?? ''}
                       placeholder={sm.role ? "留空则使用所选角色的默认提示词" : "输入该子模型专用的 system prompt（留空为无）"}
