@@ -416,7 +416,8 @@ export function createProxyServer(): Express {
       subModels: config.subModels,
       aggregator: config.aggregator || undefined,
       mode: config.mode === 'aggregate' ? 'aggregate' : 'compare',
-      aggregationPromptVariant: config.aggregationPromptVariant
+      aggregationPromptVariant: config.aggregationPromptVariant,
+      architecture: config.architecture
     }).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err)
       return {

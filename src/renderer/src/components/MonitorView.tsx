@@ -3,6 +3,7 @@ import { useConversationStore } from '../store/conversationStore'
 import SubModelPanel from './SubModelPanel'
 import AggregatorPanel from './AggregatorPanel'
 import type { LiveSubOutput } from '../store/conversationStore'
+import type { MoaArchitecture } from '../../../shared/types'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 export default function MonitorView() {
@@ -13,6 +14,14 @@ export default function MonitorView() {
   const liveSubOutputs = useConversationStore((s) => s.liveSubOutputs)
   const aggregatorText = useConversationStore((s) => s.aggregatorText)
   const aggregatorRunning = useConversationStore((s) => s.aggregatorRunning)
+
+  // 当前 MoA 架构（历史轮次不存架构，统用当前配置文案）
+  const [architecture, setArchitecture] = React.useState<MoaArchitecture>('election')
+  React.useEffect(() => {
+    window.moaAPI.getMoaConfig().then((config: any) => {
+      if (config?.architecture) setArchitecture(config.architecture)
+    })
+  }, [])
 
   const hasLive = liveSubOutputs.length > 0
 
@@ -46,7 +55,8 @@ export default function MonitorView() {
           status: o.status as LiveSubOutput['status'],
           error: o.error,
           durationMs: o.durationMs,
-          tokenUsage: o.tokenUsage
+          tokenUsage: o.tokenUsage,
+          role: o.role
         }))
       : []
 
@@ -147,6 +157,7 @@ export default function MonitorView() {
                 ? `第${activeRoundIndex + 1}/${assistantMessages.length}轮`
                 : undefined
               }
+              architecture={architecture}
             />
           </div>
         )}

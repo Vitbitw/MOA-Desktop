@@ -1,8 +1,9 @@
 import { getAllProviders } from '../providers/providerManager'
 import { callSubModel, countSuccessfulSubModels } from './subModelCaller'
-import { buildAggregationMessages, getAggregationPrompt } from './aggregationPrompt'
+import { buildAggregationMessages, buildCommitteeMessages, getAggregationPrompt, CHAIR_PROMPT_ZH } from './aggregationPrompt'
+import { getRoleTemplate } from '../../shared/moaRoles'
 import { fetchProxy } from '../local/fetchProxy'
-import type { SubModelConfig, AggregatorConfig, SubModelOutput } from '../../shared/types'
+import type { SubModelConfig, AggregatorConfig, SubModelOutput, MoaArchitecture, SubModelRole } from '../../shared/types'
 
 export interface MoaRequest {
   messages: Array<{ role: string; content: string }>
@@ -14,6 +15,8 @@ export interface MoaRequest {
   customAggregationPrompt?: string
   subTimeoutMs?: number
   aggTimeoutMs?: number
+  /** 协作架构：缺省 'election'（子模型并行出完整答案，聚合模型拼接提炼） */
+  architecture?: MoaArchitecture
 }
 
 export interface MoaResponse {
@@ -38,23 +41,36 @@ interface MoaEvents {
   emitAggregationChunk: (text: string, done: boolean) => void
 }
 
-/** Resolve sub-model configs to actual provider URLs and keys. */
-function resolveSubModels(subModels: SubModelConfig[]): Array<{
+/** Resolve sub-model configs to actual provider URLs, keys, and effective per-sub system prompt. */
+interface ResolvedSubModel {
   providerId: string
   providerBaseUrl: string
   apiKey: string
   modelId: string
   enabled: boolean
-}> {
+  role: SubModelRole
+  systemPrompt: string | undefined
+}
+
+function resolveSubModels(subModels: SubModelConfig[], defaultSystemPrompt?: string): ResolvedSubModel[] {
   const providers = getAllProviders()
   return subModels.map((sm) => {
     const p = providers.find((prov) => prov.id === sm.providerId)
+    // 生效的子模型 systemPrompt：自定义 > 角色模板 > 全局默认
+    const effectiveSystemPrompt =
+      sm.systemPrompt && sm.systemPrompt.trim().length > 0
+        ? sm.systemPrompt
+        : sm.role
+          ? getRoleTemplate(sm.role)?.systemPrompt
+          : undefined
     return {
       providerId: sm.providerId,
       providerBaseUrl: p?.baseUrl || '',
       apiKey: p?.apiKey || '',
       modelId: sm.modelId,
-      enabled: p?.enabled !== false
+      enabled: p?.enabled !== false,
+      role: (sm.role || '') as SubModelRole,
+      systemPrompt: effectiveSystemPrompt || defaultSystemPrompt
     }
   }).filter((sm) => sm.providerBaseUrl && sm.enabled && sm.apiKey)
 }
@@ -125,7 +141,7 @@ async function callAggregator(
  */
 async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<MoaResponse> {
   // ── Resolve sub-models ──
-  const resolvedSubs = resolveSubModels(req.subModels)
+  const resolvedSubs = resolveSubModels(req.subModels, req.systemPrompt)
   if (resolvedSubs.length === 0) {
     return {
       type: req.mode,
@@ -147,12 +163,12 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
       apiKey: sm.apiKey,
       modelId: sm.modelId,
       messages: req.messages,
-      systemPrompt: req.systemPrompt,
+      systemPrompt: sm.systemPrompt,
       timeoutMs
     }).then((result) => {
-      subOutputs[index] = result
-      events?.emitSubOutput(result, index)
-      return result
+      subOutputs[index] = { ...result, role: sm.role }
+      events?.emitSubOutput(subOutputs[index], index)
+      return subOutputs[index]
     }).catch((err: unknown) => {
       const errMsg = err instanceof Error ? err.message : String(err)
       const errorOutput: SubModelOutput = {
@@ -161,7 +177,8 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
         content: '',
         status: 'error',
         error: errMsg,
-        durationMs: 0
+        durationMs: 0,
+        role: sm.role
       }
       subOutputs[index] = errorOutput
       events?.emitSubOutput(errorOutput, index)
@@ -224,16 +241,25 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
 
   events?.emitAggregationStart()
 
-  // Build aggregation messages
-  const aggPrompt = getAggregationPrompt(
-    req.aggregationPromptVariant || 'standard-zh',
-    req.customAggregationPrompt
-  )
-  const aggMessages = buildAggregationMessages(
-    req.messages,
-    successfulOutputs.map((o) => ({ modelId: o.modelId, content: o.content })),
-    aggPrompt
-  )
+  // 按架构分叉：主席团模式用主持人提示词 + 完整历史 + 专家意见；选举模式沿用融合器提示词
+  const isCommittee = req.architecture === 'committee'
+  const aggPrompt = isCommittee
+    ? (req.customAggregationPrompt?.trim() || CHAIR_PROMPT_ZH)
+    : getAggregationPrompt(
+        req.aggregationPromptVariant || 'standard-zh',
+        req.customAggregationPrompt
+      )
+  const aggMessages = isCommittee
+    ? buildCommitteeMessages(
+        req.messages,
+        successfulOutputs.map((o) => ({ modelId: o.modelId, role: o.role || '', content: o.content })),
+        aggPrompt
+      )
+    : buildAggregationMessages(
+        req.messages,
+        successfulOutputs.map((o) => ({ modelId: o.modelId, content: o.content })),
+        aggPrompt
+      )
 
   // Call aggregator
   const aggResult = await callAggregator(aggInfo, aggMessages, req.aggTimeoutMs ?? 120_000)

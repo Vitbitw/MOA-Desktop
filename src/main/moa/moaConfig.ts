@@ -1,4 +1,4 @@
-import type { SubModelConfig, AggregatorConfig, MoAMode } from '../../shared/types'
+import type { SubModelConfig, AggregatorConfig, MoAMode, MoaArchitecture } from '../../shared/types'
 import { getDatabase } from '../db/database'
 
 const CONFIG_KEY = 'moa_runtime_config'
@@ -9,6 +9,8 @@ export interface MoaRuntimeConfig {
   aggregator: AggregatorConfig | null
   aggregationPromptVariant: 'standard-zh' | 'concise-en' | 'custom'
   customAggregationPrompt?: string
+  /** 协作架构：'election'（选举/拼接）| 'committee'（主席团/专家意见）。旧配置缺省 'election' */
+  architecture: MoaArchitecture
 }
 
 interface DbConfigRow {
@@ -19,7 +21,8 @@ let currentConfig: MoaRuntimeConfig = {
   mode: 'direct',
   subModels: [],
   aggregator: null,
-  aggregationPromptVariant: 'standard-zh'
+  aggregationPromptVariant: 'standard-zh',
+  architecture: 'election'
 }
 
 /** Load MoA config from database. Call once after db.init(). */
@@ -36,7 +39,8 @@ export function loadMoaConfigFromDb(): void {
         subModels: parsed.subModels || [],
         aggregator: parsed.aggregator || null,
         aggregationPromptVariant: parsed.aggregationPromptVariant || 'standard-zh',
-        customAggregationPrompt: parsed.customAggregationPrompt
+        customAggregationPrompt: parsed.customAggregationPrompt,
+        architecture: parsed.architecture || 'election'
       }
       console.log('[MoA Config] Loaded from DB:', JSON.stringify(currentConfig))
     }
@@ -51,7 +55,8 @@ export function getMoaConfig(): MoaRuntimeConfig {
     ...currentConfig,
     subModels: currentConfig.subModels.map((sm) => ({ ...sm })),
     aggregator: currentConfig.aggregator ? { ...currentConfig.aggregator } : null,
-    customAggregationPrompt: currentConfig.customAggregationPrompt
+    customAggregationPrompt: currentConfig.customAggregationPrompt,
+    architecture: currentConfig.architecture
   }
 }
 

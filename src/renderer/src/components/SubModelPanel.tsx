@@ -4,6 +4,8 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import type { LiveSubOutput } from '../store/conversationStore'
+import { MOA_ROLE_LABELS } from '../../../shared/moaRoles'
+import type { SubModelRole } from '../../../shared/types'
 
 const STATUS_ICON: Record<string, string> = {
   pending: '○',
@@ -24,6 +26,7 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
   const shortModelName = output.modelId.length > 30
     ? output.modelId.slice(0, 27) + '…'
     : output.modelId
+  const roleLabel = output.role ? MOA_ROLE_LABELS[output.role as SubModelRole] : ''
 
   return (
     <div className={`
@@ -39,6 +42,11 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
           <span className="text-sm font-medium text-foreground truncate" title={output.modelId}>
             #{output.index + 1} {shortModelName}
           </span>
+          {roleLabel && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary shrink-0">
+              {roleLabel}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 text-sm text-muted-foreground shrink-0">
           {output.durationMs != null && (

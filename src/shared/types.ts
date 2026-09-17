@@ -1,6 +1,16 @@
 // ─── MoA Modes ───
 export type MoAMode = 'aggregate' | 'compare' | 'direct'
 
+// ─── MoA Architecture ───
+/** 选举模式：子模型并行出完整答案 → 聚合模型拼接提炼；主席团模式：子模型带角色出意见 → 主模型参考意见亲自作答 */
+export type MoaArchitecture = 'election' | 'committee'
+
+// ─── Sub Model Role（预设角色模板 key；'' = 无角色）───
+export type SubModelRole =
+  | 'critic' | 'advisor' | 'creative'
+  | 'pragmatist' | 'analyst' | 'summarizer'
+  | ''
+
 // ─── Providers ───
 export interface Provider {
   id: string
@@ -23,6 +33,10 @@ export interface SubModelConfig {
   modelId: string
   providerId: string
   order: number
+  /** 预设角色模板 key；'' = 无预设（保持旧行为） */
+  role?: SubModelRole
+  /** 自定义 system prompt；非空时覆盖 role 模板 */
+  systemPrompt?: string
 }
 
 // ─── Aggregator Config ───
@@ -54,6 +68,8 @@ export interface SubModelOutput {
   error?: string
   durationMs?: number
   tokenUsage?: { prompt: number; completion: number }
+  /** 子模型的预设角色（渲染端展示角色标签用；旧数据无此字段） */
+  role?: SubModelRole
 }
 
 export interface Conversation {
@@ -153,6 +169,7 @@ export interface SubOutputUpdate {
   error?: string
   durationMs?: number
   tokenUsage?: { prompt: number; completion: number }
+  role?: SubModelRole
 }
 
 export interface AggregationChunk {

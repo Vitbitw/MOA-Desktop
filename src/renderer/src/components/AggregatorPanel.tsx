@@ -3,17 +3,20 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
+import type { MoaArchitecture } from '../../../shared/types'
 
 export default function AggregatorPanel({
   content,
   running,
   mode,
-  roundLabel
+  roundLabel,
+  architecture
 }: {
   content: string
   running: boolean
   mode: string
   roundLabel?: string
+  architecture?: MoaArchitecture
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -24,7 +27,7 @@ export default function AggregatorPanel({
   }, [content])
 
   const modeLabel =
-    mode === 'aggregate' ? '聚合输出' :
+    mode === 'aggregate' ? (architecture === 'committee' ? '主模型答案' : '聚合输出') :
     mode === 'compare' ? '对比 (D)' :
     '直通'
 

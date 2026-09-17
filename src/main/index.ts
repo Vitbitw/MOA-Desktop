@@ -492,6 +492,7 @@ function registerIpcHandlers() {
         aggregator: config.aggregator || undefined,
         mode: msg.mode as 'aggregate' | 'compare' | 'direct',
         aggregationPromptVariant: config.aggregationPromptVariant,
+        architecture: config.architecture,
         emitSubOutput: (output, index) => {
           if (win) {
             win.webContents.send(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE, {
@@ -502,7 +503,8 @@ function registerIpcHandlers() {
               status: output.status,
               error: output.error,
               durationMs: output.durationMs,
-              tokenUsage: output.tokenUsage
+              tokenUsage: output.tokenUsage,
+              role: output.role
             } satisfies SubOutputUpdate)
           }
         },

@@ -23,6 +23,7 @@ export interface LiveSubOutput {
   error?: string
   durationMs?: number
   tokenUsage?: { prompt: number; completion: number }
+  role?: string
 }
 
 /** DB conversations 表行结构 */
@@ -227,14 +228,16 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     if (window.moaAPI.onSubOutputUpdate) {
       unsubs.push(window.moaAPI.onSubOutputUpdate((data: SubOutputUpdate) => {
         const existing = get().liveSubOutputs.find((o) => o.index === data.index)
+        const patch = {
+          content: data.content,
+          status: data.status,
+          error: data.error,
+          durationMs: data.durationMs,
+          tokenUsage: data.tokenUsage,
+          role: data.role
+        }
         if (existing) {
-          get().updateLiveSubOutput(data.index, {
-            content: data.content,
-            status: data.status,
-            error: data.error,
-            durationMs: data.durationMs,
-            tokenUsage: data.tokenUsage
-          })
+          get().updateLiveSubOutput(data.index, patch)
         } else {
           set((state) => ({
             liveSubOutputs: [...state.liveSubOutputs, {
@@ -245,7 +248,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               status: data.status as LiveSubOutput['status'],
               error: data.error,
               durationMs: data.durationMs,
-              tokenUsage: data.tokenUsage
+              tokenUsage: data.tokenUsage,
+              role: data.role
             }]
           }))
         }

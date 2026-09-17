@@ -5,8 +5,9 @@ import { useConversationStore } from '../store/conversationStore'
 import { useProbeStore, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider } from '../../../shared/types'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, SubModelRole } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
+import { MOA_ROLE_TEMPLATES, getRoleTemplate } from '../../../shared/moaRoles'
 
 type SettingsSection = 'moa' | 'providers' | 'proxy' | 'network' | 'display' | 'pricing' | 'title'
 
@@ -294,6 +295,8 @@ function MoASection() {
   const [aggProviderId, setAggProviderId] = useState('')
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [architecture, setArchitecture] = useState<MoaArchitecture>('election')
+  const [editPromptIdx, setEditPromptIdx] = useState<number | null>(null)
 
   // Load existing config on mount
   useEffect(() => {
@@ -302,6 +305,7 @@ function MoASection() {
         setSubModels(config.subModels || [])
         setAggModelId(config.aggregator?.primaryModelId || '')
         setAggProviderId(config.aggregator?.primaryProviderId || '')
+        if (config.architecture) setArchitecture(config.architecture)
         if (config.mode) setMoaMode(config.mode)
       }
       setLoaded(true)
@@ -316,6 +320,7 @@ function MoASection() {
           setSubModels(config.subModels || [])
           setAggModelId(config.aggregator?.primaryModelId || '')
           setAggProviderId(config.aggregator?.primaryProviderId || '')
+          if (config.architecture) setArchitecture(config.architecture)
         }
       })
     }
@@ -345,6 +350,10 @@ function MoASection() {
     setSubModels((prev) => prev.filter((_, i) => i !== idx).map((s, i) => ({ ...s, order: i })))
   }
 
+  const updateSubModel = (idx: number, patch: Partial<SubModelConfig>) => {
+    setSubModels((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)))
+  }
+
   const handleSave = async () => {
     setSaving(true)
     try {
@@ -356,7 +365,8 @@ function MoASection() {
         mode: moaMode,
         subModels,
         aggregator,
-        aggregationPromptVariant: 'standard-zh'
+        aggregationPromptVariant: 'standard-zh',
+        architecture
       })
       notifySaveResult(true)
     } catch (err) {
@@ -373,19 +383,84 @@ function MoASection() {
     <div className="max-w-lg space-y-6">
       <p className="text-sm text-muted-foreground">配置子模型和聚合模型</p>
 
+      {/* MoA architecture toggle */}
+      <div>
+        <label className="text-sm font-medium text-foreground block mb-2">协作架构</label>
+        <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5 w-fit">
+          <button
+            onClick={() => setArchitecture('election')}
+            className={`px-3 py-1 text-xs rounded-md transition-colors ${
+              architecture === 'election' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+            }`}
+            title="子模型并行输出完整答案，聚合模型拼接提炼"
+          >
+            🗳️ 选举模式
+          </button>
+          <button
+            onClick={() => setArchitecture('committee')}
+            className={`px-3 py-1 text-xs rounded-md transition-colors ${
+              architecture === 'committee' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+            }`}
+            title="子模型带角色输出专家意见，主模型参考意见亲自作答"
+          >
+            🪑 主席团模式
+          </button>
+        </div>
+        <p className="text-xs text-muted-foreground mt-1">
+          {architecture === 'election'
+            ? '多个子模型各自产出完整答案，由聚合模型融合成一个最终答案'
+            : '子模型以不同角色身份提供参考意见，由主模型（聚合模型）参考意见后亲自作答'}
+        </p>
+      </div>
+
       {/* Sub-model selection */}
       <div>
         <div className="flex items-center justify-between mb-2">
-          <label className="text-sm font-medium text-foreground">子模型</label>
+          <label className="text-sm font-medium text-foreground">子模型{architecture === 'committee' ? '（专家）' : ''}</label>
           <span className="text-xs text-muted-foreground">已选 {subModels.length} 个</span>
         </div>
 
         {subModels.map((sm, i) => {
           const p = providers.find((pr) => pr.id === sm.providerId)
           return (
-            <div key={i} className="flex items-center justify-between p-2 mb-1 rounded-md bg-muted/50 border border-border text-sm">
-              <span className="text-foreground">{p?.name || sm.providerId} · {sm.modelId}</span>
-              <button onClick={() => removeSubModel(i)} className="text-muted-foreground hover:text-destructive">✕</button>
+            <div key={i} className="rounded-md border border-border bg-muted/30 p-2 mb-1 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-foreground">{p?.name || sm.providerId} · {sm.modelId}</span>
+                <button onClick={() => removeSubModel(i)} className="text-muted-foreground hover:text-destructive">✕</button>
+              </div>
+              {architecture === 'committee' && (
+                <div className="mt-2 space-y-2">
+                  <select
+                    value={sm.role ?? ''}
+                    onChange={(e) => updateSubModel(i, { role: (e.target.value || '') as SubModelRole })}
+                    className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <option value="">无角色（通用）</option>
+                    {MOA_ROLE_TEMPLATES.map((t) => (
+                      <option key={t.key} value={t.key}>{t.label}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => setEditPromptIdx(editPromptIdx === i ? null : i)}
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    {editPromptIdx === i
+                      ? '收起自定义提示词'
+                      : sm.systemPrompt
+                        ? '编辑自定义提示词（已设置）'
+                        : '自定义提示词…'}
+                  </button>
+                  {editPromptIdx === i && (
+                    <textarea
+                      value={sm.systemPrompt ?? ''}
+                      placeholder={sm.role ? "留空则使用所选角色的默认提示词" : "输入该子模型专用的 system prompt（留空为无）"}
+                      onChange={(e) => updateSubModel(i, { systemPrompt: e.target.value })}
+                      rows={4}
+                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  )}
+                </div>
+              )}
             </div>
           )
         })}
@@ -412,7 +487,9 @@ function MoASection() {
 
       {/* Aggregator model */}
       <div>
-        <label className="text-sm font-medium text-foreground block mb-2">聚合模型（可选）</label>
+        <label className="text-sm font-medium text-foreground block mb-2">
+          {architecture === 'committee' ? '主模型（最终作答者）（可选）' : '聚合模型（可选）'}
+        </label>
         <select
           value={aggProviderId ? `${aggProviderId}:${aggModelId}` : ''}
           onChange={(e) => {
@@ -428,7 +505,9 @@ function MoASection() {
           ))}
         </select>
         <p className="text-xs text-muted-foreground mt-1">
-          聚合模型将综合所有子模型输出生成最终答案。选择后 A 模式可用。
+          {architecture === 'committee'
+            ? '主模型将参考各位专家的意见与完整对话历史，亲自给出最终答案。选择后 A 模式可用。'
+            : '聚合模型将综合所有子模型输出生成最终答案。选择后 A 模式可用。'}
         </p>
       </div>
 
