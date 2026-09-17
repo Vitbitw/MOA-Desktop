@@ -57,7 +57,7 @@ interface MoaAPI {
     Promise<{ success: boolean; data?: MonitorUsage; error?: string; code?: MonitorErrorCode }>
 
   // Pricing Probe
-  probePricing: (sources: PricingProbeSource[]) =>
+  probePricing: (sources: PricingProbeSource[], force?: boolean) =>
     Promise<{ success: boolean; data?: { results: PricingProbeResultItem[] }; error?: string }>
   onProbeProgress: (callback: (data: ProbeProgressEvent) => void) => () => void
 

@@ -59,7 +59,7 @@ contextBridge.exposeInMainWorld('moaAPI', {
   monitorRefresh: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_REFRESH, source),
 
   // Pricing Probe
-  probePricing: (sources: PricingProbeSource[]) => ipcRenderer.invoke(IPC.PRICING_PROBE_RUN, sources),
+  probePricing: (sources: PricingProbeSource[], force?: boolean) => ipcRenderer.invoke(IPC.PRICING_PROBE_RUN, sources, force),
   onProbeProgress: (callback: (data: ProbeProgressEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: ProbeProgressEvent) => callback(data)
     ipcRenderer.on(IPC_EVENT.PRICING_PROBE_PROGRESS, handler)

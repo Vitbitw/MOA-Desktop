@@ -15,8 +15,10 @@ import type { PricingProbeSettings, ProbedPricingEntry, PricingProbeSource, Pric
 
 const HTTP_TIMEOUT_MS = 20_000
 const BROWSER_LOAD_TIMEOUT_MS = 20_000
-/** SPA 水合等待时间：did-finish-load 后再等 JS 渲染 */
-const RENDER_SETTLE_MS = 3_000
+/** SPA 水合轮询间隔：did-finish-load 后每轮检查 innerText 是否渲染出有效文本（对纯 JS 渲染页更可靠） */
+const RENDER_POLL_MS = 1_200
+/** SPA 水合轮询总超时 */
+const RENDER_POLL_TIMEOUT_MS = 10_000
 /** LLM 提取超时：官方页文本较大 + 结构化 JSON 提取，放宽到 150s 避免误杀 */
 const LLM_TIMEOUT_MS = 150_000
 /**
@@ -89,9 +91,90 @@ export function resolveProbeModel(): ProbeModel | null {
 
 // ─── 页面抓取：HTTP 优先 + 隐藏浏览器兜底 ───
 
+/**
+ * 匹配用文本归一化：小写 + 把连字符/点/斜杠等分隔符统一替换为空格。
+ * 注意：全部 1:1 替换（不增删字符），归一化后文本长度与原文本一致，
+ * 故在归一化副本上命中的索引可直接换算回原文本。
+ * 解决官方定价页常用「空格」（Claude Sonnet 4.6）而 /models 模型 ID 常用
+ * 「连字符/斜杠」（claude-sonnet-4-6、google/gemini-3.8-flash）的形态差异。
+ */
+function normalizeForMatch(s: string): string {
+  return s.toLowerCase().replace(/[-‐‑‒–—―_./,]/g, ' ')
+}
+
+/** 关键词候选变体：原样、去厂商前缀（google/gemini-3.8-flash → gemini-3.8-flash）、去 :free/:paid 后缀、
+ *  字母/数字交界拆词（Qwen3.8-Max → Qwen 3.8-Max，匹配页面「Qwen 3.8 Max」的空格写法）。
+ *  matchText 保持 1:1 归一化（不增删字符，索引可换算回原文），拆词变体只影响关键词侧。 */
+function keywordVariants(k: string): string[] {
+  if (!k) return []
+  const out: string[] = [k]
+  const push = (v: string) => {
+    if (v && !out.includes(v)) out.push(v)
+  }
+  push(k.replace(/:(free|paid)$/i, ''))
+  const bare = k.split('/').pop()
+  if (bare && bare !== k) push(bare)
+  if (bare) push(bare.replace(/:(free|paid)$/i, ''))
+  // 为所有既有变体补一份「字母/数字交界拆成空格」的版本（不改变 matchText，索引仍保真）
+  for (const v of [...out]) {
+    const spaced = v.replace(/([A-Za-z])(\d)/g, '$1 $2').replace(/(\d)([A-Za-z])/g, '$1 $2')
+    push(spaced)
+  }
+  return out
+}
+
+/** 升序数组分位值（0..1），空数组返回 undefined */
+function quantile(sorted: number[], q: number): number | undefined {
+  if (sorted.length === 0) return undefined
+  return sorted[Math.floor((sorted.length - 1) * q)]
+}
+
+/**
+ * 由关键词命中位置求定价区块的覆盖区间（起止索引）。
+ * 命中常分为多个簇：页面顶部 DEAL/套餐区小簇（几个模型名）、定价表主体大簇、页脚 FAQ 小簇。
+ * 直接取「命中数最多的簇」为主簇，天然排除顶部/页脚离群簇，保证窗口精确覆盖定价表
+ * 且不超出 MAX_PAGE_CHARS 截断配额（截断会切掉表尾模型）。
+ */
+function pricingSpan(hits: number[], textLen: number): { lo: number; hi: number } | undefined {
+  if (hits.length === 0) return undefined
+  hits.sort((a, b) => a - b)
+  const GAP = Math.max(4_000, textLen * 0.08)
+  // 相邻间距 <= GAP 归同一簇
+  const clusters: number[][] = []
+  let cur = [hits[0]]
+  for (let i = 1; i < hits.length; i++) {
+    if (hits[i] - hits[i - 1] <= GAP) {
+      cur.push(hits[i])
+    } else {
+      clusters.push(cur)
+      cur = [hits[i]]
+    }
+  }
+  clusters.push(cur)
+  // 主簇 = 命中数最多的簇
+  const main = clusters.reduce((a, b) => (b.length > a.length ? b : a))
+  return { lo: main[0], hi: main[main.length - 1] }
+}
+
+/** 每个关键词（含变体）首次命中在全文中的位置（原文索引）；未命中跳过 */
+function firstKeywordHits(fullText: string, keywords: string[]): number[] {
+  const matchText = normalizeForMatch(fullText)
+  const hits: number[] = []
+  for (const k of keywords) {
+    for (const v of keywordVariants(k)) {
+      const idx = matchText.indexOf(normalizeForMatch(v))
+      if (idx !== -1) {
+        hits.push(idx)
+        break
+      }
+    }
+  }
+  return hits
+}
+
 function containsKeyword(text: string, keywords: string[]): boolean {
-  const lower = text.toLowerCase()
-  return keywords.some((k) => k && lower.includes(k.toLowerCase()))
+  const matchText = normalizeForMatch(text)
+  return keywords.some((k) => keywordVariants(k).some((v) => matchText.includes(normalizeForMatch(v))))
 }
 
 /** 轻量 HTML → 纯文本：去 script/style/标签与常用实体，压缩空白（HTTP 抓到的原始 HTML 噪声很大） */
@@ -144,11 +227,15 @@ async function fetchPageText(url: string, keywords: string[]): Promise<string | 
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), BROWSER_LOAD_TIMEOUT_MS))
     ])
     if (!loaded) return null
-    await new Promise((r) => setTimeout(r, RENDER_SETTLE_MS))
-    const text = await win.webContents
-      .executeJavaScript('document.body ? (document.body.innerText || "") : ""')
-      .catch(() => '')
-    if (text && validate(text)) return text
+    // 纯 JS 渲染（SPA）页面：did-finish-load 仅代表 HTML 骨架完成，轮询等待定价内容渲染出来
+    const deadline = Date.now() + RENDER_POLL_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      const text = await win.webContents
+        .executeJavaScript('document.body ? (document.body.innerText || "") : ""')
+        .catch(() => '')
+      if (text && validate(text)) return text
+      await new Promise((r) => setTimeout(r, RENDER_POLL_MS))
+    }
     return null
   } catch {
     return null
@@ -199,39 +286,37 @@ function readProbedPricingEntries(sourceId: string): ProbedPricingEntry[] {
 
 /**
  * 从全文定位定价区块文本（LLM 输入片段）：
- * 1) 上次探查记录的锚句命中 → 精准切锚区间（页面变了但定价结构未大改，最快最准）
- * 2) 无锚/失配时用关键词（模型名）首次出现的中间位置为中心截取，避免「定价表在页面下方、头部截断丢价」
- * 3) 全部失败回退整页头部截断（原行为兜底）
+ * 关键词（模型名，归一化匹配）命中位置构成的覆盖区间为主依据，缓存锚句区间并入取并集——
+ * 即使历史锚句劣化（集中在单行）或漂移，也不会让片段小于关键词覆盖的定价表主体。
+ * 全部失败回退整页头部截断（原行为兜底）。
  */
 function locatePricingFragment(
   fullText: string,
   keywords: string[],
   anchors?: Pick<PricingPageCache, 'fragmentFrom' | 'fragmentTo'>
 ): string {
+  const hits = firstKeywordHits(fullText, keywords)
+  const span = pricingSpan(hits, fullText.length)
   const from = anchors?.fragmentFrom?.trim()
   const to = anchors?.fragmentTo?.trim()
+  let aLo: number | undefined
+  let aHi: number | undefined
   if (from && to) {
     const iFrom = fullText.indexOf(from)
     const iTo = fullText.indexOf(to)
     if (iFrom !== -1 && iTo !== -1 && iTo >= iFrom) {
-      return fullText
-        .slice(Math.max(0, iFrom - FRAGMENT_PAD), iTo + to.length + FRAGMENT_PAD)
-        .slice(0, MAX_PAGE_CHARS)
+      aLo = iFrom - FRAGMENT_PAD
+      aHi = iTo + to.length + FRAGMENT_PAD
     }
   }
-  if (keywords.length > 0) {
-    const lower = fullText.toLowerCase()
-    const hits = keywords
-      .map((k) => (k ? lower.indexOf(k.toLowerCase()) : -1))
-      .filter((i) => i >= 0)
-    if (hits.length > 0) {
-      hits.sort((a, b) => a - b)
-      const center = hits[Math.floor(hits.length / 2)]
-      return fullText.slice(
-        Math.max(0, center - MAX_PAGE_CHARS / 2),
-        Math.min(fullText.length, center + MAX_PAGE_CHARS / 2)
-      )
-    }
+  const lo = Math.min(span ? span.lo - FRAGMENT_PAD / 2 : Infinity, aLo ?? Infinity)
+  const hi = Math.max(span ? span.hi + FRAGMENT_PAD / 2 : -Infinity, aHi ?? -Infinity)
+  if (lo !== Infinity && hi !== -Infinity && hi > lo) {
+    return fullText.slice(Math.max(0, lo), Math.min(fullText.length, hi)).slice(0, MAX_PAGE_CHARS)
+  }
+  if (hits.length === 1) {
+    const c = hits[0]
+    return fullText.slice(Math.max(0, c - MAX_PAGE_CHARS / 2), c + MAX_PAGE_CHARS / 2)
   }
   return fullText.slice(0, MAX_PAGE_CHARS)
 }
@@ -243,25 +328,20 @@ function cleanAnchor(s: string): string {
 
 /**
  * 探查成功后从全文生成定价区块锚句：
- * 取所有条目 pattern（模型名）在全文中的最小/最大出现位置，各截一段短原文作为起止锚；
- * 下次页面变更时据此快速切出定价区块。模型名在正文中若出现，通常集中在定价表格区，首末位置近似区块边界。
+ * 取所有条目 pattern（模型名）在全文中的命中位置，取 20%~80% 分位分别作为起止锚。
+ * 用分位而非首末：顶部 DEAL/套餐区也会出现模型名（离群点），首末锚会被污染；
+ * 分位锚稳定落在定价表主体，下次页面变更时间按锚切出完整定价区块。
  */
 function deriveFragmentAnchors(
   fullText: string,
   entries: ProbedPricingEntry[]
 ): { fragmentFrom?: string; fragmentTo?: string } {
   if (entries.length === 0) return {}
-  const lower = fullText.toLowerCase()
-  let lo = -1
-  let hi = -1
-  for (const e of entries) {
-    if (!e.pattern) continue
-    const idx = lower.indexOf(e.pattern.toLowerCase())
-    if (idx < 0) continue
-    lo = lo === -1 ? idx : Math.min(lo, idx)
-    hi = Math.max(hi, idx)
-  }
-  if (lo === -1) return {}
+  const hits = firstKeywordHits(fullText, entries.map((e) => e.pattern))
+  if (hits.length === 0) return {}
+  hits.sort((a, b) => a - b)
+  const lo = quantile(hits, 0.2) ?? hits[0]
+  const hi = quantile(hits, 0.8) ?? hits[hits.length - 1]
   const from = cleanAnchor(fullText.slice(Math.max(0, lo - 16), lo + 48))
   const to = cleanAnchor(fullText.slice(Math.max(0, hi - 48), hi + 16))
   return { fragmentFrom: from || undefined, fragmentTo: to || undefined }
@@ -316,10 +396,96 @@ function buildProbePrompt(source: PricingProbeSource, keywords: string[], pageTe
 { "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "windows": [ { "start": "HH:mm", "end": "HH:mm", "input": 数字, "output": 数字, "days": ["mon","tue"] (可选, 适用星期, 缺省=每天; 也接受 "weekday"/"工作日"/"weekend"/"周末" 或 [1,2,3] 数字数组) } ] }
    - 页面标注的「输入（缓存命中）」对应 cacheRead，「输入（缓存未命中）」对应 input。
 4. windows 用于峰谷/错峰/时段优惠价（如 off-peak、错峰、时段折扣、凌晨低价、工作日/周末差价）。若页面含此类时段价，务必提取到 windows；无则省略该字段。窗口时间为 24 小时制 HH:mm，时区为 ${tz}。
+4.5. 定价表可能延续到片段末尾（如 Inkling、Grok 等表尾模型）。务必把页面上所有已标注价格的模型都提取，不要遗漏表格末尾的行。
 5. 除 JSON 数组外不要输出任何内容，不要使用 markdown 代码块，不要任何解释。
 
 页面文本：
 ${pageText}`
+}
+
+/** 判定归一化后的关键词 nk 是否被某 pattern 归一化 np 覆盖（按词序连续子序列，避免 1 词子串误判） */
+function seqCovered(nk: string, np: string): boolean {
+  const a = nk.split(' ').filter(Boolean)
+  const b = np.split(' ').filter(Boolean)
+  if (a.length === 0 || b.length === 0) return false
+  if (a.length === b.length) return a.every((w, i) => w === b[i])
+  const [short, long] = a.length < b.length ? [a, b] : [b, a]
+  // 单词语义过宽（如 inkling 覆盖 inkling-small），不放宽；多词才允许子序列匹配
+  if (short.length < 2) return false
+  for (let i = 0; i + short.length <= long.length; i++) {
+    if (long.slice(i, i + short.length).every((w, j) => w === short[j])) return true
+  }
+  return false
+}
+
+/** 找出「页面文本中存在定价但当前提取条目未覆盖」的关键词（模型），用于定向二次补漏 */
+function findMissingModels(
+  fullText: string,
+  keywords: string[],
+  entries: ProbedPricingEntry[]
+): string[] {
+  const matchText = normalizeForMatch(fullText)
+  const missing: string[] = []
+  for (const k of keywords) {
+    if (!k) continue
+    const present = keywordVariants(k).some((v) => matchText.includes(normalizeForMatch(v)))
+    if (!present) continue
+    const nk = normalizeForMatch(k)
+    const covered = entries.some((e) => {
+      const np = e.pattern ? normalizeForMatch(e.pattern) : ''
+      return np && seqCovered(nk, np)
+    })
+    if (!covered) missing.push(k)
+  }
+  return missing
+}
+
+/** 补漏输入：围绕每个缺失模型在全文中的位置切片（前后上下文），重叠区间合并后拼接。
+ *  不依赖主定位窗口——即使主窗口被 12k 截断切掉了表尾，这里仍能精确包含目标模型行。 */
+function buildMissingFragment(fullText: string, missing: string[]): string {
+  const matchText = normalizeForMatch(fullText)
+  // 每个缺失模型取一个命中位置，切片 [idx-300, idx+800]
+  const ranges: { lo: number; hi: number }[] = []
+  for (const k of missing) {
+    for (const v of keywordVariants(k)) {
+      const idx = matchText.indexOf(normalizeForMatch(v))
+      if (idx >= 0) {
+        ranges.push({ lo: Math.max(0, idx - 300), hi: Math.min(fullText.length, idx + 800) })
+        break
+      }
+    }
+  }
+  if (ranges.length === 0) return fullText.slice(0, MAX_PAGE_CHARS)
+  ranges.sort((a, b) => a.lo - b.lo)
+  // 合并重叠/相邻区间
+  const merged: { lo: number; hi: number }[] = []
+  for (const r of ranges) {
+    const last = merged[merged.length - 1]
+    if (last && r.lo <= last.hi + 200) last.hi = Math.max(last.hi, r.hi)
+    else merged.push({ ...r })
+  }
+  return merged.map((r) => fullText.slice(r.lo, r.hi)).join('\n---\n')
+}
+
+/** 补漏 prompt：只要求从片段中提取指定模型的定价 */
+function buildFillPrompt(pageText: string, missing: string[]): string {
+  return `你是模型定价解析器。以下是某厂商官方定价页的文本片段（HTML/纯文本混合，忽略无关标记）。
+
+⚠️ 上一轮解析遗漏了以下模型，请从片段中重点找到它们的定价并提取：
+${missing.map((m, i) => `${i + 1}. ${m}`).join('\n')}
+
+匹配规则与输出要求同上：
+- 只输出 JSON 数组，每项：{ "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "windows": 数组(可选) }
+- 页面里没有明确价格的模型一律不要输出；不确定不要编造。
+- 除 JSON 数组外不要输出任何内容，不要 markdown 代码块。
+
+页面片段：
+${pageText}`
+}
+
+/** 日志用简短片段：压缩空白后取前 40 字符 */
+function briefOf(s: string): string {
+  return s.replace(/\s+/g, ' ').slice(0, 40)
 }
 
 interface RawProbeEntry {
@@ -542,21 +708,22 @@ export type ProbeStage = 'fetching' | 'extracting'
 export async function probeSource(
   source: PricingProbeSource,
   model: ProbeModel,
-  onStage?: (stage: ProbeStage) => void
+  onStage?: (stage: ProbeStage) => void,
+  force = false
 ): Promise<ProbeSourceResult> {
   // 关键词自动取所绑定厂商 /models 的模型名
   const keywords = await getSourceKeywords(source)
-  console.log(`[PricingProbe] ${source.name}(${source.id}) probe model: ${model.baseUrl} / ${model.modelId}`)
+  console.log(`[PricingProbe] ${source.name}(${source.id}) probe model: ${model.baseUrl} / ${model.modelId}${force ? ' [force]' : ''}`)
   onStage?.('fetching')
   const fullText = await fetchPageText(source.url, keywords)
   if (!fullText) {
     return { ok: false, error: '抓取失败（HTTP 与浏览器均无法获取有效页面文本）' }
   }
 
-  // 页面级缓存：哈希相同 → 页面未变更，沿用上次结果、跳过 LLM 调用
+  // 页面级缓存：哈希相同 → 页面未变更，沿用上次结果、跳过 LLM 调用（强制探查时跳过此判断）
   const cache = readPageCache()[source.id]
   const hash = hashPageText(fullText)
-  if (cache?.hash && cache.hash === hash) {
+  if (!force && cache?.hash && cache.hash === hash) {
     const existing = readProbedPricingEntries(source.id)
     if (existing.length > 0) {
       console.log(
@@ -574,15 +741,39 @@ export async function probeSource(
   if (result.status !== 'success' || !result.content) {
     return { ok: false, error: `大模型调用失败: ${result.error || '空响应'}` }
   }
-  console.log(`[PricingProbe] ${source.name}(${source.id}) page ${fullText.length} chars, fragment ${pageText.length} chars, keywords ${keywords.length}, LLM response ${result.content.length} chars`)
+  console.log(
+    `[PricingProbe] ${source.name}(${source.id}) page ${fullText.length} chars, fragment ${pageText.length} chars (…${briefOf(pageText.slice(0, 40))}…|…${briefOf(pageText.slice(-60))}), keywords ${keywords.length}, LLM response ${result.content.length} chars`
+  )
 
-  const entries = buildProbedEntries(source, extractJsonArray(result.content) ?? [])
+  let entries = buildProbedEntries(source, extractJsonArray(result.content) ?? [])
   if (entries.length === 0) {
     // 失败时打印原始响应便于定位（可能是格式不符 / 页面无相关价格）
     console.warn(
       `[PricingProbe] ${source.name}(${source.id}) no valid pricing parsed, LLM raw response: ${result.content.slice(0, 800)}`
     )
     return { ok: false, error: '未能从页面解析出有效定价' }
+  }
+
+  // 补漏：页面存在定价但首轮未提取的模型 → 定向二次提取（输入按缺失模型位置切片，确保目标行必在片段内）
+  const missing = findMissingModels(fullText, keywords, entries)
+  if (missing.length > 0 && missing.length <= 20) {
+    const fillText = buildMissingFragment(fullText, missing)
+    const fill = await callProbeLLM(model, buildFillPrompt(fillText, missing))
+    if (fill.status === 'success' && fill.content) {
+      const extra = buildProbedEntries(source, extractJsonArray(fill.content) ?? [])
+      if (extra.length > 0) {
+        const known = new Set(entries.map((e) => e.pattern && normalizeForMatch(e.pattern)))
+        let added = 0
+        for (const ex of extra) {
+          const key = ex.pattern ? normalizeForMatch(ex.pattern) : ''
+          if (!key || known.has(key)) continue
+          known.add(key)
+          entries = [...entries, ex]
+          added++
+        }
+        console.log(`[PricingProbe] ${source.name}(${source.id}) fill missing ${missing.length} models → +${added} entries`)
+      }
+    }
   }
 
   persistProbedPricing(source.id, entries)
@@ -707,14 +898,15 @@ export interface ProbeBatchResultItem {
 export async function probeSources(
   sources: PricingProbeSource[],
   model: ProbeModel,
-  onProgress?: (p: ProbeProgressEvent) => void
+  onProgress?: (p: ProbeProgressEvent) => void,
+  force = false
 ): Promise<ProbeBatchResultItem[]> {
   const results: ProbeBatchResultItem[] = []
   for (let i = 0; i < sources.length; i++) {
     const source = sources[i]
     const base = { sourceId: source.id, sourceName: source.name, index: i + 1, total: sources.length }
     onProgress?.({ ...base, stage: 'fetching' })
-    const r = await probeSource(source, model, (stage) => onProgress?.({ ...base, stage }))
+    const r = await probeSource(source, model, (stage) => onProgress?.({ ...base, stage }), force)
     results.push({
       sourceId: source.id,
       ok: r.ok,

@@ -4,7 +4,7 @@ import { useConfigStore } from '../store/configStore'
 import { useConversationStore } from '../store/conversationStore'
 import { useProbeStore, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
-import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react'
+import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, SubModelRole } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { MOA_ROLE_TEMPLATES, getRoleTemplate } from '../../../shared/moaRoles'
@@ -1314,7 +1314,7 @@ function ProbeSection() {
     if (auto) setSources([...sources, { ...auto, ...patch }])
   }
 
-  const runProbe = async (ids: string[] | 'all') => {
+  const runProbe = async (ids: string[] | 'all', force = false) => {
     if (busy) return
     setBusy(true)
     setMessages({})
@@ -1336,7 +1336,7 @@ function ProbeSection() {
         : `将对 ${targets.length} 个定价源调用大模型解析，产生 Token 消耗`
     })
     try {
-      const res = await window.moaAPI.probePricing(targets)
+      const res = await window.moaAPI.probePricing(targets, force)
       if (res.success && res.data) {
         const nextMsg: Record<string, string> = {}
         for (const r of res.data.results) {
@@ -1364,28 +1364,6 @@ function ProbeSection() {
     const entries = probed.filter((e) => e.sourceId === sourceId)
     const lastFetchedAt = entries.reduce((max, e) => Math.max(max, e.fetchedAt), 0)
     return { entries, lastFetchedAt }
-  }
-
-  // 添加源：选择一个已配置 key 的厂商绑定
-  const [addingForProvider, setAddingForProvider] = useState<string | null>(null)
-  const addSourceWithProvider = (providerId: string) => {
-    const p = providers.find((x) => x.id === providerId)
-    if (!p) return
-    if (sources.some((s) => s.providerId === providerId)) {
-      setAddingForProvider(null)
-      return
-    }
-    setSources([
-      ...sources,
-      {
-        id: `src-${Date.now()}`,
-        name: p.name,
-        providerId: p.id,
-        url: defaultPricingProbeUrlByName(p.name),
-        enabled: true
-      }
-    ])
-    setAddingForProvider(null)
   }
 
   // ── 手动定价覆盖（每个源内）──
@@ -1425,11 +1403,7 @@ function ProbeSection() {
 
   /** 每条价格按「币种/单位」显示（如 $/M、¥/K）；无探查信息则默认 $/M */
   const priceUnitLabel = (sourceId: string, modelId: string): string => {
-    const hit = probed.find(
-      (e) =>
-        e.sourceId === sourceId &&
-        (e.pattern === modelId || modelId.startsWith(e.pattern) || e.pattern.startsWith(modelId))
-    )
+    const hit = probedEntryFor(sourceId, modelId)
     const sym = hit?.currency === 'CNY' ? '¥' : '$'
     return `${sym}/${unitAbbrev(hit?.unit)}`
   }
@@ -1475,22 +1449,21 @@ function ProbeSection() {
     { key: 'cacheRead', label: '缓存读' },
     { key: 'cacheCreation', label: '缓存写' }
   ]
-  /** 按当前排序状态重排模型 ID 列表；未设置排序时保持原顺序。价格取展示值（手动覆盖 > 探查价），undefined（未探到）恒排最后 */
+  /** 按当前排序状态重排模型 ID 列表；未点击表头时默认按模型 ID 升序。价格取展示值（手动覆盖 > 探查价），undefined（未探到）恒排最后 */
   const sortModelIds = (sourceId: string, ids: string[]): string[] => {
     const sort = sorts[sourceId]
-    if (!sort) return ids
-    const dir = sort.dir === 'asc' ? 1 : -1
+    const key = sort?.key ?? 'modelId'
+    const dir = (sort?.dir ?? 'asc') === 'asc' ? 1 : -1
     const originalIndex = new Map(ids.map((m, i) => [m, i]))
-    if (sort.key === 'modelId') {
+    if (key === 'modelId') {
       return [...ids].sort((a, b) => {
         const diff = a.localeCompare(b)
         return diff !== 0 ? dir * diff : originalIndex.get(a)! - originalIndex.get(b)!
       })
     }
-    const priceKey = sort.key as Exclude<PricingSortKey, 'modelId'>
     return [...ids].sort((a, b) => {
-      const va = manualPrice(sourceId, a)[priceKey]
-      const vb = manualPrice(sourceId, b)[priceKey]
+      const va = manualPrice(sourceId, a)[key]
+      const vb = manualPrice(sourceId, b)[key]
       if (va === undefined && vb === undefined) return originalIndex.get(a)! - originalIndex.get(b)!
       if (va === undefined) return 1
       if (vb === undefined) return -1
@@ -1654,6 +1627,15 @@ function ProbeSection() {
                   <RefreshCw className={`w-4 h-4 ${runningIds.has(s.id) ? 'animate-spin' : ''}`} />
                   探查并更新
                 </button>
+                <button
+                  onClick={() => runProbe([s.id], true)}
+                  disabled={busy || !s.url || !providerForSource(s)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-input px-3 py-1 text-sm text-muted-foreground hover:text-foreground hover:bg-accent/50 disabled:opacity-50"
+                  title="忽略页面缓存，强制重新抓取并解析定价（稳定消耗 Token）"
+                >
+                  <Zap className="w-4 h-4" />
+                  强制探查
+                </button>
                 <ToggleSwitch checked={!!s.enabled} onChange={(v) => updateSource(s.id, { enabled: v })} />
                 {!isAutoSource(s.id) && (
                   <button
@@ -1814,38 +1796,6 @@ function ProbeSection() {
           </p>
         )}
       </div>
-
-      {addingForProvider !== null ? (
-        <div className="flex items-center gap-2">
-          <select
-            autoFocus
-            value=""
-            onChange={(e) => addSourceWithProvider(e.target.value)}
-            className="rounded-md border border-input bg-background px-2 py-1 text-xs font-mono text-foreground"
-          >
-            <option value="">选择要绑定的厂商...</option>
-            {keyedProviders.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={() => setAddingForProvider(null)}
-            className="text-xs text-muted-foreground hover:text-foreground"
-          >
-            取消
-          </button>
-        </div>
-      ) : (
-        <button
-          onClick={() => setAddingForProvider('')}
-          disabled={keyedProviders.length === 0}
-          className="text-sm text-primary hover:underline disabled:opacity-50"
-        >
-          + 添加源（绑定已配置 key 的厂商）
-        </button>
-      )}
     </div>
   )
 }

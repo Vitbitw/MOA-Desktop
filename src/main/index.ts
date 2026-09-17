@@ -802,7 +802,7 @@ function registerIpcHandlers() {
   })
 
   // ── 定价探查（LLM 自动更新官方定价）──
-  ipcMain.handle(IPC.PRICING_PROBE_RUN, async (_e, sources?: PricingProbeSource[]) => {
+  ipcMain.handle(IPC.PRICING_PROBE_RUN, async (_e, sources?: PricingProbeSource[], force?: boolean) => {
     if (pricingProbeRunning) return { success: false, error: '探查进行中' }
     pricingProbeRunning = true
     try {
@@ -819,7 +819,7 @@ function registerIpcHandlers() {
       const emitProgress = (p: ProbeProgressEvent) => {
         mainWindow?.webContents.send(IPC_EVENT.PRICING_PROBE_PROGRESS, p)
       }
-      const results = await probeSources(valid, model, emitProgress)
+      const results = await probeSources(valid, model, emitProgress, force === true)
       return { success: true, data: { results } }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -875,11 +875,14 @@ function schedulePricingAutoRefresh(initialDelayMs = 10_000): void {
         return
       }
       console.log(`[PricingProbe] auto-refresh ${stale.length} stale source(s)`)
-      // 执行前预警：后台自动刷新定价同样会调用大模型，弹悬浮通知告知
+      // 执行前预警：后台自动刷新定价同样会调用大模型，弹悬浮通知告知。
+      // 模型需显示「厂商名 · 模型ID」而非只显示模型 ID（模型 ID 可能与官方同名，如 deepseek/deepseek-v4-flash 实际走 Command Code 中转端点）
+      const probeProviderName =
+        getAllProviders().find((p) => p.id === model.providerId)?.name ?? model.baseUrl
       sendToastToRenderer({
         type: 'warning',
         title: '定价自动刷新将消耗 Token',
-        message: `将对 ${stale.length} 个过期定价源调用 "${model.modelId}" 探查，产生 Token 消耗`
+        message: `将对 ${stale.length} 个过期定价源调用 ${probeProviderName} · ${model.modelId} 探查，产生 Token 消耗`
       })
       pricingProbeRunning = true
       try {
