@@ -324,6 +324,15 @@ window：契约 {success, data, error, window} 中 window 与 data 同级；实�
 - 三个口径按钮各带 tooltip：来源端点 / 覆盖范围 / 用途
 - **字段改名消歧**：`sourcesAvailable.charts` → `listAggregate`（list 聚合可用）、`usageCharts` → `chartsEndpoint`（charts 端点可用）
 
+### 后续决定：移除「云端窗口」展示口径（同日）
+
+用户权衡后决定**删除「云端窗口」口径**（与服务端聚合功能重叠，且窗口能显示的内容都是本地累计的子集）。实施范围：
+
+- **UI**：口径切换只保留「服务端聚合（默认）/ 本地累计」；删除 `window` 状态、云端窗口按钮与说明行（连带 `modelsCoverage` 覆盖说明行及 `coverageIncomplete` / `coverageSpan` 变量）
+- **数据层保留**：`/internal/usage` 请求照常发（**本地累计落库依赖它，不可删**）；`usage.models` / `modelsCoverage` / `sourcesAvailable.listAggregate` 字段保留（不再被 UI 消费，留作与官方页面逐条对账及未来扩展）
+- **回退逻辑**简化为：`服务端聚合不可用 → 本地累计`
+- 汇总卡 tooltip 同步更新（不再提"最近 100 条请求记录聚合"）
+
 ## 合并「套餐用量自动刷新」与「明细自动刷新」（2026-09-17）
 
 ### 背景

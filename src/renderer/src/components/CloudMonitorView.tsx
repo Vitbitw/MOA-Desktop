@@ -309,7 +309,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   // 本地累计（云端列表对部分套餐只给最近 100 条，累计口径让数字只增不减）
   const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(null)
   const [collector, setCollector] = useState<CollectorStatusInfo | null>(null)
-  const [detailMode, setDetailMode] = useState<'monthly' | 'cumulative' | 'window'>('monthly')
+  const [detailMode, setDetailMode] = useState<'monthly' | 'cumulative'>('monthly')
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数（拿到过期的 loading/status）
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -473,33 +473,15 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const windowsAvailable = usage?.sourcesAvailable.windows ?? false
   const summary = usage?.summary
   const credits = usage?.credits
-  const models = usage?.models ?? []
-  const coverage = usage?.modelsCoverage
-  // 明细由请求记录聚合：达到拉取上限或汇总请求数多于已聚合记录数 → 明细未覆盖全部请求
-  const coverageIncomplete =
-    !!coverage && (coverage.truncated || (summary !== undefined && coverage.records < summary.totalCount))
-  const coverageSpan = fmtSpan(coverage?.fromTs, coverage?.toTs)
-  // 明细口径：服务端聚合（charts 端点，默认）/ 本地累计（本地观测累积）/ 云端窗口（list 聚合，最近 100 条）
-  // 三者关系与为什么都保留：见 docs/superpowers/specs/2026-09-17-commandcode-model-detail-completeness.md
+  // 明细口径：服务端聚合（charts 端点，默认）/ 本地累计（本地观测累积）
+  // 注意：/internal/usage 的逐条记录不再单独作为展示口径（与本地累计同源、覆盖更短），仅用于本地累计落库
   const monthlyRows = usage?.monthlyModels?.rows ?? []
-  // 注意：端点标记为「明确 false」才算不可用。字段缺失（例如主进程未重启到最新版本）不应误判为不可用
   const chartsFlag = usage?.sourcesAvailable.chartsEndpoint
   const monthlyAvailable = monthlyRows.length > 0 && chartsFlag !== false
-  const windowAvailable = usage?.sourcesAvailable.listAggregate === true && models.length > 0
   const cumulativeModels = cumulative?.models ?? []
-  // 回退优先级：同为服务端来源的「服务端聚合 → 云端窗口」优先，最后才退到「本地累计」（语义不同，仅作兜底）
-  const effectiveDetailMode: 'monthly' | 'cumulative' | 'window' =
-    detailMode === 'monthly' && !monthlyAvailable
-      ? windowAvailable
-        ? 'window'
-        : 'cumulative'
-      : detailMode === 'window' && !windowAvailable
-        ? monthlyAvailable
-          ? 'monthly'
-          : 'cumulative'
-        : detailMode
-  const shownModels =
-    effectiveDetailMode === 'monthly' ? monthlyRows : effectiveDetailMode === 'cumulative' ? cumulativeModels : models
+  const effectiveDetailMode: 'monthly' | 'cumulative' =
+    detailMode === 'monthly' && !monthlyAvailable ? 'cumulative' : detailMode
+  const shownModels = effectiveDetailMode === 'monthly' ? monthlyRows : cumulativeModels
   const monthlyWindow = usage?.monthlyModels?.window
   // 缓存节省列：仅当当前口径的行里真有该数据（目前只有服务端聚合口径提供）
   const showCacheSavings = shownModels.some((m) => Number((m as { cacheSavings?: number }).cacheSavings) > 0)
@@ -698,7 +680,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
               <h3 className="text-xs font-semibold text-muted-foreground">汇总</h3>
               <span
                 className="text-xs text-muted-foreground"
-                title="来自服务端 summary 接口，统计口径由服务端给出（periodBasis）；「模型明细」是最近 100 条请求记录聚合或本地累计，两者数字不应相等"
+                title="来自服务端 summary 接口，统计口径由服务端给出（periodBasis）；「模型明细」是服务端 charts 聚合或本地累计，覆盖范围与汇总不同，两者数字不应相等"
               >
                 {summaryBasisLabel} · 与模型明细口径不同
               </span>
@@ -711,7 +693,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
             </div>
           </section>
 
-          {/* 模型明细：默认服务端聚合口径（charts），可切换本地累计 / 云端窗口 */}
+          {/* 模型明细：服务端聚合口径（charts，默认）/ 本地累计 */}
           <section>
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-2">
               <h3 className="text-xs font-semibold text-muted-foreground">模型明细</h3>
@@ -727,11 +709,6 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                       'cumulative',
                       '本地累计',
                       '本地按记录 id 去重累积（自首次采集起，只增不减）；两次采集之间的突发可能漏采'
-                    ],
-                    [
-                      'window',
-                      '云端窗口',
-                      '与「本地累计」同源（都来自 /internal/usage 的逐条记录），但只覆盖服务端返回的最近 100 条；用于与官方用量页逐条对账'
                     ]
                   ] as const
                 ).map(([mode, label, hint]) => {
@@ -771,7 +748,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                   · 口径说明
                 </span>
               </div>
-            ) : effectiveDetailMode === 'cumulative' ? (
+            ) : (
               <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mb-2 text-xs text-muted-foreground">
                 {cumulative && cumulative.records > 0 ? (
                   <>
@@ -806,25 +783,6 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                   <span>暂无本地累计数据（自动刷新或手动刷新后会逐条累积）</span>
                 )}
               </div>
-            ) : (
-              <div className="mb-2">
-                {coverage && (
-                  <span
-                    className={`text-xs ${coverageIncomplete ? 'text-yellow-600' : 'text-muted-foreground'}`}
-                    title={
-                      coverageIncomplete
-                        ? '明细由请求记录聚合，仍有更早的记录未纳入（服务端记录保留窗口有限或已达单次拉取上限）；汇总卡片来自服务端口径，故可能与明细合计不一致'
-                        : '明细由服务端请求记录聚合；汇总卡片来自服务端汇总接口'
-                    }
-                  >
-                    基于 {coverage.records.toLocaleString()} 条请求记录聚合
-                    {coverage.windowDays !== undefined ? ` · 服务端保留窗口 ${coverage.windowDays} 天` : ''}
-                    {coverageSpan ? ` · 覆盖 ${coverageSpan}` : ''}
-                    {summary !== undefined ? ` · 汇总共 ${summary.totalCount.toLocaleString()} 条请求` : ''}
-                    {coverageIncomplete ? '（更早记录未纳入）' : ''}
-                  </span>
-                )}
-              </div>
             )}
             <div className="rounded-lg border border-border bg-card overflow-hidden">
               <table className="w-full text-sm">
@@ -852,11 +810,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                       <td colSpan={showCacheSavings ? 7 : 6} className="px-4 py-12 text-center text-sm text-muted-foreground">
                         {effectiveDetailMode === 'monthly'
                           ? '暂无服务端聚合数据（charts 端点未返回数据）'
-                          : effectiveDetailMode === 'cumulative'
-                            ? '暂无本地累计数据（自动刷新或手动刷新后会逐条累积）'
-                            : summary
-                              ? '暂无模型明细数据'
-                              : '暂无用量数据'}
+                          : '暂无本地累计数据（自动刷新或手动刷新后会逐条累积）'}
                       </td>
                     </tr>
                   ) : (
