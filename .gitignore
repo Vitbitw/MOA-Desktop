@@ -42,6 +42,13 @@ app-config.json
 # Test temp
 test-*/
 !test-e2e/
+# test-e2e 内的历史实验脚本（8 月 sql.js 迁移 spike 产物，不参与版本控制）
+test-e2e/harness.js
+test-e2e/harness-transcript.txt
+test-e2e/stub.js
+test-e2e/stub-transcript.txt
+test-e2e/probe-migration.js
+test-e2e/probe-wasm.js
 
 # Hermes / AI辅助开发
 .hermes/
