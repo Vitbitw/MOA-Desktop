@@ -41,6 +41,7 @@ app-config.json
 
 # Test temp
 test-*/
+!test-e2e/
 
 # Hermes / AI辅助开发
 .hermes/
