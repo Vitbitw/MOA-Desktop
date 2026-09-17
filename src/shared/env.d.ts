@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent, ToastData } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent, ToastData } from './types'
 
 interface MoaAPI {
   // Config / Providers
@@ -55,6 +55,15 @@ interface MoaAPI {
   monitorSetApiKey: (sourceId: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
   monitorRefresh: (source: RemoteUsageSource) =>
     Promise<{ success: boolean; data?: MonitorUsage; error?: string; code?: MonitorErrorCode }>
+  /** 本地累计的按模型用量（Command Code；由多次采集去重累积） */
+  monitorGetCumulative: (sourceId: string) =>
+    Promise<{ success: boolean; data?: CumulativeModelUsage; error?: string }>
+  /** 后台采集器状态（是否在采集 / 间隔 / 上次采集时间 / 上次错误） */
+  monitorCollectorStatus: () => Promise<{
+    success: boolean
+    data?: { enabled: boolean; intervalMinutes: number; lastCollectedAt: number; lastError: string | null; running: boolean }
+    error?: string
+  }>
 
   // Pricing Probe
   probePricing: (sources: PricingProbeSource[], force?: boolean) =>

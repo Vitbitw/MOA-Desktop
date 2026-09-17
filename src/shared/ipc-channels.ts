@@ -40,6 +40,8 @@ export const IPC = {
   MONITOR_LOGOUT: 'monitor:logout',
   MONITOR_SET_API_KEY: 'monitor:setApiKey',
   MONITOR_REFRESH: 'monitor:refresh',
+  MONITOR_GET_CUMULATIVE: 'monitor:getCumulative',
+  MONITOR_COLLECTOR_STATUS: 'monitor:collectorStatus',
 
   // Pricing Probe
   PRICING_PROBE_RUN: 'pricing:probeRun',

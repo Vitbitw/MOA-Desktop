@@ -16,6 +16,8 @@ import { invalidateProxyCache } from './local/fetchProxy'
 import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
 import { loginToMimo, refreshMimoUsage } from './monitoring/mimo'
 import { loginToDeepSeek, logoutDeepSeek, getDeepSeekStatus, refreshDeepSeekUsage } from './monitoring/deepseek'
+import { getCumulativeUsage } from './monitoring/usageAccumulator'
+import { startUsageCollector, stopUsageCollector, getCollectorStatus } from './monitoring/collector'
 import { resolveProbeModel, probeSources, getPricingProbeConfig, sourceHasConfiguredKey } from './pricing/probe'
 import { saveUsageCredential } from './store/key-store'
 import type { RemoteUsageSource } from '../shared/types'
@@ -784,6 +786,24 @@ function registerIpcHandlers() {
     }
   })
 
+  // 本地累计（Command Code）：多次采集去重累积的按模型用量
+  ipcMain.handle(IPC.MONITOR_GET_CUMULATIVE, (_e, sourceId: string) => {
+    try {
+      return { success: true, data: getCumulativeUsage(sourceId) }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // 后台采集器状态（是否启用 / 间隔 / 上次采集时间 / 上次错误）
+  ipcMain.handle(IPC.MONITOR_COLLECTOR_STATUS, () => {
+    try {
+      return { success: true, data: getCollectorStatus() }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
   ipcMain.handle(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
     try {
       const result =
@@ -946,6 +966,9 @@ app.whenReady().then(async () => {
   // 定价探查自动刷新（默认关闭，autoRefreshSeconds>0 时启用）
   schedulePricingAutoRefresh()
 
+  // Command Code 用量后台采集（本地累计的数据来源；间隔从设置读取，0 = 关闭）
+  startUsageCollector()
+
   // Set up Chinese application menu
   createApplicationMenu()
 
@@ -981,6 +1004,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  stopUsageCollector()
   stopProxyServer()
   getDatabase().flush()
 })

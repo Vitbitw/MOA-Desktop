@@ -44,7 +44,9 @@ export const DEFAULT_MONITORING: MonitoringSettings = {
       enabled: true
     }
   ],
-  autoRefreshMinutes: 10
+  autoRefreshMinutes: 10,
+  // 后台采集间隔（分钟）：应用运行期间按此间隔拉取 Command Code 用量并累积落库；0 = 关闭
+  collectIntervalMinutes: 15
 }
 
 /** 定价探查默认源：官方定价页 URL（关键词自动取所绑定厂商 /models 的模型名，用户可在设置页修改/增删） */

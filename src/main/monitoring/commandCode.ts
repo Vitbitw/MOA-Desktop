@@ -7,6 +7,7 @@
 
 import { BrowserWindow, session } from 'electron'
 import { fetchProxy } from '../local/fetchProxy'
+import { persistUsageRecords } from './usageAccumulator'
 import {
   saveUsageCredential,
   getUsageCredential,
@@ -276,51 +277,321 @@ function parseWindows(body: unknown): WindowsParse | null {
   return hasWindow || hasCredits ? { ...(fiveHour ? { fiveHour } : {}), ...(weekly ? { weekly } : {}), ...(monthlyCredits !== undefined ? { monthlyCredits } : {}) } : null
 }
 
+/** mode → 展示名（与 Studio 前端常量一致；不在表内的 mode 缺失模型名时原样兜底） */
+const CC_MODE_LABELS: Record<string, string> = {
+  learning: 'taste-1',
+  'web-search': 'web-search',
+  'web-fetch': 'web-fetch'
+}
+
+/** 解析出的单条用量记录（含用于本地累计去重的 id） */
+interface ParsedUsageRecord {
+  /** 记录唯一标识：优先服务端 id，缺失时用「时间|模型|tokens|成本」合成（保证去重可用） */
+  id: string
+  /** 记录自身时间（epoch 毫秒；无法解析时省略） */
+  createdAtMs?: number
+  model: string
+  tokensIn: number
+  tokensOut: number
+  tokensTotal: number
+  cost: number
+}
+
 /** 解析 /internal/usage 的单条用量记录（一条记录 = 一次请求；兼容 camelCase / snake_case 与 meta 嵌套） */
-function parseUsageRecord(raw: unknown): { model: string; tokensIn: number; tokensOut: number; tokensTotal: number; cost: number } | undefined {
+function parseUsageRecord(raw: unknown): ParsedUsageRecord | undefined {
   if (!isObj(raw)) return undefined
   const meta = isObj(raw.meta) ? raw.meta : null
   const tokensIn = toNum(raw.tokensIn ?? raw.tokens_in) ?? 0
   const tokensOut = toNum(raw.tokensOut ?? raw.tokens_out) ?? 0
   const tokensTotal = toNum(raw.tokensTotal ?? raw.tokens_total) ?? tokensIn + tokensOut
-  // 成本优先取 creditsTotal，其次 meta.totalCost / meta.planPoolDraw，最后兜底 raw.cost
+  // 成本口径与 Studio 一致（美元）：meta.totalCost 优先；缺失时用 inputCost+outputCost+cacheCost 求和；
+  // 再兜底旧字段（creditsTotal / planPoolDraw / cost，单位可能不同，仅作最后手段）
+  const metaCost = toNum(meta?.totalCost ?? meta?.total_cost)
+  const inputCost = toNum(meta?.inputCost ?? meta?.input_cost)
+  const outputCost = toNum(meta?.outputCost ?? meta?.output_cost)
+  const cacheCost = toNum(meta?.cacheCost ?? meta?.cache_cost)
+  const partsCost =
+    inputCost === undefined && outputCost === undefined && cacheCost === undefined
+      ? undefined
+      : (inputCost ?? 0) + (outputCost ?? 0) + (cacheCost ?? 0)
   const cost =
+    metaCost ??
+    partsCost ??
     toNum(raw.creditsTotal ?? raw.credits_total) ??
-    toNum(meta?.totalCost ?? meta?.total_cost) ??
     toNum(meta?.planPoolDraw ?? meta?.plan_pool_draw) ??
     toNum(raw.cost) ??
     0
-  // 模型名在 meta.model / meta.modelName（顶层 model 作为兜底）
+  // 模型名：meta.model / meta.modelName 优先（顶层 model 兜底），都缺失时按 Studio 口径回退 mode 展示名。
+  // 关键：mode 回退让 learning / web-search / web-fetch 这类无 meta.model 的记录不再被整条丢弃。
+  const mode = str(raw.mode)
   const model =
     (typeof raw.model === 'string' && raw.model) ||
     (typeof meta?.model === 'string' && meta.model) ||
     (typeof meta?.modelName === 'string' && meta.modelName) ||
+    (mode ? (CC_MODE_LABELS[mode] ?? mode) : '') ||
     ''
   if (!model) return undefined
-  return { model, tokensIn, tokensOut, tokensTotal, cost }
+  const createdAtSec = toEpochSec(raw.createdAt ?? raw.created_at)
+  const createdAtMs = createdAtSec === undefined ? undefined : createdAtSec * 1000
+  const idRaw = str(raw.id ?? raw.recordId ?? raw.record_id)
+  return {
+    // 服务端记录稳定带 id；缺失时用可稳定复现的组合键，保证「按 id 去重」仍然成立
+    id: idRaw ?? `${createdAtMs ?? 0}|${model}|${tokensTotal}|${cost}`,
+    ...(createdAtMs !== undefined ? { createdAtMs } : {}),
+    model,
+    tokensIn,
+    tokensOut,
+    tokensTotal,
+    cost
+  }
 }
 
-/** 聚合 /internal/usage 的按模型明细行（请求数 / tokens / 成本，按成本降序） */
-function aggregateUsage(body: unknown): NonNullable<CommandCodeUsage['models']> | undefined {
-  const unwrapped = unwrapSuccess(body)
-  // 记录列表可能在根部、.usages / .items / .data，或嵌套在 .data.data / .data.usages
-  const arr = Array.isArray(unwrapped)
-    ? unwrapped
-    : isObj(unwrapped) && Array.isArray(unwrapped.usages)
-      ? unwrapped.usages
-      : isObj(unwrapped) && Array.isArray(unwrapped.items)
-        ? unwrapped.items
-        : isObj(unwrapped) && Array.isArray(unwrapped.data)
-          ? unwrapped.data
-          : isObj(unwrapped) && isObj(unwrapped.data) && Array.isArray(unwrapped.data.data)
-            ? unwrapped.data.data
-            : isObj(unwrapped) && isObj(unwrapped.data) && Array.isArray(unwrapped.data.usages)
-              ? unwrapped.data.usages
-              : null
-  if (!arr || arr.length === 0) return undefined
+/** 把原始记录数组归一化为可落库的记录（供本地累计使用） */
+export function normalizeUsageRecords(records: unknown[]): ParsedUsageRecord[] {
+  const out: ParsedUsageRecord[] = []
+  for (const raw of records) {
+    const rec = parseUsageRecord(raw)
+    if (rec) out.push(rec)
+  }
+  return out
+}
 
+/**
+ * 从用量列表响应中提取记录数组。
+ * 记录列表可能在根部、.usages / .items / .data，或嵌套在 .data.data / .data.usages。
+ */
+function extractUsageArray(unwrapped: unknown): unknown[] | null {
+  if (Array.isArray(unwrapped)) return unwrapped
+  if (!isObj(unwrapped)) return null
+  if (Array.isArray(unwrapped.usages)) return unwrapped.usages
+  if (Array.isArray(unwrapped.items)) return unwrapped.items
+  if (Array.isArray(unwrapped.data)) return unwrapped.data
+  if (isObj(unwrapped.data) && Array.isArray(unwrapped.data.data)) return unwrapped.data.data
+  if (isObj(unwrapped.data) && Array.isArray(unwrapped.data.usages)) return unwrapped.data.usages
+  return null
+}
+
+interface UsagePage {
+  usages: unknown[]
+  /** 下一页游标（缺失 = 已到最后一页） */
+  nextCursor?: string
+  /** 服务端记录保留窗口天数（响应 window.days） */
+  windowDays?: number
+}
+
+/** 解析 /internal/usage 的单页响应：{ usages, window: { days }, nextCursor }（结构不可识别返回 null） */
+function parseUsagePage(body: unknown): UsagePage | null {
+  const root = unwrapSuccess(body)
+  const usages = extractUsageArray(root)
+  if (!usages) return null
+  const page: UsagePage = { usages }
+  if (isObj(root)) {
+    const nextCursor = str(root.nextCursor ?? root.next_cursor)
+    if (nextCursor) page.nextCursor = nextCursor
+    const win = isObj(root.window) ? root.window : null
+    const days = toNum(win?.days ?? win?.windowDays)
+    if (days !== undefined) page.windowDays = days
+  }
+  return page
+}
+
+/** 单页记录数（Studio 分页 UI 白名单为 10/25/50/100，取最大值以减少请求数） */
+const USAGE_PAGE_SIZE = 100
+/**
+ * 试探用页大小：当「恰好拿满一页且服务端不给游标」时，用更大的 limit 再试一次。
+ * Studio UI 只提供到 100，但服务端本身可能接受更大 limit —— 探测成功即可覆盖更长的记录跨度。
+ */
+const USAGE_PROBE_PAGE_SIZE = 500
+/**
+ * 探针冷却（毫秒）：一旦确认服务端不接受更大 limit（如 GOAT 账号恒定 400），
+ * 短期内不再重复试探 —— 否则每次刷新都要白打一个注定失败的请求。
+ */
+const USAGE_PROBE_COOLDOWN_MS = 6 * 60 * 60 * 1000
+/** 探针冷却截止时间（进程内状态；到期后自动再试一次，若服务端放宽即可自动受益） */
+let probeDisabledUntil = 0
+/** 单次刷新最多拉取页数（20 页 × 100 条 = 2000 条记录），避免账号历史过大时刷新过慢 */
+const USAGE_MAX_PAGES = 20
+/** 分页总耗时预算（ms）：超预算即停止继续翻页，已取记录照常聚合 */
+const USAGE_PAGE_BUDGET_MS = 12_000
+/** 诊断开关（MOA_MONITOR_DEBUG=1）：逐页打印响应结构，排查服务端分页/字段变化时使用 */
+const DEBUG_USAGE_PAGES = process.env.MOA_MONITOR_DEBUG === '1'
+
+interface UsageFetch {
+  /** 首页 HTTP 状态（null = 网络异常 / 请求抛错） */
+  status: number | null
+  records: unknown[]
+  pages: number
+  /** true = 仍有更早的记录未纳入（页数/耗时上限，或后续页失败/结构异常） */
+  truncated: boolean
+  windowDays?: number
+  /** 本次实际请求的页大小（诊断用：确认试探是否生效） */
+  requestedLimit: number
+}
+
+/**
+ * 游标分页拉取用量记录（服务端契约见 Studio 前端：`?limit=&cursor=`，响应 nextCursor 为 null 表示末页）。
+ * 首页失败 → status 返回给调用方处理；后续页失败 → 保留已取记录并标记 truncated（不丢数据、不误报完整）。
+ */
+async function fetchUsagePages(token: string, pageSize: number): Promise<UsageFetch> {
+  const startedAt = Date.now()
+  const records: unknown[] = []
+  let pages = 0
+  let status: number | null = null
+  let cursor: string | undefined
+  let windowDays: number | undefined
+  let truncated = false
+
+  const fail = (s: number | null): UsageFetch => ({ status: s, records: [], pages: 0, truncated: false, requestedLimit: pageSize })
+
+  while (pages < USAGE_MAX_PAGES) {
+    const qs = new URLSearchParams({ limit: String(pageSize) })
+    if (cursor) qs.set('cursor', cursor)
+
+    let res: CcResponse
+    try {
+      res = await ccGet(`/internal/usage?${qs.toString()}`, { token })
+    } catch {
+      if (pages === 0) return fail(null)
+      truncated = true
+      break
+    }
+
+    if (pages === 0) status = res.status
+    const page = res.status === 200 ? parseUsagePage(res.body) : null
+    if (res.status !== 200 || !page) {
+      if (pages === 0) return fail(res.status)
+      truncated = true
+      break
+    }
+
+    pages += 1
+    if (DEBUG_USAGE_PAGES) {
+      const root = unwrapSuccess(res.body)
+      console.log(
+        `[Monitor] usage page ${pages} (limit=${pageSize}): usages=${page.usages.length} nextCursor=${page.nextCursor ? 'present' : 'absent'} window=${page.windowDays ?? '?'} rootKeys=${isObj(root) ? Object.keys(root).join(',') : typeof root}`
+      )
+    }
+    records.push(...page.usages)
+    if (page.windowDays !== undefined) windowDays = page.windowDays
+
+    if (!page.nextCursor) {
+      cursor = undefined
+      break
+    }
+    cursor = page.nextCursor
+    if (Date.now() - startedAt > USAGE_PAGE_BUDGET_MS) {
+      truncated = true
+      break
+    }
+  }
+
+  // 页数上限到达且末页仍有游标 → 更早的记录未纳入
+  if (cursor && pages >= USAGE_MAX_PAGES) truncated = true
+
+  return {
+    status,
+    records,
+    pages,
+    truncated,
+    requestedLimit: pageSize,
+    ...(windowDays !== undefined ? { windowDays } : {})
+  }
+}
+
+/**
+ * 取用量记录（含自适应页大小试探）。
+ * 触发条件：恰好一页、拿满 pageSize 条、且服务端不给游标 —— 说明「100 条可能是服务端上限」，
+ * 此时用 USAGE_PROBE_PAGE_SIZE 再请求一次：服务端若接受更大 limit，就能拿到更长跨度的记录。
+ * 试探只在结果更多时采用；400 / 网络异常一律静默回退（不改变原有行为）。
+ */
+async function fetchUsageRecords(token: string): Promise<UsageFetch> {
+  const base = await fetchUsagePages(token, USAGE_PAGE_SIZE)
+  if (base.status !== 200 || base.pages !== 1 || base.records.length < USAGE_PAGE_SIZE || base.truncated) return base
+  // 冷却期内跳过试探（探针被拒/无收益时设置）
+  if (Date.now() < probeDisabledUntil) return base
+
+  const probe = await fetchUsagePages(token, USAGE_PROBE_PAGE_SIZE)
+  if (probe.status === 401 || probe.status === 403) return probe
+  if (probe.status !== 200) {
+    probeDisabledUntil = Date.now() + USAGE_PROBE_COOLDOWN_MS
+    if (DEBUG_USAGE_PAGES) {
+      console.log(
+        `[Monitor] usage probe limit=${USAGE_PROBE_PAGE_SIZE} → status=${probe.status}，沿用 ${base.records.length} 条（冷却 ${USAGE_PROBE_COOLDOWN_MS / 3600_000} 小时）`
+      )
+    }
+    return base
+  }
+  if (probe.records.length <= base.records.length) {
+    probeDisabledUntil = Date.now() + USAGE_PROBE_COOLDOWN_MS
+    if (DEBUG_USAGE_PAGES) {
+      console.log(`[Monitor] usage probe limit=${USAGE_PROBE_PAGE_SIZE} → ${probe.records.length} 条（无收益，冷却）`)
+    }
+    return base
+  }
+  if (DEBUG_USAGE_PAGES) {
+    console.log(`[Monitor] usage probe limit=${USAGE_PROBE_PAGE_SIZE} → ${probe.records.length} 条（base ${base.records.length} 条）`)
+  }
+  return probe
+}
+
+/** 记录集合的时间范围（epoch 毫秒）：用于说明明细覆盖的时间跨度，而非只给条数 */
+function recordTimeRange(records: unknown[]): { fromTs?: number; toTs?: number } {
+  let from: number | undefined
+  let to: number | undefined
+  for (const raw of records) {
+    if (!isObj(raw)) continue
+    const sec = toEpochSec(raw.createdAt ?? raw.created_at)
+    if (sec === undefined) continue
+    const ms = sec * 1000
+    if (from === undefined || ms < from) from = ms
+    if (to === undefined || ms > to) to = ms
+  }
+  return {
+    ...(from !== undefined ? { fromTs: from } : {}),
+    ...(to !== undefined ? { toTs: to } : {})
+  }
+}
+
+export interface TotalFailureInput {
+  /** 是否至少有一个区块拿到了数据（sourcesAvailable 任一为 true） */
+  anySection: boolean
+  /** 明细首页 HTTP 状态（null = 网络异常） */
+  usageStatus: number | null
+  /** 必发端点的 HTTP 状态（null = 网络异常） */
+  requiredStatuses: Array<number | null>
+  /** 必发端点是否存在请求被 reject（网络/超时抛错） */
+  requiredRejected: boolean
+  /** 全部已发端点的 HTTP 状态 */
+  statuses: Array<number | null>
+}
+
+/**
+ * 判定「全端点失败」：所有区块都没数据时，区分"网络不通"与"服务端异常"。
+ * 返回 null = 不算失败（有区块成功，或确实是无数据的正常空态）。
+ *
+ * 为什么需要：区块级降级（sourcesAvailable）会把网络全挂表现成"成功但各区块为空"，
+ * 页面因此显示空数据而不是错误条，用户看不出是网络问题还是真没用量。
+ */
+export function classifyTotalFailure(input: TotalFailureInput): { code: 'network' | 'unknown'; error: string } | null {
+  if (input.anySection) return null
+
+  const requiredRejectedOrNull = input.requiredRejected || input.requiredStatuses.some((s) => s === null)
+  if (input.usageStatus === null || requiredRejectedOrNull) {
+    return { code: 'network', error: '云端请求全部失败（网络不通或超时），未取得任何数据' }
+  }
+
+  const http = input.statuses.filter((s): s is number => s !== null)
+  if (http.length > 0 && http.every((s) => s >= 400)) {
+    return { code: 'unknown', error: '云端接口全部返回异常状态，未取得任何数据' }
+  }
+  return null
+}
+
+/** 按模型聚合请求记录（请求数 / tokens / 成本，按成本降序、tokens 次之） */
+function aggregateRecords(records: unknown[]): NonNullable<CommandCodeUsage['models']> | undefined {
+  if (records.length === 0) return undefined
   const map = new Map<string, { model: string; requests: number; cost: number; tokensIn: number; tokensOut: number; tokensTotal: number }>()
-  for (const raw of arr) {
+  for (const raw of records) {
     const rec = parseUsageRecord(raw)
     if (!rec) continue
     const agg = map.get(rec.model) ?? { model: rec.model, requests: 0, cost: 0, tokensIn: 0, tokensOut: 0, tokensTotal: 0 }
@@ -331,7 +602,7 @@ function aggregateUsage(body: unknown): NonNullable<CommandCodeUsage['models']> 
     agg.tokensTotal += rec.tokensTotal
     map.set(rec.model, agg)
   }
-  const rows = Array.from(map.values()).sort((a, b) => b.cost - a.cost)
+  const rows = Array.from(map.values()).sort((a, b) => b.cost - a.cost || b.tokensTotal - a.tokensTotal)
   return rows.length > 0 ? rows : undefined
 }
 
@@ -456,7 +727,7 @@ export type RefreshResult =
 
 /**
  * 拉取某监控源的云端用量。
- * 并行请求 6 个端点，任一 401/403 → session_expired；
+ * 并行请求 5 个端点 + 明细分页（游标翻页，见 fetchUsageRecords），任一 401/403 → session_expired；
  * 网络异常 → network；其余 → unknown。
  */
 export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promise<RefreshResult> {
@@ -464,10 +735,12 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   if (!token) return { ok: false, code: 'not_authenticated' }
   const apiKey = getUsageCredential(usageApiKeyKey(source.id))
 
+  // 明细分页：游标必须逐页串行，故提前启动、与其余端点并行推进
+  const usageFetchPromise = fetchUsageRecords(token)
+
+  const hasApiKey = !!apiKey
   const requests: Array<Promise<CcResponse | null>> = [
     ccGet('/internal/usage/summary', { token }),
-    // 用量明细：Studio 侧按“请求记录”返回，limit 取最近 N 条再按模型聚合
-    ccGet('/internal/usage?limit=100', { token }),
     ccGet('/internal/billing/credits', { token }),
     apiKey ? ccGet('/alpha/billing/credits', { apiKey }) : Promise.resolve(null),
     // 订阅套餐（含到期时间）；withPending=true 让响应带计划变更过渡信息
@@ -476,8 +749,9 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   ]
 
   let results: Array<PromiseSettledResult<CcResponse | null>>
+  let usageFetch: UsageFetch
   try {
-    results = await Promise.allSettled(requests)
+    ;[results, usageFetch] = await Promise.all([Promise.allSettled(requests), usageFetchPromise])
   } catch (err) {
     return { ok: false, code: 'network', error: err instanceof Error ? err.message : String(err) }
   }
@@ -489,10 +763,13 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   const getStatus = (i: number): number | null => get(i)?.status ?? null
 
   console.log(
-    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} usage=${getStatus(1)} credits=${getStatus(2)} windows=${getStatus(3)} subscription=${getStatus(4)} subAlpha=${getStatus(5)}`
+    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}`
   )
 
-  // 401/403 → 会话失效
+  // 401/403 → 会话失效（含明细首页）
+  if (usageFetch.status === 401 || usageFetch.status === 403) {
+    return { ok: false, code: 'session_expired' }
+  }
   if (results.some((r) => r.status === 'fulfilled' && r.value && (r.value.status === 401 || r.value.status === 403))) {
     return { ok: false, code: 'session_expired' }
   }
@@ -500,15 +777,23 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   const sourcesAvailable = { summary: false, charts: false, credits: false, windows: false, subscription: false }
 
   const summaryRes = get(0)
-  const usageRes = get(1)
-  const creditsRes = get(2)
-  const windowsRes = get(3)
+  const creditsRes = get(1)
+  const windowsRes = get(2)
 
   const summary = summaryRes && summaryRes.status === 200 ? parseSummary(summaryRes.body) : undefined
   if (summary) sourcesAvailable.summary = true
 
-  const models = usageRes && usageRes.status === 200 ? aggregateUsage(usageRes.body) : undefined
+  const models = usageFetch.status === 200 ? aggregateRecords(usageFetch.records) : undefined
   if (models) sourcesAvailable.charts = true
+
+  // 累积落库（本地累计口径）：按记录 id 去重，可安全重复采集；失败不影响本次展示
+  if (usageFetch.status === 200 && usageFetch.records.length > 0) {
+    try {
+      persistUsageRecords(source.id, normalizeUsageRecords(usageFetch.records))
+    } catch (err) {
+      console.warn('[Monitor] 用量记录落库失败:', err)
+    }
+  }
 
   let credits: { monthlyCredits: number } | undefined
   let windows: CommandCodeUsage['windows'] | undefined
@@ -549,8 +834,8 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   }
 
   // ③ 订阅套餐（含到期时间）：Cookie 端点为主，API Key 端点兜底（主端点结构无法识别时）
-  const subRes = get(4)
-  const subAlphaRes = get(5)
+  const subRes = get(3)
+  const subAlphaRes = get(4)
   let subscription: CommandCodeSubscription | undefined
   const parsedSub =
     (subRes && subRes.status === 200 ? parseSubscription(subRes.body) : null) ??
@@ -560,6 +845,34 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     if (!parsedSub.none && parsedSub.subscription) subscription = parsedSub.subscription
   }
 
+  // 全端点失败判定：区块级降级会把"网络全挂"伪装成空数据，这里显式返回错误码让 UI 显示错误条
+  const requiredIdx = [0, 1, 3]
+  const activeIdx = hasApiKey ? [0, 1, 2, 3, 4] : [0, 1, 3]
+  const totalFailure = classifyTotalFailure({
+    anySection: Object.values(sourcesAvailable).some(Boolean),
+    usageStatus: usageFetch.status,
+    requiredStatuses: requiredIdx.map((i) => getStatus(i)),
+    requiredRejected: requiredIdx.some((i) => results[i]?.status === 'rejected'),
+    statuses: activeIdx.map((i) => getStatus(i))
+  })
+  if (totalFailure) {
+    console.warn(`[Monitor] refresh(${source.id}) 全端点失败 → ${totalFailure.code}: ${totalFailure.error}`)
+    return { ok: false, code: totalFailure.code, error: totalFailure.error }
+  }
+
+  // 明细覆盖信息：让 UI 能说明「基于多少条记录聚合、覆盖哪段时间、是否已拉全」
+  // 注意：不要把 `...(cond ? {x} : {})` 直接写进三元分支的对象字面量里（TS 解析器会报 ':' expected）
+  const coverageRange = usageFetch.status === 200 ? recordTimeRange(usageFetch.records) : {}
+  const coverageWindow = usageFetch.windowDays !== undefined ? { windowDays: usageFetch.windowDays } : {}
+  const modelsCoverage: CommandCodeUsage['modelsCoverage'] = models
+    ? {
+        records: usageFetch.records.length,
+        truncated: usageFetch.truncated,
+        ...coverageWindow,
+        ...coverageRange
+      }
+    : undefined
+
   const data: CommandCodeUsage = {
     fetchedAt: Date.now(),
     sourcesAvailable,
@@ -567,7 +880,8 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     ...(credits ? { credits } : {}),
     ...(windows ? { windows } : {}),
     ...(subscription ? { subscription } : {}),
-    ...(models ? { models } : {})
+    ...(models ? { models } : {}),
+    ...(modelsCoverage ? { modelsCoverage } : {})
   }
 
   return { ok: true, data }

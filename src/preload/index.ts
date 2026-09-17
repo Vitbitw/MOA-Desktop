@@ -57,6 +57,8 @@ contextBridge.exposeInMainWorld('moaAPI', {
   monitorLogout: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_LOGOUT, sourceId),
   monitorSetApiKey: (sourceId: string, apiKey: string) => ipcRenderer.invoke(IPC.MONITOR_SET_API_KEY, sourceId, apiKey),
   monitorRefresh: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_REFRESH, source),
+  monitorGetCumulative: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_GET_CUMULATIVE, sourceId),
+  monitorCollectorStatus: () => ipcRenderer.invoke(IPC.MONITOR_COLLECTOR_STATUS),
 
   // Pricing Probe
   probePricing: (sources: PricingProbeSource[], force?: boolean) => ipcRenderer.invoke(IPC.PRICING_PROBE_RUN, sources, force),

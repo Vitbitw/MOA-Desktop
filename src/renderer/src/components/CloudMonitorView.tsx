@@ -6,6 +6,7 @@ import { ExternalLink, KeyRound, Loader2, LogOut, RefreshCw } from 'lucide-react
 import type {
   CommandCodeSubscription,
   CommandCodeUsage,
+  CumulativeModelUsage,
   DeepSeekBalanceInfo,
   DeepSeekUsage,
   MimoUsage,
@@ -14,6 +15,15 @@ import type {
   RemoteUsageSource,
   UsageWindowInfo
 } from '../../../shared/types'
+
+/** 后台采集器状态（与主进程 getCollectorStatus 返回一致） */
+interface CollectorStatusInfo {
+  enabled: boolean
+  intervalMinutes: number
+  lastCollectedAt: number
+  lastError: string | null
+  running: boolean
+}
 
 // ─── 格式化辅助 ───
 
@@ -46,6 +56,18 @@ function barColor(pct: number): string {
   if (pct >= 90) return 'bg-destructive'
   if (pct >= 70) return 'bg-yellow-500'
   return 'bg-primary'
+}
+
+/** 记录时间跨度 → 「09-17 10:02 ~ 10:31」（跨天时带出结束日期） */
+function fmtSpan(fromTs?: number, toTs?: number): string | null {
+  if (fromTs === undefined || toTs === undefined) return null
+  const f = new Date(fromTs)
+  const t = new Date(toTs)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const dm = (d: Date): string => `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  const hm = (d: Date): string => `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const end = dm(f) === dm(t) ? hm(t) : `${dm(t)} ${hm(t)}`
+  return `${dm(f)} ${hm(f)} ~ ${end}`
 }
 
 // ─── 子组件：额度窗口卡 ───
@@ -117,7 +139,7 @@ function fmtDateUtc(sec: number): string {
   })
 }
 
-/** 订阅套餐区：套餐名 / 状态 / 到期时间（含剩余天数与排定取消提示） */
+/** 订阅套餐区：套餐名 / 「状态与到期时间」合并卡（含剩余天数与排定取消提示） */
 function SubscriptionSection({ subscription, available }: { subscription?: CommandCodeSubscription; available: boolean }) {
   if (!available && !subscription) {
     return (
@@ -145,7 +167,7 @@ function SubscriptionSection({ subscription, available }: { subscription?: Comma
 
   // 到期/续费状态行（优先级：已取消 > 已过期 > 排定取消 > 扣款失败 > 续费开启 > 信息不明）
   const endTs = subscription.currentPeriodEndTs
-  const endLabel = endTs !== undefined ? fmtDateUtc(endTs) : '—'
+  const endLabel = endTs !== undefined ? fmtDateUtc(endTs) : null
   const remainDays = endTs !== undefined ? Math.ceil((endTs * 1000 - Date.now()) / 86_400_000) : undefined
   const remainText = remainDays !== undefined && remainDays >= 0 ? `剩余 ${remainDays} 天` : null
   const dueSoon = remainDays !== undefined && remainDays >= 0 && remainDays <= 7
@@ -180,20 +202,25 @@ function SubscriptionSection({ subscription, available }: { subscription?: Comma
     : null
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <div className="rounded-lg border border-border bg-card px-4 py-3">
         <div className="text-xs text-muted-foreground mb-1">当前套餐</div>
         <div className="text-lg font-semibold text-foreground">{planName}</div>
         {subscription.planId && <div className="text-xs text-muted-foreground mt-0.5">{subscription.planId}</div>}
       </div>
+      {/* 状态 + 到期时间合并卡：状态为主、到期日期右对齐；下方依次为套餐变更与续费状态行 */}
       <div className="rounded-lg border border-border bg-card px-4 py-3">
-        <div className="text-xs text-muted-foreground mb-1">订阅状态</div>
-        <div className={`text-lg font-semibold ${statusTone}`}>{statusLabel}</div>
+        <div className="text-xs text-muted-foreground mb-1">订阅状态与到期</div>
+        <div className="flex items-baseline justify-between gap-3">
+          <span className={`text-lg font-semibold ${statusTone}`}>{statusLabel}</span>
+          {endLabel && (
+            <span className="text-sm tabular-nums text-foreground whitespace-nowrap">
+              <span className="text-xs text-muted-foreground">到期 </span>
+              {endLabel}
+            </span>
+          )}
+        </div>
         {phaseNote && <div className="text-xs text-muted-foreground mt-0.5">{phaseNote}</div>}
-      </div>
-      <div className="rounded-lg border border-border bg-card px-4 py-3">
-        <div className="text-xs text-muted-foreground mb-1">到期时间</div>
-        <div className="text-lg font-semibold tabular-nums text-foreground">{endLabel}</div>
         {endNote && <div className={`text-xs mt-0.5 ${endTone}`}>{endNote}</div>}
       </div>
     </div>
@@ -217,6 +244,10 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
   const [showApiKeyInput, setShowApiKeyInput] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
+  // 本地累计（云端列表对部分套餐只给最近 100 条，累计口径让数字只增不减）
+  const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(null)
+  const [collector, setCollector] = useState<CollectorStatusInfo | null>(null)
+  const [detailMode, setDetailMode] = useState<'cumulative' | 'window'>('cumulative')
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数（拿到过期的 loading/status）
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -270,10 +301,42 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     }
   }
 
+  // 本地累计 + 采集器状态（累计口径的数据来源）
+  const loadCumulative = async () => {
+    if (!sourceId) return
+    try {
+      const [cumRes, stRes] = await Promise.all([
+        window.moaAPI.monitorGetCumulative(sourceId),
+        window.moaAPI.monitorCollectorStatus()
+      ])
+      if (cumRes.success && cumRes.data) setCumulative(cumRes.data)
+      if (stRes.success && stRes.data) setCollector(stRes.data)
+    } catch {
+      // 累计读取失败不阻塞页面（首次为空属正常）
+    }
+  }
+
   // 挂载：读取状态；已登录则拉一次数据
   useEffect(() => {
     if (!sourceId) return
     loadStatus()
+    void loadCumulative()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId])
+
+  // 每次刷新成功后同步累计数据（lastFetchedAt 变化 = 刷新完成）
+  useEffect(() => {
+    if (lastFetchedAt) void loadCumulative()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastFetchedAt])
+
+  // 页面打开期间轮询本地累计：后台采集写入的新记录自动出现，否则数字看着像"不动"
+  useEffect(() => {
+    if (!sourceId) return
+    const timer = setInterval(() => {
+      void loadCumulative()
+    }, 60_000)
+    return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId])
 
@@ -349,6 +412,26 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const summary = usage?.summary
   const credits = usage?.credits
   const models = usage?.models ?? []
+  const coverage = usage?.modelsCoverage
+  // 明细由请求记录聚合：达到拉取上限或汇总请求数多于已聚合记录数 → 明细未覆盖全部请求
+  const coverageIncomplete =
+    !!coverage && (coverage.truncated || (summary !== undefined && coverage.records < summary.totalCount))
+  const coverageSpan = fmtSpan(coverage?.fromTs, coverage?.toTs)
+  // 明细口径：本地累计（只增不减，默认） / 云端窗口（服务端只给最近 100 条）
+  const cumulativeModels = cumulative?.models ?? []
+  const shownModels = detailMode === 'cumulative' ? cumulativeModels : models
+  const cumulativeSinceLabel = cumulative?.sinceTs !== undefined ? fmtSpan(cumulative.sinceTs, cumulative.sinceTs) : null
+  const collectMinutes = settings.monitoring?.collectIntervalMinutes ?? 15
+  // 采集器是否还活着：持久化的最近采集时间超过 2×间隔（且至少 10 分钟）即视为可能停止
+  const collectorState = cumulative?.collectorState
+  const staleThresholdMs = Math.max(2 * (collector?.intervalMinutes ?? collectMinutes) * 60_000, 10 * 60_000)
+  const collectorStale =
+    collectorState?.lastRunAt !== undefined && collectorState.lastRunAt > 0 && Date.now() - collectorState.lastRunAt > staleThresholdMs
+  const setCollectInterval = async (minutes: number): Promise<void> => {
+    const base = settings.monitoring ?? { sources: [], autoRefreshMinutes: 10 }
+    await useSettingsStore.getState().updateSetting('monitoring', { ...base, collectIntervalMinutes: minutes })
+    void loadCumulative()
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -536,9 +619,109 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
             </div>
           </section>
 
-          {/* 模型明细 */}
+          {/* 模型明细：默认本地累计口径（云端列表对部分套餐只给最近 100 条，滚动窗口看起来"不涨"） */}
           <section>
-            <h3 className="text-xs font-semibold text-muted-foreground mb-2">模型明细</h3>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-2">
+              <h3 className="text-xs font-semibold text-muted-foreground">模型明细</h3>
+              <div className="flex items-center gap-1">
+                {(
+                  [
+                    ['cumulative', '本地累计'],
+                    ['window', '云端窗口']
+                  ] as const
+                ).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    onClick={() => setDetailMode(mode)}
+                    className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                      detailMode === mode
+                        ? 'border-primary/50 bg-primary/10 text-foreground'
+                        : 'border-border text-muted-foreground hover:bg-accent'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <label className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={collectMinutes > 0}
+                  onChange={(e) => void setCollectInterval(e.target.checked ? 15 : 0)}
+                  className="accent-primary"
+                />
+                后台采集
+                <select
+                  value={collectMinutes > 0 ? collectMinutes : 15}
+                  disabled={collectMinutes <= 0}
+                  onChange={(e) => void setCollectInterval(Number(e.target.value))}
+                  className="rounded border border-input bg-background px-1 py-0.5 text-xs text-foreground disabled:opacity-50"
+                >
+                  {[5, 10, 15, 30, 60].map((m) => (
+                    <option key={m} value={m}>
+                      {m} 分钟
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            {/* 口径说明行 */}
+            {detailMode === 'cumulative' ? (
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mb-2 text-xs text-muted-foreground">
+                {cumulative && cumulative.records > 0 ? (
+                  <>
+                    <span>本地累计 {cumulative.records.toLocaleString()} 条记录</span>
+                    {cumulativeSinceLabel && <span>· 自 {cumulativeSinceLabel} 起</span>}
+                    {cumulative.toTs !== undefined && <span>· 最近记录 {fmtSpan(cumulative.toTs, cumulative.toTs)}</span>}
+                    {collectorState && collectorState.lastRunAt !== undefined && (
+                      <span className={collectorStale ? 'text-yellow-600' : undefined}>
+                        · 最近采集 {fmtTime(collectorState.lastRunAt)}（已 {collectorState.runs} 轮
+                        {collectorState.runs > collectorState.okRuns ? ` · 失败 ${collectorState.runs - collectorState.okRuns}` : ''}）
+                      </span>
+                    )}
+                    {collectorStale && <span className="text-yellow-600">· 采集可能已停止</span>}
+                    {collectorState === undefined && cumulative.lastCollectedAt !== undefined && (
+                      <span>· 最近采集 {fmtTime(cumulative.lastCollectedAt)}</span>
+                    )}
+                    {collector && !collector.enabled && (
+                      <span className="text-yellow-600">· 后台采集已关闭（仅打开本页时累积）</span>
+                    )}
+                    {collector?.enabled && collector.intervalMinutes > 0 && (
+                      <span>· 每 {collector.intervalMinutes} 分钟自动采集</span>
+                    )}
+                    {collector?.lastError && <span className="text-yellow-600">· 最近一次采集失败（{collector.lastError}）</span>}
+                    <span
+                      className="cursor-help"
+                      title="本地累计由每次采集到的服务端记录按 id 去重累加；两次采集之间的突发（>100 条）或界面未运行时的用量会漏采，故仅代表“已观测到的用量”"
+                    >
+                      · 口径说明
+                    </span>
+                  </>
+                ) : (
+                  <span>暂无本地累计数据（打开本页或后台采集后会逐条累积）</span>
+                )}
+              </div>
+            ) : (
+              <div className="mb-2">
+                {coverage && (
+                  <span
+                    className={`text-xs ${coverageIncomplete ? 'text-yellow-600' : 'text-muted-foreground'}`}
+                    title={
+                      coverageIncomplete
+                        ? '明细由请求记录聚合，仍有更早的记录未纳入（服务端记录保留窗口有限或已达单次拉取上限）；汇总卡片来自服务端口径，故可能与明细合计不一致'
+                        : '明细由服务端请求记录聚合；汇总卡片来自服务端汇总接口'
+                    }
+                  >
+                    基于 {coverage.records.toLocaleString()} 条请求记录聚合
+                    {coverage.windowDays !== undefined ? ` · 服务端保留窗口 ${coverage.windowDays} 天` : ''}
+                    {coverageSpan ? ` · 覆盖 ${coverageSpan}` : ''}
+                    {summary !== undefined ? ` · 汇总共 ${summary.totalCount.toLocaleString()} 条请求` : ''}
+                    {coverageIncomplete ? '（更早记录未纳入）' : ''}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="rounded-lg border border-border bg-card overflow-hidden">
               <table className="w-full text-sm">
                 <thead>
@@ -552,14 +735,18 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {models.length === 0 ? (
+                  {shownModels.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="px-4 py-12 text-center text-sm text-muted-foreground">
-                        {summary ? '暂无模型明细数据' : '暂无用量数据'}
+                        {detailMode === 'cumulative'
+                          ? '暂无本地累计数据（打开本页或后台采集后会逐条累积）'
+                          : summary
+                            ? '暂无模型明细数据'
+                            : '暂无用量数据'}
                       </td>
                     </tr>
                   ) : (
-                    models.map((m) => (
+                    shownModels.map((m) => (
                       <tr key={m.model} className="border-b border-border/50 last:border-b-0 hover:bg-accent/30">
                         <td className="px-4 py-2 text-foreground">{m.model}</td>
                         <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.requests)}</td>

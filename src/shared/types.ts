@@ -202,6 +202,8 @@ export interface MonitoringSettings {
   sources: RemoteUsageSource[]
   /** 自动刷新间隔（分钟），0 表示关闭 */
   autoRefreshMinutes: number
+  /** Command Code 后台采集间隔（分钟）：应用运行期间累积用量记录，0 表示关闭（字段缺失时按默认 15 处理） */
+  collectIntervalMinutes?: number
 }
 
 /** 滚动窗口额度（5小时/7天），字段可能缺失 */
@@ -253,12 +255,65 @@ export interface CommandCodeUsage {
     tokensOut: number
     tokensTotal: number
   }>
+  /** 模型明细的数据覆盖情况（明细由 /internal/usage 请求记录聚合而来，见 coverage.records） */
+  modelsCoverage?: {
+    /** 已聚合的请求记录条数 */
+    records: number
+    /** true = 仍有更早的记录未纳入（页数/耗时上限，或后续页请求失败） */
+    truncated: boolean
+    /** 服务端记录保留窗口天数（响应 window.days，未知时省略） */
+    windowDays?: number
+    /** 已聚合记录的最早时间（epoch 毫秒）：说明明细覆盖的时间跨度起点 */
+    fromTs?: number
+    /** 已聚合记录的最新时间（epoch 毫秒） */
+    toTs?: number
+  }
 }
 
 /** 监控源当前认证状态 */
 export interface MonitorStatus {
   loggedIn: boolean
   hasApiKey: boolean
+}
+
+/** 采集器持久化运行状态（cc_collector_state；"采集成功但没有新记录"时也能证明采集器在跑） */
+export interface CollectorRunState {
+  /** 最近一次采集时间（epoch 毫秒） */
+  lastRunAt?: number
+  /** 最近一次成功采集时间（epoch 毫秒） */
+  lastOkAt?: number
+  /** 最近一次失败原因（成功时清空） */
+  lastError?: string
+  /** 累计采集轮数 */
+  runs: number
+  /** 其中成功的轮数 */
+  okRuns: number
+  /** 累计新增记录条数 */
+  totalInserted: number
+}
+
+/** 本地累计的按模型用量（Command Code；由多次采集到的记录去重累积而来） */
+export interface CumulativeModelUsage {
+  models: Array<{
+    model: string
+    requests: number
+    cost: number
+    tokensIn: number
+    tokensOut: number
+    tokensTotal: number
+  }>
+  /** 累计覆盖的记录条数（去重后） */
+  records: number
+  /** 累计记录的最早时间（epoch 毫秒） */
+  fromTs?: number
+  /** 累计记录的最新时间（epoch 毫秒） */
+  toTs?: number
+  /** 本地首次采集时间（epoch 毫秒）：说明"累计自何时起" */
+  sinceTs?: number
+  /** 最近一次采集时间（epoch 毫秒） */
+  lastCollectedAt?: number
+  /** 采集器运行状态（是否还在跑、已跑多少轮、失败几次） */
+  collectorState?: CollectorRunState
 }
 
 /** monitor:refresh 失败时的错误码 */
