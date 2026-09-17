@@ -2,6 +2,7 @@ import express, { type Express, type Request, type Response, type NextFunction }
 import cors, { type CorsOptions } from 'cors'
 import crypto from 'node:crypto'
 import type { Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { getAllProviders } from '../providers/providerManager'
 import { getMoaConfig } from '../moa/moaConfig'
 import { executeMoA } from '../moa/moaEngine'
@@ -12,6 +13,8 @@ import type { Provider, SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
 
 let server: Server | null = null
+/** 当前 server 对应的设置值（host/port），applyGatewayServer 幂等判断用 */
+let runningConfig: { host: string; port: number } | null = null
 
 /** 上游转发请求的超时预算（30 分钟）。带信号调用可避免 fetchProxy 的全局 timeoutMs
  * 误伤非流式慢速上游（模型思考 >15s 时首字节迟迟不回）；30 分钟为兜底上限。 */
@@ -119,11 +122,12 @@ interface GatewayLogEntry {
   error?: string | null
 }
 
-/** 写入一条网关请求日志（source='gateway'） */
+/** 写入一条网关请求日志（source='gateway'）；记录模式 'stats' 仅落汇总计数，不落模型级明细 */
 function logGatewayRequest(entry: GatewayLogEntry): void {
   try {
     const entries = buildUsageEntries((entry.models || []).map((m) => ({ ...m, cost: 0 })))
     const totals = sumUsage(entries)
+    const storedModels = readAppSettings().gateway.recording === 'full' ? entries : []
     getDatabase().exec(
       `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail, models)
        VALUES (?, ?, '127.0.0.1', 'gateway', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -138,7 +142,7 @@ function logGatewayRequest(entry: GatewayLogEntry): void {
         Math.round(entry.durationMs),
         entry.success ? 1 : 0,
         entry.error || null,
-        JSON.stringify(entries)
+        JSON.stringify(storedModels)
       ]
     )
   } catch (err) {
@@ -249,7 +253,15 @@ export function createGatewayServer(): Express {
 
   // ── Chat completions ──
   app.post('/v1/chat/completions', withConcurrency(async (req: Request, res: Response) => {
-    const requestedModel: string | undefined = req.body?.model
+    const config = getMoaConfig()
+    // 模型决策（与聊天侧直连约定一致）：请求模型命中 provider → 用之；否则回落 MoA 菜单配置的
+    // 首个子模型（命中时）；仍不命中则由 routeForRequest 回落第一个可用 provider 的首个模型
+    const bodyModel: string | undefined = req.body?.model
+    const moaModel = config.subModels[0]?.modelId
+    const requestedModel =
+      bodyModel && findProviderForModel(bodyModel) ? bodyModel
+        : moaModel && findProviderForModel(moaModel) ? moaModel
+          : bodyModel
     // 智能路由：请求的 model 命中某 provider（含本地引擎）则路由之，否则回落第一个可用
     const provider = routeForRequest(requestedModel)
     if (!provider) {
@@ -259,7 +271,6 @@ export function createGatewayServer(): Express {
       return
     }
 
-    const config = getMoaConfig()
     const { messages, stream } = req.body
 
     // ── Direct mode ──
@@ -314,6 +325,7 @@ export function createGatewayServer(): Express {
           })
           const decoder = new TextDecoder()
           let buffer = ''
+          let sawDone = false
           while (true) {
             if (clientClosed) break
             const { done, value } = await reader.read()
@@ -324,13 +336,19 @@ export function createGatewayServer(): Express {
             for (const line of lines) {
               // read 返回后到 write 前客户端可能已断开,再 write 到销毁的响应会触发 error
               if (clientClosed) break
+              if (line.trim() === 'data: [DONE]') sawDone = true
               // 逐行透传（保留 event:/id: 等非 data 行；data 行的帧分隔由原有换行保留）
               res.write(line + '\n')
             }
           }
           if (!clientClosed) {
-            if (buffer) res.write(buffer + '\n\n')
-            res.write('data: [DONE]\n\n')
+            if (buffer) {
+              // 收尾残片（上游无尾换行时留在 buffer）里也可能带 [DONE]
+              if (buffer.trim() === 'data: [DONE]') sawDone = true
+              res.write(buffer + '\n\n')
+            }
+            // 上游已发过 [DONE] 则不再补写，避免重复结束帧
+            if (!sawDone) res.write('data: [DONE]\n\n')
             res.end()
           }
           // 流式不做 token 级解析，仅记录请求计数与成功状态
@@ -508,13 +526,18 @@ export function createGatewayServer(): Express {
           finish_reason: 'stop'
         }],
         usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-        ...(stream ? {} : { x_moa_sub_models: result.subOutputs.map(o => ({ modelId: o.modelId, status: o.status, durationMs: o.durationMs })) })
+        // 透明模式 extended：附子模型执行明细（x_moa_sub_models）；default 仅标准字段
+        ...(readAppSettings().gateway.transparency === 'extended'
+          ? { x_moa_sub_models: result.subOutputs.map((o) => ({ modelId: o.modelId, status: o.status, durationMs: o.durationMs })) }
+          : {})
       })
     }
   }))
 
   // ── Non-completions passthrough ──
   ;['/v1/embeddings', '/v1/images/generations', '/v1/audio/transcriptions', '/v1/audio/speech', '/v1/moderations'].forEach((endpoint) => {
+    // baseUrl 已含 /v1 前缀（与 chat 路径同一约定），上游路径需去掉端点的 /v1，避免拼出 /v1/v1/*
+    const upstreamPath = endpoint.replace(/^\/v1/, '')
     app.post(endpoint, withConcurrency(async (req: Request, res: Response) => {
       const provider = firstUsableProvider()
       const reqStart = Date.now()
@@ -533,7 +556,7 @@ export function createGatewayServer(): Express {
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
-        const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}${endpoint}`, {
+        const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}${upstreamPath}`, {
           method: 'POST',
           headers,
           body: JSON.stringify(req.body),
@@ -592,4 +615,27 @@ export function startGatewayServer(app: Express, port: number, host: string): Pr
 
 export function stopGatewayServer(): void {
   if (server) { server.close(); server = null; console.log('[Gateway] stopped') }
+  runningConfig = null
+}
+
+/**
+ * 按当前设置应用网关运行态（settings.gateway.enabled/host/port 变更即时生效）：
+ * - enabled=false → 停止（未运行则无操作）；
+ * - enabled=true 且 host/port 未变化 → 保持现状（幂等，不重启）；
+ * - host/port 变化 → 停止后按新配置重启。
+ * 返回实际监听端口（未启用时 null）。
+ */
+export async function applyGatewayServer(): Promise<number | null> {
+  const { enabled, host, port } = readAppSettings().gateway
+  if (!enabled) {
+    stopGatewayServer()
+    return null
+  }
+  if (server && runningConfig && runningConfig.host === host && runningConfig.port === port) {
+    return (server.address() as AddressInfo | null)?.port ?? port
+  }
+  stopGatewayServer()
+  const actualPort = await startGatewayServer(createGatewayServer(), port, host)
+  runningConfig = { host, port }
+  return actualPort
 }

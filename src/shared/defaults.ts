@@ -113,7 +113,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
     host: DEFAULT_HOST,
     port: DEFAULT_PORT,
     maxConcurrency: DEFAULT_MAX_CONCURRENCY,
-    defaultModelId: '',
     authEnabled: false,
     gatewayKey: '',
     recording: 'full',

@@ -9,7 +9,7 @@ import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, Pr
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { MOA_ROLE_TEMPLATES, getRoleTemplate } from '../../../shared/moaRoles'
 
-type SettingsSection = 'moa' | 'providers' | 'gateway' | 'network' | 'display' | 'pricing' | 'title'
+type SettingsSection = 'moa' | 'providers' | 'network' | 'display' | 'pricing' | 'title'
 
 export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const { settings, loaded, loadSettings, updateSetting } = useSettingsStore()
@@ -30,7 +30,6 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const sections: { key: SettingsSection; label: string }[] = [
     { key: 'moa', label: 'MoA' },
     { key: 'providers', label: '厂商' },
-    { key: 'gateway', label: 'MoA 网关' },
     { key: 'network', label: '网络代理' },
     { key: 'title', label: '对话标题' },
     { key: 'display', label: '显示设置' },
@@ -74,103 +73,6 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
 
       {/* Providers Section */}
       {activeSection === 'providers' && <ProvidersSection />}
-
-      {/* MoA Gateway Section */}
-      {activeSection === 'gateway' && (
-        <div className="space-y-5 max-w-xl">
-          <SettingRow label="启用 MoA 网关" hint="把 MoA 聚合能力开放给第三方软件（Cline / Cursor / Cherry Studio 等）">
-            <ToggleSwitch
-              checked={settings.gateway.enabled}
-              onChange={(v) => updateSetting('gateway', { ...settings.gateway, enabled: v })}
-            />
-          </SettingRow>
-
-          {settings.gateway.enabled && (
-            <>
-              <SettingRow label="监听地址" hint="默认 127.0.0.1">
-                <input
-                  type="text"
-                  value={settings.gateway.host}
-                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, host: e.target.value })}
-                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
-                />
-              </SettingRow>
-
-              <SettingRow label="监听端口" hint="默认 28888">
-                <input
-                  type="number"
-                  min={1}
-                  max={65535}
-                  value={settings.gateway.port}
-                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, port: Number(e.target.value) || 28888 })}
-                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
-                />
-              </SettingRow>
-
-              <SettingRow label="最大并发" hint="同时处理的最大请求数">
-                <input
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={settings.gateway.maxConcurrency}
-                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, maxConcurrency: Number(e.target.value) || 3 })}
-                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
-                />
-              </SettingRow>
-
-              <SettingRow label="默认模型" hint="网关未指定模型时的默认值">
-                <input
-                  type="text"
-                  value={settings.gateway.defaultModelId}
-                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, defaultModelId: e.target.value })}
-                  placeholder="gpt-4o"
-                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground"
-                />
-              </SettingRow>
-
-              <SettingRow label="启用认证" hint="为代理请求添加 API Key 鉴权">
-                <ToggleSwitch
-                  checked={settings.gateway.authEnabled}
-                  onChange={(v) => updateSetting('gateway', { ...settings.gateway, authEnabled: v })}
-                />
-              </SettingRow>
-
-              {settings.gateway.authEnabled && (
-                <SettingRow label="网关密钥" hint="第三方软件调用网关时的鉴权 Key">
-                  <input
-                    type="password"
-                    value={settings.gateway.gatewayKey}
-                    onChange={(e) => updateSetting('gateway', { ...settings.gateway, gatewayKey: e.target.value })}
-                    className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
-                  />
-                </SettingRow>
-              )}
-
-              <SettingRow label="记录模式" hint="网关请求的日志记录级别">
-                <select
-                  value={settings.gateway.recording}
-                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, recording: e.target.value as 'full' | 'stats' })}
-                  className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
-                >
-                  <option value="full">完整记录</option>
-                  <option value="stats">仅统计</option>
-                </select>
-              </SettingRow>
-
-              <SettingRow label="透明模式" hint="网关是否透传模型输出">
-                <select
-                  value={settings.gateway.transparency}
-                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, transparency: e.target.value as 'default' | 'extended' })}
-                  className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
-                >
-                  <option value="default">标准</option>
-                  <option value="extended">扩展</option>
-                </select>
-              </SettingRow>
-            </>
-          )}
-        </div>
-      )}
 
       {/* Network Proxy Section */}
       {activeSection === 'network' && (
@@ -519,6 +421,107 @@ function MoASection() {
         <Save className="w-3.5 h-3.5" />
         {saving ? '保存中...' : '保存配置'}
       </button>
+
+      <GatewaySection />
+    </div>
+  )
+}
+
+// ── MoA Gateway Section（并入 MoA 面板：对外网关配置） ──
+
+function GatewaySection() {
+  const { settings, updateSetting } = useSettingsStore()
+  return (
+    <div className="border-t border-border pt-5 space-y-4">
+      <div>
+        <label className="text-sm font-medium text-foreground block">MoA 网关（对外暴露）</label>
+        <p className="text-xs text-muted-foreground mt-1">
+          把 MoA 能力以 OpenAI 兼容接口开放给第三方软件（Cline / Cursor / Cherry Studio 等）；
+          缺省模型遵循上方 MoA 配置的首个子模型。
+        </p>
+      </div>
+
+      <SettingRow label="启用 MoA 网关" hint="关闭后立即停止监听">
+        <ToggleSwitch
+          checked={settings.gateway.enabled}
+          onChange={(v) => updateSetting('gateway', { ...settings.gateway, enabled: v })}
+        />
+      </SettingRow>
+
+      {settings.gateway.enabled && (
+        <>
+          <SettingRow label="监听地址" hint="默认 127.0.0.1">
+            <input
+              type="text"
+              value={settings.gateway.host}
+              onChange={(e) => updateSetting('gateway', { ...settings.gateway, host: e.target.value })}
+              className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            />
+          </SettingRow>
+
+          <SettingRow label="监听端口" hint="默认 28888">
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={settings.gateway.port}
+              onChange={(e) => updateSetting('gateway', { ...settings.gateway, port: Number(e.target.value) || 28888 })}
+              className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            />
+          </SettingRow>
+
+          <SettingRow label="最大并发" hint="同时处理的最大请求数">
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={settings.gateway.maxConcurrency}
+              onChange={(e) => updateSetting('gateway', { ...settings.gateway, maxConcurrency: Number(e.target.value) || 3 })}
+              className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            />
+          </SettingRow>
+
+          <SettingRow label="启用认证" hint="为网关请求添加 API Key 鉴权">
+            <ToggleSwitch
+              checked={settings.gateway.authEnabled}
+              onChange={(v) => updateSetting('gateway', { ...settings.gateway, authEnabled: v })}
+            />
+          </SettingRow>
+
+          {settings.gateway.authEnabled && (
+            <SettingRow label="网关密钥" hint="第三方软件调用网关时的鉴权 Key">
+              <input
+                type="password"
+                value={settings.gateway.gatewayKey}
+                onChange={(e) => updateSetting('gateway', { ...settings.gateway, gatewayKey: e.target.value })}
+                className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+              />
+            </SettingRow>
+          )}
+
+          <SettingRow label="记录模式" hint="网关请求的日志记录级别">
+            <select
+              value={settings.gateway.recording}
+              onChange={(e) => updateSetting('gateway', { ...settings.gateway, recording: e.target.value as 'full' | 'stats' })}
+              className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            >
+              <option value="full">完整记录</option>
+              <option value="stats">仅统计</option>
+            </select>
+          </SettingRow>
+
+          <SettingRow label="透明模式" hint="网关响应是否附模型执行明细">
+            <select
+              value={settings.gateway.transparency}
+              onChange={(e) => updateSetting('gateway', { ...settings.gateway, transparency: e.target.value as 'default' | 'extended' })}
+              className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            >
+              <option value="default">标准</option>
+              <option value="extended">扩展</option>
+            </select>
+          </SettingRow>
+        </>
+      )}
     </div>
   )
 }

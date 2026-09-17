@@ -59,19 +59,45 @@ function migrateUnifiedAutoRefresh(raw: Record<string, unknown>): Record<string,
   return { ...raw, monitoring: next }
 }
 
+/** 把配置块内旧字段名 proxyKey 重命名为 gatewayKey（无 proxyKey 或非对象时原样返回同引用）。 */
+function renameLegacyGatewayKey(block: unknown): unknown {
+  if (!block || typeof block !== 'object' || !('proxyKey' in block)) return block
+  const { proxyKey, ...rest } = block as Record<string, unknown>
+  if ('gatewayKey' in rest) return rest // 新字段已存在：只丢弃旧字段
+  return { ...rest, gatewayKey: proxyKey }
+}
+
 /**
- * 一次性迁移：功能更名 proxy → gateway（MoA 网关），旧键整块搬到新键。
- * 返回迁移后的 raw（无旧键返回 null）：
- * - 仅旧键存在 → 原样搬走；新旧键同时存在（理论不会发生）→ 以新键为准，仅删旧键。
+ * 一次性迁移：功能更名 proxy → gateway（MoA 网关）。
+ * 返回迁移后的 raw（无需变更返回 null）：
+ * - 旧键整块搬走，块内 proxyKey 重命名为 gatewayKey（旧版字段名）；
+ * - 新旧键同时存在（理论不会发生）→ 以新键为准，仅删旧键；
+ * - 已落库的中间态（gateway 块内残留 proxyKey，旧版重命名遗漏的产物）一并清理。
  * 迁移结果必须落库（见 readMigratedRaw）：否则 raw 里旧键会一直残留。
  */
 function migrateProxyToGateway(raw: Record<string, unknown>): Record<string, unknown> | null {
-  if (!('proxy' in raw)) return null
-  const next: Record<string, unknown> = { ...raw }
-  const legacy = raw.proxy
-  delete next.proxy
-  if (!('gateway' in raw)) next.gateway = legacy
-  return next
+  let next: Record<string, unknown> = raw
+  if ('proxy' in raw) {
+    next = { ...raw }
+    const legacy = raw.proxy
+    delete next.proxy
+    if (!('gateway' in raw)) next.gateway = renameLegacyGatewayKey(legacy)
+  }
+  const renamed = renameLegacyGatewayKey(next.gateway)
+  if (renamed !== next.gateway) {
+    if (next === raw) next = { ...raw }
+    next.gateway = renamed
+  }
+  return next === raw ? null : next
+}
+
+/** 一次性迁移：删除已废弃的 gateway.defaultModelId（网关闭省模型改为遵循 MoA 菜单配置的首个子模型）。 */
+function dropDeprecatedGatewayFields(raw: Record<string, unknown>): Record<string, unknown> | null {
+  const gw = raw.gateway
+  if (!gw || typeof gw !== 'object' || !('defaultModelId' in gw)) return null
+  const next = { ...gw }
+  delete next.defaultModelId
+  return { ...raw, gateway: next }
 }
 
 /**
@@ -113,6 +139,8 @@ function readMigratedRaw(): Record<string, unknown> {
   if (unified) { raw = unified; dirty = true }
   const renamed = migrateProxyToGateway(raw)
   if (renamed) { raw = renamed; dirty = true }
+  const dropped = dropDeprecatedGatewayFields(raw)
+  if (dropped) { raw = dropped; dirty = true }
   if (dirty) {
     try {
       writeRaw(raw)

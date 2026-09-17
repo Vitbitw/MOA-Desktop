@@ -112,7 +112,6 @@ export interface AppSettings {
     host: string
     port: number
     maxConcurrency: number
-    defaultModelId: string
     authEnabled: boolean
     gatewayKey: string
     recording: 'full' | 'stats'

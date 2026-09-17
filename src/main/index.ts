@@ -7,7 +7,7 @@ import { handleIpc, handleIpcRaw } from './ipc/handle'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
 import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
-import { createGatewayServer, startGatewayServer, stopGatewayServer } from './gateway/server'
+import { applyGatewayServer, stopGatewayServer } from './gateway/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
@@ -294,6 +294,13 @@ function registerIpcHandlers() {
     const current = updateRawAppSettings((raw) => {
       raw[key] = value
     })
+
+    // ── MoA 网关设置变更 → 运行态即时生效（enabled/host/port）──
+    if (key === 'gateway') {
+      applyGatewayServer().catch((err: unknown) => {
+        console.error('[Main] Gateway apply failed:', err instanceof Error ? err.message : String(err))
+      })
+    }
 
     // ── 网络代理变更 → 清除代理缓存 ──
     if (key === 'network') {
@@ -839,12 +846,12 @@ app.whenReady().then(async () => {
   })
   maybeCreateUsageOverlay()
 
-  // Start MoA gateway server (auto-finds next available port if DEFAULT_PORT is busy)
-  const gatewayApp = createGatewayServer()
+  // Start MoA gateway server（仅当设置启用；端口占用时自动顺延）
   try {
-    const actualPort = await startGatewayServer(gatewayApp, DEFAULT_PORT, DEFAULT_HOST)
-    if (actualPort !== DEFAULT_PORT) {
-      console.log(`[Main] Gateway running on port ${actualPort} (requested ${DEFAULT_PORT})`)
+    const actualPort = await applyGatewayServer()
+    if (actualPort !== null) {
+      const { port } = readAppSettings().gateway
+      console.log(`[Main] Gateway running on port ${actualPort}${actualPort !== port ? ` (requested ${port})` : ''}`)
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
