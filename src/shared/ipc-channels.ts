@@ -58,7 +58,7 @@ export const IPC_EVENT = {
 
   // Menu events
   MENU_NEW_CONVERSATION: 'menu:newConversation',
-  MENU_COPY_PROXY_URL: 'menu:copyProxyUrl',
+  MENU_COPY_GATEWAY_URL: 'menu:copyGatewayUrl',
   MENU_OPEN_SETTINGS: 'menu:openSettings',
 
   // 用量悬浮窗右键「打开用量页」→ 主窗口切换到用量视图

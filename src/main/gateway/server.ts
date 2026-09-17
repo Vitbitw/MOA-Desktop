@@ -23,9 +23,9 @@ let activeRequests = 0
 let queueLength = 0
 const waiters: Array<() => void> = []
 
-/** 读取代理最大并发数（settings.proxy.maxConcurrency；UI 写入保证 ≥1）。 */
+/** 读取网关最大并发数（settings.gateway.maxConcurrency；UI 写入保证 ≥1）。 */
 function getMaxConcurrency(): number {
-  return readAppSettings().proxy.maxConcurrency
+  return readAppSettings().gateway.maxConcurrency
 }
 
 /** 获取并发许可；超限则进入 FIFO 等待队列。 */
@@ -51,17 +51,17 @@ function release(): void {
 }
 
 // ── 代理鉴权 ──
-// settings.proxy.authEnabled + proxyKey 均配置时，/v1/* 请求必须携带相同密钥
+// settings.gateway.authEnabled + gatewayKey 均配置时，/v1/* 请求必须携带相同密钥
 // （请求头 x-api-key 或 Authorization: Bearer <key>）。
-function getProxyAuth(): { enabled: boolean; key: string } {
-  const { authEnabled, proxyKey } = readAppSettings().proxy
-  if (authEnabled && proxyKey) return { enabled: true, key: String(proxyKey) }
+function getGatewayAuth(): { enabled: boolean; key: string } {
+  const { authEnabled, gatewayKey } = readAppSettings().gateway
+  if (authEnabled && gatewayKey) return { enabled: true, key: String(gatewayKey) }
   return { enabled: false, key: '' }
 }
 
-/** 代理鉴权中间件（仅挂载在 /v1/* 上；/health 除外） */
-function proxyAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
-  const auth = getProxyAuth()
+/** 网关鉴权中间件（仅挂载在 /v1/* 上；/health 除外） */
+function gatewayAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const auth = getGatewayAuth()
   if (!auth.enabled) { next(); return }
   const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : ''
   const provided =
@@ -73,9 +73,9 @@ function proxyAuthMiddleware(req: Request, res: Response, next: NextFunction): v
   })
 }
 
-// ── 代理请求记账 ──
-// 此前代理流量从不写入 request_logs，用量统计（今日/总计/悬浮窗）只覆盖 App 内聊天，
-// 第三方客户端经本地代理产生的费用完全不可见。这里统一记录（source='proxy'）。
+// ── 网关请求记账 ──
+// 此前网关流量从不写入 request_logs，用量统计（今日/总计/悬浮窗）只覆盖 App 内聊天，
+// 第三方客户端经本地网关产生的费用完全不可见。这里统一记录（source='gateway'）。
 
 /** 组装 moa 结果的用量明细（成功子模型 + 聚合器），供 request_logs.models 使用 */
 function usageInputsFromMoa(result: {
@@ -108,7 +108,7 @@ function usageInputsFromMoa(result: {
   return inputs
 }
 
-interface ProxyLogEntry {
+interface GatewayLogEntry {
   moaMode: string
   success: boolean
   prompt: number
@@ -119,14 +119,14 @@ interface ProxyLogEntry {
   error?: string | null
 }
 
-/** 写入一条代理请求日志（source='proxy'） */
-function logProxyRequest(entry: ProxyLogEntry): void {
+/** 写入一条网关请求日志（source='gateway'） */
+function logGatewayRequest(entry: GatewayLogEntry): void {
   try {
     const entries = buildUsageEntries((entry.models || []).map((m) => ({ ...m, cost: 0 })))
     const totals = sumUsage(entries)
     getDatabase().exec(
       `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail, models)
-       VALUES (?, ?, '127.0.0.1', 'proxy', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, '127.0.0.1', 'gateway', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         crypto.randomUUID(),
         Date.now(),
@@ -142,7 +142,7 @@ function logProxyRequest(entry: ProxyLogEntry): void {
       ]
     )
   } catch (err) {
-    console.error('[Proxy] failed to record request log:', err)
+    console.error('[Gateway] failed to record request log:', err)
   }
 }
 
@@ -195,11 +195,11 @@ function routeForRequest(model: string | undefined): { baseUrl: string; apiKey: 
   return (model && findProviderForModel(model)) || firstUsableProvider()
 }
 
-export function createProxyServer(): Express {
+export function createGatewayServer(): Express {
   const app: Express = express()
 
   // ── CORS：仅放行本地回环浏览器来源 ──
-  // 此前 cors() 对任意来源全开，恶意网页可借助用户已配置的 Key 调用本地代理消耗上游费用。
+  // 此前 cors() 对任意来源全开，恶意网页可借助用户已配置的 Key 调用本地网关消耗上游费用。
   // 原生客户端（curl / Cline / Copilot 等）请求无 Origin 头，不受影响。
   const corsOptions: CorsOptions = {
     origin: (origin, callback) => {
@@ -217,7 +217,7 @@ export function createProxyServer(): Express {
   app.use(cors(corsOptions))
 
   // 鉴权：/health 无需鉴权，/v1/* 全部要求（启用时）
-  app.use('/v1', proxyAuthMiddleware)
+  app.use('/v1', gatewayAuthMiddleware)
 
   app.use(express.json({ limit: '10mb' }))
 
@@ -284,7 +284,7 @@ export function createProxyServer(): Express {
 
         if (!upstream.ok) {
           const errBody = await upstream.text()
-          logProxyRequest({
+          logGatewayRequest({
             moaMode: 'direct',
             success: false,
             prompt: 0,
@@ -334,7 +334,7 @@ export function createProxyServer(): Express {
             res.end()
           }
           // 流式不做 token 级解析，仅记录请求计数与成功状态
-          logProxyRequest({
+          logGatewayRequest({
             moaMode: 'direct',
             success: !clientClosed,
             prompt: 0,
@@ -347,7 +347,7 @@ export function createProxyServer(): Express {
         } else {
           const data = await upstream.json()
           const usage = data.usage || {}
-          logProxyRequest({
+          logGatewayRequest({
             moaMode: 'direct',
             success: true,
             prompt: usage.prompt_tokens || 0,
@@ -367,7 +367,7 @@ export function createProxyServer(): Express {
         const msg = err instanceof Error ? err.message : String(err)
         // SSE 流中被取消/断连：仍记一条失败日志（不计 token）
         if (!(stream && res.headersSent)) {
-          logProxyRequest({
+          logGatewayRequest({
             moaMode: 'direct',
             success: false,
             prompt: 0,
@@ -379,7 +379,7 @@ export function createProxyServer(): Express {
         }
         // SSE 已开写后不能再发 JSON 错误体（headers 已发送，Express 会二次抛错挂死响应）——直接收流
         if (stream && res.headersSent) { res.end(); return }
-        res.status(502).json({ error: { message: `Proxy: ${msg}`, type: 'proxy_error' } })
+        res.status(502).json({ error: { message: `Gateway: ${msg}`, type: 'gateway_error' } })
       }
       return
     }
@@ -412,7 +412,7 @@ export function createProxyServer(): Express {
     const moaTotals = sumUsage(buildUsageEntries(moaEntries))
 
     if (!result.success) {
-      logProxyRequest({
+      logGatewayRequest({
         moaMode: config.mode,
         success: false,
         prompt: moaTotals.prompt,
@@ -429,7 +429,7 @@ export function createProxyServer(): Express {
     }
 
     if (config.mode === 'compare') {
-      logProxyRequest({
+      logGatewayRequest({
         moaMode: 'compare',
         success: true,
         prompt: moaTotals.prompt,
@@ -460,7 +460,7 @@ export function createProxyServer(): Express {
     }
 
     // ── Aggregate mode ──
-    logProxyRequest({
+    logGatewayRequest({
       moaMode: 'aggregate',
       success: true,
       prompt: moaTotals.prompt,
@@ -519,7 +519,7 @@ export function createProxyServer(): Express {
       const provider = firstUsableProvider()
       const reqStart = Date.now()
       if (!provider) {
-        logProxyRequest({
+        logGatewayRequest({
           moaMode: 'passthrough',
           success: false,
           prompt: 0,
@@ -540,7 +540,7 @@ export function createProxyServer(): Express {
           signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
         })
         // passthrough 端点响应体格式各异，不易统一解析 usage；仅记录请求计数与状态
-        logProxyRequest({
+        logGatewayRequest({
           moaMode: 'passthrough',
           success: upstream.ok,
           prompt: 0,
@@ -551,7 +551,7 @@ export function createProxyServer(): Express {
         })
         res.status(upstream.status).json(await upstream.json())
       } catch (err) {
-        logProxyRequest({
+        logGatewayRequest({
           moaMode: 'passthrough',
           success: false,
           prompt: 0,
@@ -560,7 +560,7 @@ export function createProxyServer(): Express {
           subCount: 0,
           error: err instanceof Error ? err.message : String(err)
         })
-        res.status(502).json({ error: { message: 'Passthrough failed', type: 'proxy_error' } })
+        res.status(502).json({ error: { message: 'Passthrough failed', type: 'gateway_error' } })
       }
     }))
   })
@@ -568,15 +568,15 @@ export function createProxyServer(): Express {
   return app
 }
 
-export function startProxyServer(app: Express, port: number, host: string): Promise<number> {
+export function startGatewayServer(app: Express, port: number, host: string): Promise<number> {
   return tryListen(app, port, host, 0)
 
   function tryListen(expressApp: Express, p: number, h: string, attempt: number): Promise<number> {
     return new Promise((resolve, reject) => {
       const s = expressApp.listen(p, h, () => {
         server = s
-        if (p !== port) console.log(`[Proxy] Port ${port} in use, using ${p} instead`)
-        console.log(`[Proxy] http://${h}:${p}`)
+        if (p !== port) console.log(`[Gateway] Port ${port} in use, using ${p} instead`)
+        console.log(`[Gateway] http://${h}:${p}`)
         resolve(p)
       })
       s.on('error', (err: NodeJS.ErrnoException) => {
@@ -590,6 +590,6 @@ export function startProxyServer(app: Express, port: number, host: string): Prom
   }
 }
 
-export function stopProxyServer(): void {
-  if (server) { server.close(); server = null; console.log('[Proxy] stopped') }
+export function stopGatewayServer(): void {
+  if (server) { server.close(); server = null; console.log('[Gateway] stopped') }
 }

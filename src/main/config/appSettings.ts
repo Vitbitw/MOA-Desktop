@@ -60,6 +60,21 @@ function migrateUnifiedAutoRefresh(raw: Record<string, unknown>): Record<string,
 }
 
 /**
+ * 一次性迁移：功能更名 proxy → gateway（MoA 网关），旧键整块搬到新键。
+ * 返回迁移后的 raw（无旧键返回 null）：
+ * - 仅旧键存在 → 原样搬走；新旧键同时存在（理论不会发生）→ 以新键为准，仅删旧键。
+ * 迁移结果必须落库（见 readMigratedRaw）：否则 raw 里旧键会一直残留。
+ */
+function migrateProxyToGateway(raw: Record<string, unknown>): Record<string, unknown> | null {
+  if (!('proxy' in raw)) return null
+  const next: Record<string, unknown> = { ...raw }
+  const legacy = raw.proxy
+  delete next.proxy
+  if (!('gateway' in raw)) next.gateway = legacy
+  return next
+}
+
+/**
  * 合并默认值 + 字段类型规范化（本模块唯一的"读后防御"，消费方一律免检）：
  * - 已知嵌套对象逐字段合并默认值（防旧版本只写部分字段产生"缺字段对象"）；
  * - 数组 / 对象字段遇历史垃圾值统一回退默认。
@@ -67,7 +82,7 @@ function migrateUnifiedAutoRefresh(raw: Record<string, unknown>): Record<string,
 function mergeSettings(raw: Record<string, unknown>): AppSettings {
   const merged = { ...DEFAULT_SETTINGS, ...raw } as AppSettings
   merged.title = { ...DEFAULT_SETTINGS.title, ...asObject(raw.title) }
-  merged.proxy = { ...DEFAULT_SETTINGS.proxy, ...asObject(raw.proxy) }
+  merged.gateway = { ...DEFAULT_SETTINGS.gateway, ...asObject(raw.gateway) }
   merged.network = { ...DEFAULT_SETTINGS.network, ...asObject(raw.network) }
   merged.display = { ...DEFAULT_SETTINGS.display, ...asObject(raw.display) }
   merged.monitoring = { ...DEFAULT_SETTINGS.monitoring, ...asObject(raw.monitoring) }
@@ -92,15 +107,20 @@ function mergeSettings(raw: Record<string, unknown>): AppSettings {
  * 落库是必要条件：旧值若只做读时覆盖，会在后续每次读取时重新盖掉用户新设的间隔。
  */
 function readMigratedRaw(): Record<string, unknown> {
-  const raw = readRaw()
-  const migrated = migrateUnifiedAutoRefresh(raw)
-  if (!migrated) return raw
-  try {
-    writeRaw(migrated)
-  } catch (err) {
-    console.warn('[Settings] 自动刷新间隔迁移落库失败（下次读取会重试）:', err)
+  let raw = readRaw()
+  let dirty = false
+  const unified = migrateUnifiedAutoRefresh(raw)
+  if (unified) { raw = unified; dirty = true }
+  const renamed = migrateProxyToGateway(raw)
+  if (renamed) { raw = renamed; dirty = true }
+  if (dirty) {
+    try {
+      writeRaw(raw)
+    } catch (err) {
+      console.warn('[Settings] 配置迁移落库失败（下次读取会重试）:', err)
+    }
   }
-  return migrated
+  return raw
 }
 
 /** 读完整应用设置（合并默认值 + 类型规范化，与 SETTINGS_GET_ALL 返回形态一致）。 */

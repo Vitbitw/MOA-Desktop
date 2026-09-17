@@ -9,7 +9,7 @@ import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, Pr
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { MOA_ROLE_TEMPLATES, getRoleTemplate } from '../../../shared/moaRoles'
 
-type SettingsSection = 'moa' | 'providers' | 'proxy' | 'network' | 'display' | 'pricing' | 'title'
+type SettingsSection = 'moa' | 'providers' | 'gateway' | 'network' | 'display' | 'pricing' | 'title'
 
 export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const { settings, loaded, loadSettings, updateSetting } = useSettingsStore()
@@ -30,7 +30,7 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const sections: { key: SettingsSection; label: string }[] = [
     { key: 'moa', label: 'MoA' },
     { key: 'providers', label: '厂商' },
-    { key: 'proxy', label: '代理服务' },
+    { key: 'gateway', label: 'MoA 网关' },
     { key: 'network', label: '网络代理' },
     { key: 'title', label: '对话标题' },
     { key: 'display', label: '显示设置' },
@@ -75,23 +75,23 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
       {/* Providers Section */}
       {activeSection === 'providers' && <ProvidersSection />}
 
-      {/* Proxy Section */}
-      {activeSection === 'proxy' && (
+      {/* MoA Gateway Section */}
+      {activeSection === 'gateway' && (
         <div className="space-y-5 max-w-xl">
-          <SettingRow label="启用代理" hint="开启内置 API 代理服务器">
+          <SettingRow label="启用 MoA 网关" hint="把 MoA 聚合能力开放给第三方软件（Cline / Cursor / Cherry Studio 等）">
             <ToggleSwitch
-              checked={settings.proxy.enabled}
-              onChange={(v) => updateSetting('proxy', { ...settings.proxy, enabled: v })}
+              checked={settings.gateway.enabled}
+              onChange={(v) => updateSetting('gateway', { ...settings.gateway, enabled: v })}
             />
           </SettingRow>
 
-          {settings.proxy.enabled && (
+          {settings.gateway.enabled && (
             <>
               <SettingRow label="监听地址" hint="默认 127.0.0.1">
                 <input
                   type="text"
-                  value={settings.proxy.host}
-                  onChange={(e) => updateSetting('proxy', { ...settings.proxy, host: e.target.value })}
+                  value={settings.gateway.host}
+                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, host: e.target.value })}
                   className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
                 />
               </SettingRow>
@@ -101,8 +101,8 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
                   type="number"
                   min={1}
                   max={65535}
-                  value={settings.proxy.port}
-                  onChange={(e) => updateSetting('proxy', { ...settings.proxy, port: Number(e.target.value) || 28888 })}
+                  value={settings.gateway.port}
+                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, port: Number(e.target.value) || 28888 })}
                   className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
                 />
               </SettingRow>
@@ -112,17 +112,17 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
                   type="number"
                   min={1}
                   max={20}
-                  value={settings.proxy.maxConcurrency}
-                  onChange={(e) => updateSetting('proxy', { ...settings.proxy, maxConcurrency: Number(e.target.value) || 3 })}
+                  value={settings.gateway.maxConcurrency}
+                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, maxConcurrency: Number(e.target.value) || 3 })}
                   className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
                 />
               </SettingRow>
 
-              <SettingRow label="默认模型" hint="代理未指定模型时的默认值">
+              <SettingRow label="默认模型" hint="网关未指定模型时的默认值">
                 <input
                   type="text"
-                  value={settings.proxy.defaultModelId}
-                  onChange={(e) => updateSetting('proxy', { ...settings.proxy, defaultModelId: e.target.value })}
+                  value={settings.gateway.defaultModelId}
+                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, defaultModelId: e.target.value })}
                   placeholder="gpt-4o"
                   className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground"
                 />
@@ -130,26 +130,26 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
 
               <SettingRow label="启用认证" hint="为代理请求添加 API Key 鉴权">
                 <ToggleSwitch
-                  checked={settings.proxy.authEnabled}
-                  onChange={(v) => updateSetting('proxy', { ...settings.proxy, authEnabled: v })}
+                  checked={settings.gateway.authEnabled}
+                  onChange={(v) => updateSetting('gateway', { ...settings.gateway, authEnabled: v })}
                 />
               </SettingRow>
 
-              {settings.proxy.authEnabled && (
-                <SettingRow label="代理密钥" hint="第三方调用代理时的鉴权 Key">
+              {settings.gateway.authEnabled && (
+                <SettingRow label="网关密钥" hint="第三方软件调用网关时的鉴权 Key">
                   <input
                     type="password"
-                    value={settings.proxy.proxyKey}
-                    onChange={(e) => updateSetting('proxy', { ...settings.proxy, proxyKey: e.target.value })}
+                    value={settings.gateway.gatewayKey}
+                    onChange={(e) => updateSetting('gateway', { ...settings.gateway, gatewayKey: e.target.value })}
                     className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
                   />
                 </SettingRow>
               )}
 
-              <SettingRow label="记录模式" hint="代理请求的日志记录级别">
+              <SettingRow label="记录模式" hint="网关请求的日志记录级别">
                 <select
-                  value={settings.proxy.recording}
-                  onChange={(e) => updateSetting('proxy', { ...settings.proxy, recording: e.target.value as 'full' | 'stats' })}
+                  value={settings.gateway.recording}
+                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, recording: e.target.value as 'full' | 'stats' })}
                   className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
                 >
                   <option value="full">完整记录</option>
@@ -157,10 +157,10 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
                 </select>
               </SettingRow>
 
-              <SettingRow label="透明模式" hint="代理是否透传模型输出">
+              <SettingRow label="透明模式" hint="网关是否透传模型输出">
                 <select
-                  value={settings.proxy.transparency}
-                  onChange={(e) => updateSetting('proxy', { ...settings.proxy, transparency: e.target.value as 'default' | 'extended' })}
+                  value={settings.gateway.transparency}
+                  onChange={(e) => updateSetting('gateway', { ...settings.gateway, transparency: e.target.value as 'default' | 'extended' })}
                   className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
                 >
                   <option value="default">标准</option>

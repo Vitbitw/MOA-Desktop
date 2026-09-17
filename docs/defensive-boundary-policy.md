@@ -27,7 +27,7 @@
 |---|---|---|
 | 第三方 API 响应 | `src/main/monitoring/`、`src/main/pricing/probe.ts` | 解析函数内字段级校验（typeof / Array.isArray），非法记录整条丢弃 + 日志计数 |
 | 浏览器注入脚本返回 | monitoring/（deepseek / commandCode 的 evaluate 结果） | 同上 |
-| 网络层 | `src/main/proxy/server.ts`、`src/main/local/fetchProxy.ts` | socket / 流错误捕获、资源清理（destroy / cleanup）、半途失败标记流损坏 |
+| 网络层 | `src/main/gateway/server.ts`、`src/main/local/fetchProxy.ts` | socket / 流错误捕获、资源清理（destroy / cleanup）、半途失败标记流损坏 |
 | DB 配置读取 | 统一 `readAppSettings()`（见 R1） | 一次 JSON.parse + 默认值合并；损坏时回退默认值 |
 | DB 行数据 | 各查询点 | 行可能不存在（`?.` / null 检查合法）；字段形状信任 schema，不做字段级校验 |
 | IPC 入口 | main 侧 handler（统一 `handleIpc` 包装，见 R2） | 包装器捕获错误 → `{success:false,error}`；参数形状信任 preload 类型声明 |
@@ -65,7 +65,7 @@ export function writeAppSettings(settings: AppSettings): void { /* INSERT OR REP
 ```
 
 规则：
-- 17 处散装读取全部替换（index.ts ×6、probe.ts ×3、fetchProxy.ts ×2、proxy/server.ts ×2、moa/usage.ts ×2、collector.ts ×1、usageWindow.ts ×1）；
+- 17 处散装读取全部替换（index.ts ×6、probe.ts ×3、fetchProxy.ts ×2、gateway/server.ts ×2、moa/usage.ts ×2、collector.ts ×1、usageWindow.ts ×1）；
 - 消费方直接取字段，**不再自行合并 DEFAULT_SETTINGS、不再校验**；
 - 返回完整 `AppSettings`（浅合并，与现有语义一致）；写侧统一走 `writeAppSettings`。
 

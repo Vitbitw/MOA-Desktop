@@ -108,14 +108,14 @@ export const DEFAULT_PRICING_PROBE = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   title: DEFAULT_TITLE_SETTINGS,
-  proxy: {
+  gateway: {
     enabled: true,
     host: DEFAULT_HOST,
     port: DEFAULT_PORT,
     maxConcurrency: DEFAULT_MAX_CONCURRENCY,
     defaultModelId: '',
     authEnabled: false,
-    proxyKey: '',
+    gatewayKey: '',
     recording: 'full',
     transparency: 'default'
   },

@@ -7,7 +7,7 @@ import { handleIpc, handleIpcRaw } from './ipc/handle'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
 import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
-import { createProxyServer, startProxyServer, stopProxyServer } from './proxy/server'
+import { createGatewayServer, startGatewayServer, stopGatewayServer } from './gateway/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
@@ -26,7 +26,7 @@ import type { RemoteUsageSource } from '../shared/types'
 
 // ── 系统边界防御：stdout/stderr 管道断裂（EPIPE）──
 // 应用从终端/脚本启动时，父进程先退出或控制台关闭后管道即不可写。
-// 此后任意 console.log（如退出时的 stopProxyServer）都会抛未捕获异常，
+// 此后任意 console.log（如退出时的 stopGatewayServer）都会抛未捕获异常，
 // Electron 会弹出「A JavaScript error occurred in the main process」错误框。
 // EPIPE 是该场景的正常现象，吞掉；其他流错误照常抛出。
 for (const stream of [process.stdout, process.stderr] as const) {
@@ -215,15 +215,15 @@ function createApplicationMenu() {
       label: '帮助',
       submenu: [
         {
-          label: 'API 代理地址',
+          label: 'MoA 网关地址',
           click: () => {
-            // 从 DB 读真实代理设置（用户可能改过 host/port/关闭代理）
-            const { proxy } = readAppSettings()
-            const url = proxy.enabled
-              ? `http://${proxy.host}:${proxy.port}`
-              : `http://${DEFAULT_HOST}:${DEFAULT_PORT} (代理未启用)`
-            clipboard.writeText(proxy.enabled ? `http://${proxy.host}:${proxy.port}` : '')
-            mainWindow?.webContents.send(IPC_EVENT.MENU_COPY_PROXY_URL, url)
+            // 从 DB 读真实网关设置（用户可能改过 host/port/关闭网关）
+            const { gateway } = readAppSettings()
+            const url = gateway.enabled
+              ? `http://${gateway.host}:${gateway.port}`
+              : `http://${DEFAULT_HOST}:${DEFAULT_PORT} (网关未启用)`
+            clipboard.writeText(gateway.enabled ? `http://${gateway.host}:${gateway.port}` : '')
+            mainWindow?.webContents.send(IPC_EVENT.MENU_COPY_GATEWAY_URL, url)
           }
         }
       ]
@@ -839,16 +839,16 @@ app.whenReady().then(async () => {
   })
   maybeCreateUsageOverlay()
 
-  // Start proxy server (auto-finds next available port if DEFAULT_PORT is busy)
-  const proxyApp = createProxyServer()
+  // Start MoA gateway server (auto-finds next available port if DEFAULT_PORT is busy)
+  const gatewayApp = createGatewayServer()
   try {
-    const actualPort = await startProxyServer(proxyApp, DEFAULT_PORT, DEFAULT_HOST)
+    const actualPort = await startGatewayServer(gatewayApp, DEFAULT_PORT, DEFAULT_HOST)
     if (actualPort !== DEFAULT_PORT) {
-      console.log(`[Main] Proxy running on port ${actualPort} (requested ${DEFAULT_PORT})`)
+      console.log(`[Main] Gateway running on port ${actualPort} (requested ${DEFAULT_PORT})`)
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error('[Main] Proxy server failed to start:', msg)
+    console.error('[Main] Gateway server failed to start:', msg)
   }
 
   app.on('activate', () => {
@@ -861,7 +861,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   stopUsageCollector()
-  stopProxyServer()
+  stopGatewayServer()
   getDatabase().flush()
 })
 

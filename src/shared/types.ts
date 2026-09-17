@@ -106,14 +106,15 @@ export interface TitleSettings {
 // ─── Settings ───
 export interface AppSettings {
   title: TitleSettings
-  proxy: {
+  /** MoA 网关：把 MoA 聚合能力以 OpenAI 兼容 API 暴露给第三方软件（区别于 network 出站网络代理） */
+  gateway: {
     enabled: boolean
     host: string
     port: number
     maxConcurrency: number
     defaultModelId: string
     authEnabled: boolean
-    proxyKey: string
+    gatewayKey: string
     recording: 'full' | 'stats'
     transparency: 'default' | 'extended'
   }

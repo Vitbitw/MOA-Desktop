@@ -9,7 +9,7 @@
 - **🧠 MoA 双架构** — 选举模式：多子模型并行出完整答案 → 聚合模型融合；主席团模式：子模型带角色（批判者/技术顾问/创意官等）出专家意见 → 主模型参考意见与完整多轮历史亲自作答。设置页一键切换
 - **📊 原始对比模式 D** — 同时查看多个模型的原始输出，手动比较
 - **🔍 官方定价探查** — 抓取厂商官方定价页并用大模型提取结构化定价（含峰谷/错峰时段价），支持按间隔自动刷新；费用优先级：手动覆盖 > 官方探查 > 内置默认
-- **🔌 本地 API 代理** — 内置 Express 服务器 (port 28888)，兼容 OpenAI API 格式
+- **🔌 MoA 网关** — 内置 OpenAI 兼容接口 (port 28888)，把 MoA 聚合能力开放给第三方软件（Cline / Cursor / Cherry Studio 等）
 - **🏭 多厂商管理** — 内置 OpenAI / DeepSeek / 硅基流动 / Groq 等模板，支持自定义厂商
 - **💬 Markdown 渲染** — 流式消息展示，支持代码高亮、表格、数学公式
 - **📚 对话历史** — SQLite 持久化存储，搜索、删除、重命名
@@ -22,7 +22,7 @@
 src/
 ├── main/              # Electron 主进程
 │   ├── index.ts       # 窗口管理 + IPC 注册 + 应用生命周期
-│   ├── proxy/         # Express API 代理 (port 28888)
+│   ├── gateway/       # MoA 网关 (port 28888)
 │   │   └── server.ts  # /v1/chat/completions, /health, passthrough
 │   ├── db/            # sql.js 持久化
 │   │   ├── database.ts # WASM SQLite 封装 + 自动保存
@@ -89,13 +89,16 @@ npm run build
 
 > 可选：**设置 → 定价** 配置官方定价页源，点击「探查并更新」由大模型自动维护定价（费用优先级：手动覆盖 > 官方探查 > 内置默认）。
 
-### API 代理
+### MoA 网关
 
-内置代理地址：`http://127.0.0.1:28888`
+让不支持 MoA 的第三方软件（Cline / Cursor / Cherry Studio 等）获得 MoA 效果：把软件里的 API 地址指向本机网关即可（帮助菜单可一键复制地址）。
+
+内置网关地址：`http://127.0.0.1:28888`
 
 - `GET /health` — 健康检查
 - `GET /v1/models` — 模型列表
 - `POST /v1/chat/completions` — 聊天补全（支持 stream）
+- `POST /v1/embeddings` 等 — 其余端点透传给第一个可用厂商
 
 ## 构建打包
 

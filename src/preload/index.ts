@@ -100,7 +100,7 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.removeAllListeners(IPC_EVENT.MOA_ALL_DONE)
     ipcRenderer.removeAllListeners(IPC_EVENT.PRICING_PROBE_PROGRESS)
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_NEW_CONVERSATION)
-    ipcRenderer.removeAllListeners(IPC_EVENT.MENU_COPY_PROXY_URL)
+    ipcRenderer.removeAllListeners(IPC_EVENT.MENU_COPY_GATEWAY_URL)
     ipcRenderer.removeAllListeners(IPC_EVENT.TITLE_UPDATED)
     ipcRenderer.removeAllListeners(IPC_EVENT.MENU_OPEN_SETTINGS)
     ipcRenderer.removeAllListeners(IPC_EVENT.USAGE_OPEN)
@@ -115,10 +115,10 @@ contextBridge.exposeInMainWorld('moaAPI', {
     return () => ipcRenderer.removeListener(IPC_EVENT.MENU_NEW_CONVERSATION, handler)
   },
 
-  onMenuCopyProxyUrl: (callback: () => void) => {
+  onMenuCopyGatewayUrl: (callback: () => void) => {
     const handler = () => callback()
-    ipcRenderer.on(IPC_EVENT.MENU_COPY_PROXY_URL, handler)
-    return () => ipcRenderer.removeListener(IPC_EVENT.MENU_COPY_PROXY_URL, handler)
+    ipcRenderer.on(IPC_EVENT.MENU_COPY_GATEWAY_URL, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.MENU_COPY_GATEWAY_URL, handler)
   },
 
   onMenuOpenSettings: (callback: () => void) => {

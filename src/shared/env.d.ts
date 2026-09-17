@@ -79,7 +79,7 @@ interface MoaAPI {
 
   // Menu event listeners
   onMenuNewConversation: (callback: () => void) => () => void
-  onMenuCopyProxyUrl: (callback: (url: string) => void) => () => void
+  onMenuCopyGatewayUrl: (callback: (url: string) => void) => () => void
   onMenuOpenSettings: (callback: () => void) => () => void
 
   // 用量悬浮窗右键「打开用量页」

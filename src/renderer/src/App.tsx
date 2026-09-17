@@ -64,7 +64,7 @@ function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
-  // Menu event listeners (Ctrl+N → new conversation, API proxy URL copy)
+  // Menu event listeners (Ctrl+N → new conversation, MoA gateway URL copy)
   useEffect(() => {
     const unsub = window.moaAPI.onMenuNewConversation(() => {
       useConversationStore.getState().newConversation()
@@ -73,9 +73,9 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const unsub = window.moaAPI.onMenuCopyProxyUrl((url) => {
+    const unsub = window.moaAPI.onMenuCopyGatewayUrl((url) => {
       // The main process already copied to clipboard; show a hint
-      console.log(`Proxy URL ${url} copied to clipboard`)
+      console.log(`Gateway URL ${url} copied to clipboard`)
     })
     return unsub
   }, [])
