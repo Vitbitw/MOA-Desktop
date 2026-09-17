@@ -534,6 +534,187 @@ async function fetchUsageRecords(token: string): Promise<UsageFetch> {
   return probe
 }
 
+/** 诊断开关（MOA_MONITOR_PROBE=1）：探测 /internal/usage/charts 的真实结构
+ *  （该端点在 Studio 常量表中存在、客户端 0 调用点，但无认证探针返回 401 = 服务端存在；
+ *   若它返回按模型/时间桶的聚合，就能补上「整月按模型明细」，替代只有最近 100 条的窗口明细） */
+const PROBE_CHARTS = process.env.MOA_MONITOR_PROBE === '1'
+
+async function probeCharts(sourceId: string, token: string): Promise<void> {
+  const describe = (v: unknown, depth = 0): string => {
+    if (Array.isArray(v)) return `[${v.length}]${v.length > 0 ? describe(v[0], depth + 1) : ''}`
+    if (isObj(v)) {
+      const keys = Object.keys(v)
+      const shown = keys.slice(0, depth === 0 ? 6 : 14)
+      const inner = depth < 2 && v[shown[0]] !== undefined ? ` → ${shown[0]}=${describe(v[shown[0]], depth + 1)}` : ''
+      return `{${shown.join(',')}${keys.length > shown.length ? ',…' : ''}}${inner}`
+    }
+    return typeof v
+  }
+  try {
+    // 参照：summary（计费月口径），用于判断哪个参数组合能覆盖整月
+    let ref = '参考 summary=—'
+    try {
+      const sumRes = await ccGet('/internal/usage/summary', { token })
+      const sum = sumRes.status === 200 ? parseSummary(sumRes.body) : undefined
+      if (sum) ref = `参考 summary: requests=${sum.totalCount} cost=${sum.totalCost.toFixed(4)} basis=${sum.periodBasis ?? '?'}`
+    } catch {
+      /* 参照失败不影响探测 */
+    }
+
+    const now = Date.now()
+    const monthStartUtc = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString()
+    const days30 = new Date(now - 30 * 86_400_000).toISOString()
+    const variants: Array<{ label: string; qs: string }> = [
+      { label: '无参', qs: '' },
+      { label: 'periodBasis=billing-period', qs: '?periodBasis=billing-period' },
+      { label: 'from=本月1日(UTC)', qs: `?from=${encodeURIComponent(monthStartUtc)}&periodBasis=billing-period` },
+      { label: 'from=30天前&last-30-days', qs: `?from=${encodeURIComponent(days30)}&periodBasis=last-30-days` }
+    ]
+
+    for (const v of variants) {
+      const res = await ccGet(`/internal/usage/charts${v.qs}`, { token })
+      const parsed = res.status === 200 ? parseUsageCharts(res.body) : null
+      const requests = parsed ? parsed.rows.reduce((a, r) => a + r.requests, 0) : 0
+      const cost = parsed ? parsed.rows.reduce((a, r) => a + r.cost, 0) : 0
+      const parts = [
+        `[${v.label}]`,
+        `status=${res.status}`,
+        `rows=${parsed?.rows.length ?? 0}`,
+        `buckets=${parsed?.buckets ?? 0}`,
+        `requests=${requests}`,
+        `cost=${cost.toFixed(4)}`,
+        `window=${parsed?.window ? JSON.stringify(parsed.window).slice(0, 160) : '(none)'}`
+      ]
+      console.log(`[Monitor] probe charts ${parts.join(' ')}`)
+      if (v.label === '无参' && parsed && parsed.rows.length > 0) {
+        console.log(`[Monitor] probe charts 无参结构: ${describe((isObj(res.body) ? unwrapSuccess(res.body) : null) ?? res.body)}`)
+      }
+    }
+    console.log(`[Monitor] probe charts ${ref}`)
+  } catch (err) {
+    console.log(`[Monitor] probe charts(${sourceId}) 失败: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+// ─── /internal/usage/charts：服务端「模型 × 时间桶」聚合（与 summary 同区间）───
+// 实测（2026-09-17）：GET /internal/usage/charts → 200，根为索引对象（0..N-1，共 28 行），
+// 每行 { model, provider, timeBucket, requests, totalCost, inputCost, outputCost, creditsTotal,
+//        consumedMonthlyCredits, cacheCost, cacheSavings, tokensIn/Out/Total, cacheReadInputTokens, ... }
+// 字段比单条记录更全（含缓存成本/节省、按月额度消耗拆分）；响应可带 window:{from,to,periodBasis}。
+// 该端点在 Studio 客户端 0 调用点（服务端在用），因此按"可能变动"处理：解析失败即区块级降级。
+
+/** charts 的单行（模型 × 时间桶） */
+export interface UsageChartRow {
+  model: string
+  requests: number
+  cost: number
+  tokensIn: number
+  tokensOut: number
+  tokensTotal: number
+  cacheCost: number
+  cacheSavings: number
+}
+
+export interface UsageChartsParse {
+  rows: UsageChartRow[]
+  /** 不同 timeBucket 的个数 */
+  buckets: number
+  window?: { from?: string; to?: string; fromTs?: number; toTs?: number; periodBasis?: string }
+}
+
+/** 解析 charts 响应（根可能是数组、索引对象，或嵌套在 data 下；无法识别返回 null） */
+export function parseUsageCharts(body: unknown): UsageChartsParse | null {
+  const root = unwrapSuccess(body)
+  let list: unknown[] | null = null
+  if (Array.isArray(root)) {
+    list = root
+  } else if (isObj(root)) {
+    if (Array.isArray(root.data)) list = root.data
+    else {
+      // 索引对象 { "0": {...}, "1": {...} }（实测形态）
+      const idxKeys = Object.keys(root).filter((k) => /^\d+$/.test(k))
+      if (idxKeys.length > 0) list = idxKeys.map((k) => root[k])
+    }
+  }
+  if (!list) return null
+
+  const rows: UsageChartRow[] = []
+  const bucketSet = new Set<string>()
+  for (const raw of list) {
+    if (!isObj(raw)) continue
+    const model = str(raw.model) ?? str(raw.modelLabel)
+    if (!model) continue
+    const bucket = str(raw.timeBucket ?? raw.time_bucket)
+    if (bucket) bucketSet.add(bucket)
+    rows.push({
+      model,
+      requests: toNum(raw.requests) ?? 0,
+      cost: toNum(raw.totalCost ?? raw.cost) ?? 0,
+      tokensIn: toNum(raw.tokensIn ?? raw.tokens_in) ?? 0,
+      tokensOut: toNum(raw.tokensOut ?? raw.tokens_out) ?? 0,
+      tokensTotal: toNum(raw.tokensTotal ?? raw.tokens_total) ?? 0,
+      cacheCost: toNum(raw.cacheCost ?? raw.cache_cost) ?? 0,
+      cacheSavings: toNum(raw.cacheSavings ?? raw.cache_savings) ?? 0
+    })
+  }
+  if (rows.length === 0) return null
+
+  let window: UsageChartsParse['window']
+  // window 与 data 同级（契约 {success, data, error, window}），展开后在 body 上；兼容直接挂在根上的形态
+  const w = isObj(root) && isObj(root.window) ? root.window : isObj(body) && isObj(body.window) ? body.window : null
+  if (w) {
+    const from = str(w.from)
+    const to = str(w.to)
+    const periodBasis = str(w.periodBasis ?? w.period_basis)
+    const fromTs = toEpochSec(from)
+    const toTs = toEpochSec(to)
+    const parsed: NonNullable<UsageChartsParse['window']> = {}
+    if (from) parsed.from = from
+    if (to) parsed.to = to
+    if (periodBasis) parsed.periodBasis = periodBasis
+    if (fromTs !== undefined) parsed.fromTs = fromTs
+    if (toTs !== undefined) parsed.toTs = toTs
+    if (Object.keys(parsed).length > 0) window = parsed
+  }
+
+  return { rows, buckets: bucketSet.size, ...(window ? { window } : {}) }
+}
+
+/** 把「模型 × 时间桶」行按模型汇总为展示行（服务端已聚合，这里只做跨桶相加；按成本降序） */
+export function aggregateChartRows(rows: UsageChartRow[]): Array<{
+  model: string
+  requests: number
+  cost: number
+  tokensIn: number
+  tokensOut: number
+  tokensTotal: number
+  cacheCost: number
+  cacheSavings: number
+}> {
+  const map = new Map<string, { model: string; requests: number; cost: number; tokensIn: number; tokensOut: number; tokensTotal: number; cacheCost: number; cacheSavings: number }>()
+  for (const r of rows) {
+    const agg = map.get(r.model) ?? {
+      model: r.model,
+      requests: 0,
+      cost: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      tokensTotal: 0,
+      cacheCost: 0,
+      cacheSavings: 0
+    }
+    agg.requests += r.requests
+    agg.cost += r.cost
+    agg.tokensIn += r.tokensIn
+    agg.tokensOut += r.tokensOut
+    agg.tokensTotal += r.tokensTotal
+    agg.cacheCost += r.cacheCost
+    agg.cacheSavings += r.cacheSavings
+    map.set(r.model, agg)
+  }
+  return Array.from(map.values()).sort((a, b) => b.cost - a.cost || b.tokensTotal - a.tokensTotal)
+}
+
 /** 记录集合的时间范围（epoch 毫秒）：用于说明明细覆盖的时间跨度，而非只给条数 */
 function recordTimeRange(records: unknown[]): { fromTs?: number; toTs?: number } {
   let from: number | undefined
@@ -606,7 +787,11 @@ function aggregateRecords(records: unknown[]): NonNullable<CommandCodeUsage['mod
   return rows.length > 0 ? rows : undefined
 }
 
-/** 解析 /internal/usage/summary（totalTokens 可能为字符串，防御性转换） */
+/** 解析 /internal/usage/summary（totalTokens 可能为字符串，防御性转换）
+ *  口径：periodBasis 由服务端给出 —— 'billing-period' = 当前计费月、'last-30-days' = 最近 30 天
+ *  （Studio 前端文案 `periodBasis === 'last-30-days' ? 'Last 30 days' : 'Current billing month'`）。
+ *  注意：汇总与「模型明细」（最近 100 条记录聚合 / 本地累计）口径不同，数字不该相等。
+ */
 function parseSummary(body: unknown): CommandCodeUsage['summary'] {
   const unwrapped = unwrapSuccess(body)
   if (!isObj(unwrapped)) return undefined
@@ -614,12 +799,14 @@ function parseSummary(body: unknown): CommandCodeUsage['summary'] {
   const totalCost = toNum(unwrapped.totalCost)
   const totalTokens = toNum(unwrapped.totalTokens)
   const successRate = toNum(unwrapped.successRate)
+  const periodBasis = str(unwrapped.periodBasis ?? unwrapped.period_basis)
   if (totalCount === undefined && totalCost === undefined) return undefined
   return {
     totalCount: totalCount ?? 0,
     totalCost: totalCost ?? 0,
     totalTokens: totalTokens ?? 0,
-    successRate: successRate ?? 0
+    successRate: successRate ?? 0,
+    ...(periodBasis ? { periodBasis } : {})
   }
 }
 
@@ -737,6 +924,8 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
 
   // 明细分页：游标必须逐页串行，故提前启动、与其余端点并行推进
   const usageFetchPromise = fetchUsageRecords(token)
+  // 诊断：探测 charts 端点结构（MOA_MONITOR_PROBE=1，默认关闭，不影响主流程）
+  if (PROBE_CHARTS) void probeCharts(source.id, token)
 
   const hasApiKey = !!apiKey
   const requests: Array<Promise<CcResponse | null>> = [
@@ -745,7 +934,9 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     apiKey ? ccGet('/alpha/billing/credits', { apiKey }) : Promise.resolve(null),
     // 订阅套餐（含到期时间）；withPending=true 让响应带计划变更过渡信息
     ccGet('/internal/billing/subscriptions?withPending=true', { token }),
-    apiKey ? ccGet('/alpha/billing/subscriptions', { apiKey }) : Promise.resolve(null)
+    apiKey ? ccGet('/alpha/billing/subscriptions', { apiKey }) : Promise.resolve(null),
+    // 服务端「模型 × 时间桶」聚合（与 summary 同区间）：本月按模型明细的数据源
+    ccGet('/internal/usage/charts', { token })
   ]
 
   let results: Array<PromiseSettledResult<CcResponse | null>>
@@ -763,7 +954,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   const getStatus = (i: number): number | null => get(i)?.status ?? null
 
   console.log(
-    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}`
+    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} charts=${getStatus(5)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}`
   )
 
   // 401/403 → 会话失效（含明细首页）
@@ -774,7 +965,14 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     return { ok: false, code: 'session_expired' }
   }
 
-  const sourcesAvailable = { summary: false, charts: false, credits: false, windows: false, subscription: false }
+  const sourcesAvailable = {
+    summary: false,
+    listAggregate: false,
+    credits: false,
+    windows: false,
+    subscription: false,
+    chartsEndpoint: false
+  }
 
   const summaryRes = get(0)
   const creditsRes = get(1)
@@ -784,7 +982,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   if (summary) sourcesAvailable.summary = true
 
   const models = usageFetch.status === 200 ? aggregateRecords(usageFetch.records) : undefined
-  if (models) sourcesAvailable.charts = true
+  if (models) sourcesAvailable.listAggregate = true
 
   // 累积落库（本地累计口径）：按记录 id 去重，可安全重复采集；失败不影响本次展示
   if (usageFetch.status === 200 && usageFetch.records.length > 0) {
@@ -845,6 +1043,19 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     if (!parsedSub.none && parsedSub.subscription) subscription = parsedSub.subscription
   }
 
+  // ⑤ /internal/usage/charts：服务端「模型 × 时间桶」聚合 → 本月按模型明细（与汇总同口径）
+  const chartsRes = get(5)
+  const chartsParse = chartsRes && chartsRes.status === 200 ? parseUsageCharts(chartsRes.body) : null
+  let monthlyModels: CommandCodeUsage['monthlyModels']
+  if (chartsParse) {
+    sourcesAvailable.chartsEndpoint = true
+    monthlyModels = {
+      rows: aggregateChartRows(chartsParse.rows),
+      buckets: chartsParse.buckets,
+      ...(chartsParse.window ? { window: chartsParse.window } : {})
+    }
+  }
+
   // 全端点失败判定：区块级降级会把"网络全挂"伪装成空数据，这里显式返回错误码让 UI 显示错误条
   const requiredIdx = [0, 1, 3]
   const activeIdx = hasApiKey ? [0, 1, 2, 3, 4] : [0, 1, 3]
@@ -881,6 +1092,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     ...(windows ? { windows } : {}),
     ...(subscription ? { subscription } : {}),
     ...(models ? { models } : {}),
+    ...(monthlyModels ? { monthlyModels } : {}),
     ...(modelsCoverage ? { modelsCoverage } : {})
   }
 

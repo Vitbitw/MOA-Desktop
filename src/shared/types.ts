@@ -200,10 +200,12 @@ export interface RemoteUsageSource {
 export interface MonitoringSettings {
   /** 已启用的云端用量监控源列表 */
   sources: RemoteUsageSource[]
-  /** 自动刷新间隔（分钟），0 表示关闭 */
+  /**
+   * 统一自动刷新间隔（分钟），0 表示关闭。
+   * 页面数据刷新（本页打开期间）与 Command Code 后台明细采集共用此值；
+   * 合并前的独立 collectIntervalMinutes 已并入（读设置时自动迁移，见 config/appSettings.ts）。
+   */
   autoRefreshMinutes: number
-  /** Command Code 后台采集间隔（分钟）：应用运行期间累积用量记录，0 表示关闭（字段缺失时按默认 15 处理） */
-  collectIntervalMinutes?: number
 }
 
 /** 滚动窗口额度（5小时/7天），字段可能缺失 */
@@ -241,8 +243,27 @@ export interface CommandCodeSubscription {
 /** Command Code 用量归一化数据。区块可选：对应端点失败时 absent（见 sourcesAvailable） */
 export interface CommandCodeUsage {
   fetchedAt: number
-  sourcesAvailable: { summary: boolean; charts: boolean; credits: boolean; windows: boolean; subscription: boolean }
-  summary?: { totalCount: number; totalCost: number; totalTokens: number; successRate: number }
+  sourcesAvailable: {
+    summary: boolean
+    /** 由 /internal/usage 逐条记录聚合出的模型明细（「云端窗口」口径：受服务端 100 条硬上限） */
+    listAggregate: boolean
+    credits: boolean
+    windows: boolean
+    subscription: boolean
+    /** /internal/usage/charts（「模型 × 时间桶」服务端预聚合，「服务端聚合」口径） */
+    chartsEndpoint: boolean
+  }
+  summary?: {
+    totalCount: number
+    totalCost: number
+    totalTokens: number
+    successRate: number
+    /**
+     * 统计口径（服务端 periodBasis）：'billing-period' = 当前计费月、'last-30-days' = 最近 30 天，未知值原样保留。
+     * 与「模型明细」（最近 100 条记录聚合 / 本地累计）口径不同，二者合计不应相等。
+     */
+    periodBasis?: string
+  }
   credits?: { monthlyCredits: number }
   windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo }
   /** 订阅套餐（含到期时间）；无订阅时 absent（sourcesAvailable.subscription 仍为 true） */
@@ -255,6 +276,23 @@ export interface CommandCodeUsage {
     tokensOut: number
     tokensTotal: number
   }>
+  /** 服务端「模型 × 时间桶」聚合（/internal/usage/charts；与汇总 summary 同区间） */
+  monthlyModels?: {
+    rows: Array<{
+      model: string
+      requests: number
+      cost: number
+      tokensIn: number
+      tokensOut: number
+      tokensTotal: number
+      cacheCost: number
+      cacheSavings: number
+    }>
+    /** 服务端返回的时间桶个数（说明聚合粒度覆盖了多少桶） */
+    buckets: number
+    /** 服务端给出的统计区间（响应 window） */
+    window?: { from?: string; to?: string; fromTs?: number; toTs?: number; periodBasis?: string }
+  }
   /** 模型明细的数据覆盖情况（明细由 /internal/usage 请求记录聚合而来，见 coverage.records） */
   modelsCoverage?: {
     /** 已聚合的请求记录条数 */

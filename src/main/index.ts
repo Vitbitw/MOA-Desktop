@@ -19,10 +19,21 @@ import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommand
 import { loginToMimo, refreshMimoUsage } from './monitoring/mimo'
 import { loginToDeepSeek, logoutDeepSeek, getDeepSeekStatus, refreshDeepSeekUsage } from './monitoring/deepseek'
 import { getCumulativeUsage } from './monitoring/usageAccumulator'
-import { startUsageCollector, stopUsageCollector, getCollectorStatus } from './monitoring/collector'
+import { startUsageCollector, stopUsageCollector, getCollectorStatus, markUsageCollected } from './monitoring/collector'
 import { resolveProbeModel, probeSources, getPricingProbeConfig, sourceHasConfiguredKey } from './pricing/probe'
 import { saveUsageCredential } from './store/key-store'
 import type { RemoteUsageSource } from '../shared/types'
+
+// ── 系统边界防御：stdout/stderr 管道断裂（EPIPE）──
+// 应用从终端/脚本启动时，父进程先退出或控制台关闭后管道即不可写。
+// 此后任意 console.log（如退出时的 stopProxyServer）都会抛未捕获异常，
+// Electron 会弹出「A JavaScript error occurred in the main process」错误框。
+// EPIPE 是该场景的正常现象，吞掉；其他流错误照常抛出。
+for (const stream of [process.stdout, process.stderr] as const) {
+  stream.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code !== 'EPIPE') throw err
+  })
+}
 
 let mainWindow: BrowserWindow | null = null
 
@@ -660,6 +671,9 @@ function registerIpcHandlers() {
   handleIpc(IPC.MONITOR_COLLECTOR_STATUS, () => getCollectorStatus())
 
   handleIpcRaw(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
+    // 页面刷新与后台采集共用同一「自动刷新间隔」：这里先占位，
+    // 采集器据此跳过同一间隔内的重复拉取（见 collector.markUsageCollected）
+    if (source.type === 'commandcode') markUsageCollected()
     const result =
       source.type === 'mimo'
         ? await refreshMimoUsage(source)

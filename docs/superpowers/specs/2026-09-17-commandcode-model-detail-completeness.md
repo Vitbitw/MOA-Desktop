@@ -206,7 +206,7 @@ deepseek/deepseek-v4.1-flash    100     9.3M     69.3k    9.3M        ¥1.17
 |---|---|
 | 表 `cc_usage_records` | 主键 `(source_id, record_id)` → `INSERT OR IGNORE` 天然去重；字段含记录时间 `created_at` 与首次采集时间 `first_seen_at` |
 | `monitoring/usageAccumulator.ts` | `persistUsageRecords`（幂等累积，逐条插入，单条失败不影响其余）/ `getCumulativeUsage`（按模型聚合 + 起止时间 + sinceTs + lastCollectedAt）/ `clearCumulativeUsage` |
-| `monitoring/collector.ts` | 应用运行期后台采集：启动 15s 后首跑，其后每分钟检查、按设置间隔（默认 15 分钟，可选 5/10/15/30/60，0=关闭）执行；**与手动刷新共用 `refreshCommandCodeUsage`**（同走 fetchProxy/代理设置） |
+| `monitoring/collector.ts` | 应用运行期后台采集：启动 15s 后首跑，其后每分钟检查、按设置间隔（默认 15 分钟，可选 5/10/15/30/60，0=关闭）执行；**与手动刷新共用 `refreshCommandCodeUsage`**（同走 fetchProxy/代理设置）※ 间隔已与页面自动刷新合并为单一设置，见文末「合并」一节 |
 | `commandCode.ts` | 记录解析新增 `id` / `createdAtMs`（服务端无 id 时用「时间\|模型\|tokens\|成本」合成，保证去重可复现）；刷新成功后落库；页大小探针加 **6 小时冷却**（该账号恒定 400，避免每次刷新白打一个请求） |
 | IPC / preload | `monitor:getCumulative`、`monitor:collectorStatus` |
 | UI | 明细口径切换「本地累计（默认）/ 云端窗口」+ 后台采集开关与间隔；累计行显示条数、起始时间、最近记录时间、采集状态与口径说明 |
@@ -240,3 +240,137 @@ deepseek/deepseek-v4.1-flash    100     9.3M     69.3k    9.3M        ¥1.17
 - **B 本地代理日志口径**：`request_logs` 只有请求级 `cost` + `models`（TEXT），**无法按模型拆分成本**，做不出真正的按模型明细。
 - **C 仅文案**：不满足"想看到增长"的诉求。
 - **加大 limit**：实测服务端 400 拒绝，已证伪。
+
+## 接入 /internal/usage/charts：服务端「模型 × 时间桶」聚合（2026-09-17）
+
+### 线索来源与合规
+
+用户提供其控制台用量页 `/{login}/settings/usage` 作为线索。核实结论：
+
+- 该页路由 module = `usage-BWG6ae2F.js`，**正是本项目早已解析并在用的同一份客户端代码**；数据源为 `USAGE.LIST` + `USAGE.SUMMARY` + billing 端点。页面"详细"在于逐条记录 + 翻页 + traceId，不是另一套数据源。
+- `/settings/usage`（无 login 前缀）只是 SEO meta 存根（`hasDefaultExport:false`，module 仅导出 `meta`）。
+- **软件内不引用任何个人路径**：仍只用通用 `studioUrl`（`https://commandcode.ai/studio`）与通用 API 端点。
+
+### 端点存在性与实测结构
+
+无认证探针 `/internal/usage/charts` → **401（存在）**。该端点在 Studio 客户端 **0 调用点**（服务端 SSR 在用），此前被列为"不依赖"；实测有效后接入。
+
+```
+GET /internal/usage/charts → 200
+root = 索引对象（0..N-1，实测 27 行）
+单行 = { model, provider, timeBucket, requests, totalCost, inputCost, outputCost, creditsTotal,
+        consumedFreeCredits, consumedMonthlyCredits, consumedPurchasedCredits, consumedTotal,
+        cacheCost, cacheSavings, tokensIn, tokensOut, tokensTotal, cacheReadInputTokens, cacheCreationInputTokens }
+window：契约 {success, data, error, window} 中 window 与 data 同级；实测该账号未返回
+```
+
+### 实现
+
+- `parseUsageCharts`（兼容索引对象/数组/`data` 数组；`window` 从展开后根与原始 body 两处取）+ `aggregateChartRows`（按模型跨桶相加，成本降序）
+- refresh 并行批新增 `charts`（索引 5），`sourcesAvailable.usageCharts` 标记可用性；解析失败即区块级降级（不影响其它区块）
+- 类型：`CommandCodeUsage.monthlyModels = { rows, buckets, window? }`
+- UI：第三口径「**服务端聚合**」（默认，与「本地累计」「云端窗口」并列切换）；端点不可用时按钮置灰并自动回退本地累计
+
+### 实测口径对照（同一时刻，用户账号）
+
+| 口径 | 数值 | 覆盖 |
+|---|---|---|
+| 汇总（summary） | $2.9103 | 716 次请求（计费月） |
+| 服务端聚合（charts） | $1.5008（2 个模型） | 495 次请求 / 27 个时间桶 |
+| 云端窗口（最近 100 条） | $0.4917 | 100 条 |
+
+结论：charts 比窗口明细完整得多（**4.95 倍请求量、含全部模型**），但**仍小于整月**——服务端只给 27 个桶且未返回 window，覆盖范围由服务端决定。因此 UI 明确标注「**范围小于整月（与汇总不相等）**」，不谎称同口径。
+
+### 未解之谜（记录在案）
+
+- 桶粒度与覆盖规则未知（服务端决定）；`cacheSavings` 实测达 $21.13（远超成本 $1.47），疑似"名义成本 − 实际成本"，暂未在 UI 展示
+- 汇总（716 次 / $2.91）与聚合（495 次 / $1.50）的差额来源未定：可能含其它 provider/工具调用，或 summary 的统计口径更宽（`totalCount` 在 Studio 文案里是 "agent runs"，而 charts/records 是 API 调用级）
+
+### 测试
+
+行为测试 69 条全通过，其中 9 条覆盖 charts 解析（索引对象 / 数组 / data 数组 / 无 model / 无法识别 → 降级 / window 与 data 同级）——**其中一条测试抓出了真实 bug**：`window` 是 `data` 的同级字段，首版实现在展开后的根上找它（永远取不到），已修。
+
+### 参数矩阵实测（追加）：from / to / periodBasis 被忽略
+
+```
+[无参]                        rows=30 buckets=28 requests=509 cost=1.5763 window=(none)
+[periodBasis=billing-period]  完全相同
+[from=本月1日(UTC)]           完全相同
+[from=30天前&last-30-days]    完全相同
+参考 summary: requests=730 cost=2.9984 basis=billing-period
+```
+
+结论：charts **不接受区间参数**，固定返回最近约 28 个时间桶（按请求速率 ≈ 5 分钟/桶 ≈ 2.3 小时），且不返回 `window`。UI 因此标注「范围由服务端固定（短于整月）」。
+
+## 口径设计复盘：为什么保留三个明细口径（2026-09-17）
+
+被问及"服务端聚合与云端窗口是否功能重复"，逐层结论：
+
+| 层次 | 是否重复 | 结论 |
+|---|---|---|
+| 数据来源 | **否** | `/internal/usage` 是**本地累计的唯一来源**（必须保留，否则累计断流）；`/internal/usage/charts` 是唯一的服务端模型级聚合 |
+| 展示口径 | **部分重叠** | 「云端窗口」⊂「本地累计」（后者是历次窗口记录的并集），但窗口有三点不可替代 |
+| 实现 | **否** | 解析/聚合是两套独立函数（`aggregateRecords` vs `parseUsageCharts`+`aggregateChartRows`）；表格是同一张表切换数据源，非重复实现 |
+
+「云端窗口」不可替代的三点：
+
+1. **对账入口**：官方用量页用的就是 list 数据 → 同一口径可逐条核对；`charts` 是服务端预聚合，官方 UI 不展示它，无法直接对照
+2. **互为降级的冗余**：`charts` 在客户端 0 调用点（仅服务端 SSR 在用），官方重构时最易变动；list 是官方页面在用，稳定等级更高
+3. **零边际成本**：list 请求本来就必须发（本地累计落库依赖它），把它展示出来不增加任何请求；加 charts 也只多 1 个请求
+
+本次处置：
+
+- **回退优先级修正**为「服务端聚合 → 云端窗口 → 本地累计」（同为服务端来源优先；本地累计语义不同，仅作兜底）
+- 三个口径按钮各带 tooltip：来源端点 / 覆盖范围 / 用途
+- **字段改名消歧**：`sourcesAvailable.charts` → `listAggregate`（list 聚合可用）、`usageCharts` → `chartsEndpoint`（charts 端点可用）
+
+## 合并「套餐用量自动刷新」与「明细自动刷新」（2026-09-17）
+
+### 背景
+
+云监控页此前有两个独立间隔（都作用于同一份数据：`refreshCommandCodeUsage` 拉的套餐/额度/汇总 + 逐条记录落库）：
+
+| 开关 | 设置字段 | 生效范围 |
+|---|---|---|
+| 面板工具栏「自动刷新（N 分钟）」 | `monitoring.autoRefreshMinutes`（默认 10） | 仅云监控页打开期间（页面级定时器） |
+| 模型明细区「后台采集 + 间隔」 | `monitoring.collectIntervalMinutes`（默认 15，0=关闭） | 主进程采集器，应用运行期间常驻 |
+
+问题：用户要维护两个旋钮；同一间隔内两条路径可能重复拉取；"明细涨不涨"与"页面数据多久刷"语义上是一件事。
+
+### 决策
+
+- **单一设置** `monitoring.autoRefreshMinutes`（0 = 关闭；UI 可选 5/10/15/30/60 分钟）统一驱动两者：
+  - 页面打开期间：按间隔刷新面板数据（套餐/额度/汇总/明细）
+  - 应用运行期间：主进程按同间隔采集明细记录落库（云监控页关闭也继续）
+- **一处 UI**：三个面板工具栏统一的 `[✓] 自动刷新 [N 分钟 ▾]`（持久化，全源共用）；模型明细区不再有「后台采集」开关（保留采集状态说明行）
+- **关闭 = 两者都停**（仅手动刷新）：主进程关闭时连启动首采也不再执行
+- **去重**：页面刷新（IPC `monitor:refresh`）先调 `collector.markUsageCollected()` 占位，采集器据此跳过同一间隔内的重复拉取 → 同一间隔只发生一次拉取
+- 采集器状态行的「采集可能已停止」告警仅在自动刷新开启时判断（关闭时不采集是预期行为）
+
+### 迁移（旧 `collectIntervalMinutes` → 统一字段）
+
+`config/appSettings.ts` 读路径执行**一次性迁移并落库**（`readMigratedRaw`）：
+
+- 旧字段存在且 ≠ 旧默认 15 → 视为用户显式调过的采集间隔，以它为准（避免静默放慢明细采集）
+- 否则仅删除旧字段，沿用 `autoRefreshMinutes`（默认 10）
+
+⚠️ 必须落库：只做"读时覆盖"的话旧值会在每次读取时重新盖掉用户新设的值（用户永远改不动间隔）——实现中途发现并改为一次性迁移，测试用例 2 即为该回归的守卫。
+
+### 文件清单
+
+- `src/shared/types.ts` / `src/shared/defaults.ts` — 字段合并（删 `collectIntervalMinutes`）
+- `src/main/config/appSettings.ts` — 一次性迁移 + 落库（`readAppSettings` / `updateRawAppSettings` 共用 `readMigratedRaw`）
+- `src/main/monitoring/collector.ts` — 间隔读统一字段；新增 `markUsageCollected`；关闭时不执行启动首采
+- `src/main/index.ts` — `monitor:refresh`（commandcode）先占位
+- `src/renderer/src/components/CloudMonitorView.tsx` — `AutoRefreshControl`（三面板共用）+ 移除明细区后台采集开关/写入口
+
+无新增依赖。
+
+### 验证
+
+- `npx tsc --noEmit -p tsconfig.node.json && npx tsc --noEmit -p tsconfig.web.json` ✅
+- `npm run build` ✅
+- 行为测试（esbuild 转译真实模块，仅桩掉 `db/database`、`commandCode`、`usageAccumulator`、`key-store`）：
+  - 迁移 18 条断言 ✅ — 用**用户真实库 JSON**：`collectIntervalMinutes=5` → 统一 5、旧字段删除并落库、迁移幂等（无旧字段不再写库）、写 30 后读回 30（不被旧值覆盖）、旧默认 15 → 10、无数值 0 → 统一关闭、非法值 → 10 且清理
+  - 采集器 10 条断言 ✅ — 间隔读取（10/0/-3/"abc"/3.9 → 10/0/0/0/3）、间隔 0 时 15s 启动首采**不执行**（0 次拉取）、间隔 10 时首采执行 1 次、`markUsageCollected` 更新 `lastCollectedAt`
+- 迁移后本机统一间隔 = **5 分钟**（用户原显式设置的采集间隔），可在新控件内随时调整

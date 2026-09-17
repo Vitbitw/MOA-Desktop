@@ -227,6 +227,69 @@ function SubscriptionSection({ subscription, available }: { subscription?: Comma
   )
 }
 
+// ─── 统一自动刷新控制（套餐用量页面刷新 + 明细后台采集共用同一间隔） ───
+
+/** 可选间隔（分钟）；关闭由复选框表示（值 0） */
+const AUTO_REFRESH_OPTIONS = [5, 10, 15, 30, 60]
+
+/**
+ * 统一自动刷新间隔（分钟），0 = 关闭。
+ * 面板打开期间按它刷新页面数据，应用后台按它采集 Command Code 明细（合并前的两个独立间隔共用此值）。
+ */
+function useAutoRefreshMinutes(): number {
+  const settings = useSettingsStore((s) => s.settings)
+  const n = Math.floor(Number(settings.monitoring?.autoRefreshMinutes ?? 10))
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+/** 写统一自动刷新间隔（0 = 关闭；持久化到 monitoring，全监控源共用） */
+async function setAutoRefreshMinutes(minutes: number): Promise<void> {
+  const store = useSettingsStore.getState()
+  const base = store.settings.monitoring ?? { sources: [], autoRefreshMinutes: 10 }
+  await store.updateSetting('monitoring', { ...base, autoRefreshMinutes: Math.max(0, Math.floor(minutes)) })
+}
+
+/** 面板工具栏控件：[✓] 自动刷新 [N 分钟 ▾]（勾选与间隔写的是同一个持久化设置） */
+function AutoRefreshControl() {
+  const minutes = useAutoRefreshMinutes()
+  // 取消勾选后再勾选时恢复上次选的间隔（默认 10），暂停期间不清零
+  const lastMinutesRef = useRef(minutes > 0 ? minutes : 10)
+  useEffect(() => {
+    if (minutes > 0) lastMinutesRef.current = minutes
+  }, [minutes])
+  const shown = minutes > 0 ? minutes : lastMinutesRef.current
+  // 非常规值（手改配置/迁移而来）也要能显示
+  const options = AUTO_REFRESH_OPTIONS.includes(shown)
+    ? AUTO_REFRESH_OPTIONS
+    : [...AUTO_REFRESH_OPTIONS, shown].sort((a, b) => a - b)
+  return (
+    <label
+      className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+      title="统一控制页面自动刷新与 Command Code 后台明细采集（关闭 = 仅手动刷新）"
+    >
+      <input
+        type="checkbox"
+        checked={minutes > 0}
+        onChange={(e) => void setAutoRefreshMinutes(e.target.checked ? lastMinutesRef.current : 0)}
+        className="accent-primary"
+      />
+      自动刷新
+      <select
+        value={shown}
+        disabled={minutes <= 0}
+        onChange={(e) => void setAutoRefreshMinutes(Number(e.target.value))}
+        className="rounded border border-input bg-background px-1 py-0.5 text-xs text-foreground disabled:opacity-50"
+      >
+        {options.map((m) => (
+          <option key={m} value={m}>
+            {m} 分钟
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
 // ─── 面板：Command Code 云端用量 ───
 
 function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
@@ -240,14 +303,13 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
   const [loggingIn, setLoggingIn] = useState(false)
-  const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
   const [showApiKeyInput, setShowApiKeyInput] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   // 本地累计（云端列表对部分套餐只给最近 100 条，累计口径让数字只增不减）
   const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(null)
   const [collector, setCollector] = useState<CollectorStatusInfo | null>(null)
-  const [detailMode, setDetailMode] = useState<'cumulative' | 'window'>('cumulative')
+  const [detailMode, setDetailMode] = useState<'monthly' | 'cumulative' | 'window'>('monthly')
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数（拿到过期的 loading/status）
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -256,6 +318,8 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   })
 
   const loggedIn = status?.loggedIn ?? false
+  // 统一自动刷新间隔（分钟；0 = 关闭）：页面刷新与 Command Code 后台明细采集共用
+  const refreshMinutes = useAutoRefreshMinutes()
 
   // ── 数据加载 ──
   const loadStatus = async () => {
@@ -347,18 +411,16 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.loggedIn, usage == null])
 
-  // 自动刷新定时器（经 refreshRef 调用最新 refresh）
+  // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {
-    const minutes = settings.monitoring?.autoRefreshMinutes ?? 0
-    if (!autoRefresh || !loggedIn || minutes <= 0 || !sourceId) return
+    if (refreshMinutes <= 0 || !loggedIn || !sourceId) return
     timerRef.current = setInterval(() => {
       refreshRef.current()
-    }, minutes * 60_000)
+    }, refreshMinutes * 60_000)
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, loggedIn, sourceId, settings.monitoring?.autoRefreshMinutes])
+  }, [refreshMinutes, loggedIn, sourceId])
 
   // ── 动作 ──
   const handleLogin = async () => {
@@ -386,7 +448,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     try {
       await window.moaAPI.monitorLogout(sourceId)
     } catch {
-      // 忽略
+      // 登出尽力而为：本地登录态立即复位，失败无需打扰用户
     }
     setStatus({ loggedIn: false, hasApiKey: false })
     setUsage(null)
@@ -417,21 +479,51 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const coverageIncomplete =
     !!coverage && (coverage.truncated || (summary !== undefined && coverage.records < summary.totalCount))
   const coverageSpan = fmtSpan(coverage?.fromTs, coverage?.toTs)
-  // 明细口径：本地累计（只增不减，默认） / 云端窗口（服务端只给最近 100 条）
+  // 明细口径：服务端聚合（charts 端点，默认）/ 本地累计（本地观测累积）/ 云端窗口（list 聚合，最近 100 条）
+  // 三者关系与为什么都保留：见 docs/superpowers/specs/2026-09-17-commandcode-model-detail-completeness.md
+  const monthlyRows = usage?.monthlyModels?.rows ?? []
+  // 注意：端点标记为「明确 false」才算不可用。字段缺失（例如主进程未重启到最新版本）不应误判为不可用
+  const chartsFlag = usage?.sourcesAvailable.chartsEndpoint
+  const monthlyAvailable = monthlyRows.length > 0 && chartsFlag !== false
+  const windowAvailable = usage?.sourcesAvailable.listAggregate === true && models.length > 0
   const cumulativeModels = cumulative?.models ?? []
-  const shownModels = detailMode === 'cumulative' ? cumulativeModels : models
+  // 回退优先级：同为服务端来源的「服务端聚合 → 云端窗口」优先，最后才退到「本地累计」（语义不同，仅作兜底）
+  const effectiveDetailMode: 'monthly' | 'cumulative' | 'window' =
+    detailMode === 'monthly' && !monthlyAvailable
+      ? windowAvailable
+        ? 'window'
+        : 'cumulative'
+      : detailMode === 'window' && !windowAvailable
+        ? monthlyAvailable
+          ? 'monthly'
+          : 'cumulative'
+        : detailMode
+  const shownModels =
+    effectiveDetailMode === 'monthly' ? monthlyRows : effectiveDetailMode === 'cumulative' ? cumulativeModels : models
+  const monthlyWindow = usage?.monthlyModels?.window
+  // 缓存节省列：仅当当前口径的行里真有该数据（目前只有服务端聚合口径提供）
+  const showCacheSavings = shownModels.some((m) => Number((m as { cacheSavings?: number }).cacheSavings) > 0)
+  const monthlySpan =
+    monthlyWindow?.fromTs !== undefined && monthlyWindow?.toTs !== undefined
+      ? fmtSpan(monthlyWindow.fromTs * 1000, monthlyWindow.toTs * 1000)
+      : null
   const cumulativeSinceLabel = cumulative?.sinceTs !== undefined ? fmtSpan(cumulative.sinceTs, cumulative.sinceTs) : null
-  const collectMinutes = settings.monitoring?.collectIntervalMinutes ?? 15
-  // 采集器是否还活着：持久化的最近采集时间超过 2×间隔（且至少 10 分钟）即视为可能停止
+  // 采集器是否还活着：持久化的最近采集时间超过 2×间隔（且至少 10 分钟）即视为可能停止；
+  // 自动刷新关闭时不判断（不采集是预期行为，避免误报「采集已停止」）
   const collectorState = cumulative?.collectorState
-  const staleThresholdMs = Math.max(2 * (collector?.intervalMinutes ?? collectMinutes) * 60_000, 10 * 60_000)
+  const staleThresholdMs = Math.max(2 * (collector?.intervalMinutes ?? refreshMinutes) * 60_000, 10 * 60_000)
   const collectorStale =
-    collectorState?.lastRunAt !== undefined && collectorState.lastRunAt > 0 && Date.now() - collectorState.lastRunAt > staleThresholdMs
-  const setCollectInterval = async (minutes: number): Promise<void> => {
-    const base = settings.monitoring ?? { sources: [], autoRefreshMinutes: 10 }
-    await useSettingsStore.getState().updateSetting('monitoring', { ...base, collectIntervalMinutes: minutes })
-    void loadCumulative()
-  }
+    refreshMinutes > 0 &&
+    collectorState?.lastRunAt !== undefined &&
+    collectorState.lastRunAt > 0 &&
+    Date.now() - collectorState.lastRunAt > staleThresholdMs
+  // 汇总口径（服务端 periodBasis）：'billing-period' = 当前计费月、'last-30-days' = 最近 30 天
+  const summaryBasisLabel =
+    summary?.periodBasis === 'billing-period'
+      ? '当前计费月'
+      : summary?.periodBasis === 'last-30-days'
+        ? '最近 30 天'
+        : (summary?.periodBasis ?? '服务端口径')
 
   return (
     <div className="flex flex-col gap-4">
@@ -464,15 +556,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
           {lastFetchedAt && (
             <span className="text-xs text-muted-foreground">上次刷新 {fmtTime(lastFetchedAt)}</span>
           )}
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="accent-primary"
-            />
-            自动刷新（{settings.monitoring?.autoRefreshMinutes ?? 10} 分钟）
-          </label>
+          <AutoRefreshControl />
           <button
             onClick={refresh}
             disabled={loading || !loggedIn}
@@ -608,9 +692,17 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
             )}
           </section>
 
-          {/* 汇总卡片 */}
+          {/* 汇总卡片：服务端 summary 口径（计费月 / 最近 30 天），与模型明细口径不同 */}
           <section>
-            <h3 className="text-xs font-semibold text-muted-foreground mb-2">汇总</h3>
+            <div className="flex flex-wrap items-baseline gap-x-2 mb-2">
+              <h3 className="text-xs font-semibold text-muted-foreground">汇总</h3>
+              <span
+                className="text-xs text-muted-foreground"
+                title="来自服务端 summary 接口，统计口径由服务端给出（periodBasis）；「模型明细」是最近 100 条请求记录聚合或本地累计，两者数字不应相等"
+              >
+                {summaryBasisLabel} · 与模型明细口径不同
+              </span>
+            </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <StatCard label="总请求数" value={summary ? fmtNum(summary.totalCount) : '—'} />
               <StatCard label="总成本" value={summary ? formatCost(summary.totalCost, currency) : '—'} />
@@ -619,55 +711,67 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
             </div>
           </section>
 
-          {/* 模型明细：默认本地累计口径（云端列表对部分套餐只给最近 100 条，滚动窗口看起来"不涨"） */}
+          {/* 模型明细：默认服务端聚合口径（charts），可切换本地累计 / 云端窗口 */}
           <section>
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-2">
               <h3 className="text-xs font-semibold text-muted-foreground">模型明细</h3>
               <div className="flex items-center gap-1">
                 {(
                   [
-                    ['cumulative', '本地累计'],
-                    ['window', '云端窗口']
+                    [
+                      'monthly',
+                      '服务端聚合',
+                      '服务端预聚合（模型 × 时间桶），覆盖服务端固定返回的最近约 28 个桶；数据源 /internal/usage/charts'
+                    ],
+                    [
+                      'cumulative',
+                      '本地累计',
+                      '本地按记录 id 去重累积（自首次采集起，只增不减）；两次采集之间的突发可能漏采'
+                    ],
+                    [
+                      'window',
+                      '云端窗口',
+                      '与「本地累计」同源（都来自 /internal/usage 的逐条记录），但只覆盖服务端返回的最近 100 条；用于与官方用量页逐条对账'
+                    ]
                   ] as const
-                ).map(([mode, label]) => (
-                  <button
-                    key={mode}
-                    onClick={() => setDetailMode(mode)}
-                    className={`px-2 py-0.5 text-xs rounded border transition-colors ${
-                      detailMode === mode
-                        ? 'border-primary/50 bg-primary/10 text-foreground'
-                        : 'border-border text-muted-foreground hover:bg-accent'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
+                ).map(([mode, label, hint]) => {
+                  const disabled = mode === 'monthly' && !monthlyAvailable
+                  return (
+                    <button
+                      key={mode}
+                      onClick={() => setDetailMode(mode)}
+                      disabled={disabled}
+                      title={disabled ? '该账号的 charts 端点未返回数据，服务端聚合口径不可用' : hint}
+                      className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                        effectiveDetailMode === mode
+                          ? 'border-primary/50 bg-primary/10 text-foreground'
+                          : 'border-border text-muted-foreground hover:bg-accent'
+                      } ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    >
+                      {label}
+                    </button>
+                  )
+                })}
               </div>
-              <label className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={collectMinutes > 0}
-                  onChange={(e) => void setCollectInterval(e.target.checked ? 15 : 0)}
-                  className="accent-primary"
-                />
-                后台采集
-                <select
-                  value={collectMinutes > 0 ? collectMinutes : 15}
-                  disabled={collectMinutes <= 0}
-                  onChange={(e) => void setCollectInterval(Number(e.target.value))}
-                  className="rounded border border-input bg-background px-1 py-0.5 text-xs text-foreground disabled:opacity-50"
-                >
-                  {[5, 10, 15, 30, 60].map((m) => (
-                    <option key={m} value={m}>
-                      {m} 分钟
-                    </option>
-                  ))}
-                </select>
-              </label>
             </div>
 
             {/* 口径说明行 */}
-            {detailMode === 'cumulative' ? (
+            {effectiveDetailMode === 'monthly' ? (
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mb-2 text-xs text-muted-foreground">
+                <span>服务端按「模型 × 时间桶」聚合</span>
+                {usage?.monthlyModels && <span>· {usage.monthlyModels.buckets} 个时间桶</span>}
+                {monthlySpan && <span>· 覆盖 {monthlySpan}</span>}
+                <span className="text-yellow-600/90" title="实测：from / periodBasis 等查询参数被服务端忽略，固定返回最近约 28 个时间桶（约 5 分钟/桶），覆盖范围短于整月，故与「汇总」卡片不会相等">
+                  · 范围由服务端固定（短于整月）
+                </span>
+                <span
+                  className="cursor-help"
+                  title="来自 /internal/usage/charts（服务端预聚合，字段含缓存成本/节省、按月额度消耗拆分）"
+                >
+                  · 口径说明
+                </span>
+              </div>
+            ) : effectiveDetailMode === 'cumulative' ? (
               <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mb-2 text-xs text-muted-foreground">
                 {cumulative && cumulative.records > 0 ? (
                   <>
@@ -685,7 +789,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                       <span>· 最近采集 {fmtTime(cumulative.lastCollectedAt)}</span>
                     )}
                     {collector && !collector.enabled && (
-                      <span className="text-yellow-600">· 后台采集已关闭（仅打开本页时累积）</span>
+                      <span className="text-yellow-600">· 自动刷新已关闭（仅手动刷新时累积）</span>
                     )}
                     {collector?.enabled && collector.intervalMinutes > 0 && (
                       <span>· 每 {collector.intervalMinutes} 分钟自动采集</span>
@@ -699,7 +803,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                     </span>
                   </>
                 ) : (
-                  <span>暂无本地累计数据（打开本页或后台采集后会逐条累积）</span>
+                  <span>暂无本地累计数据（自动刷新或手动刷新后会逐条累积）</span>
                 )}
               </div>
             ) : (
@@ -731,18 +835,28 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                     <th className="text-right px-4 py-2 font-medium">↑ 输入</th>
                     <th className="text-right px-4 py-2 font-medium">↓ 输出</th>
                     <th className="text-right px-4 py-2 font-medium">总 Tokens</th>
+                    {showCacheSavings && (
+                      <th
+                        className="text-right px-4 py-2 font-medium"
+                        title="缓存命中省下的费用（服务端聚合口径提供；= 未命中时的名义成本 − 实际成本）"
+                      >
+                        缓存节省
+                      </th>
+                    )}
                     <th className="text-right px-4 py-2 font-medium">成本</th>
                   </tr>
                 </thead>
                 <tbody>
                   {shownModels.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-12 text-center text-sm text-muted-foreground">
-                        {detailMode === 'cumulative'
-                          ? '暂无本地累计数据（打开本页或后台采集后会逐条累积）'
-                          : summary
-                            ? '暂无模型明细数据'
-                            : '暂无用量数据'}
+                      <td colSpan={showCacheSavings ? 7 : 6} className="px-4 py-12 text-center text-sm text-muted-foreground">
+                        {effectiveDetailMode === 'monthly'
+                          ? '暂无服务端聚合数据（charts 端点未返回数据）'
+                          : effectiveDetailMode === 'cumulative'
+                            ? '暂无本地累计数据（自动刷新或手动刷新后会逐条累积）'
+                            : summary
+                              ? '暂无模型明细数据'
+                              : '暂无用量数据'}
                       </td>
                     </tr>
                   ) : (
@@ -753,6 +867,14 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                         <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensIn)}</td>
                         <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensOut)}</td>
                         <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensTotal)}</td>
+                        {showCacheSavings && (
+                          <td className="px-4 py-2 text-right tabular-nums text-green-600">
+                            {(() => {
+                              const v = Number((m as { cacheSavings?: number }).cacheSavings)
+                              return v > 0 ? formatCost(v, currency) : '—'
+                            })()}
+                          </td>
+                        )}
                         <td className="px-4 py-2 text-right tabular-nums">{formatCost(m.cost, currency)}</td>
                       </tr>
                     ))
@@ -780,7 +902,6 @@ function fmtYi(v: number): string {
 }
 
 function MimoPanel({ source }: { source: RemoteUsageSource }) {
-  const settings = useSettingsStore((s) => s.settings)
   const sourceId = source.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(null)
@@ -789,7 +910,6 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
   const [loggingIn, setLoggingIn] = useState(false)
-  const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数
@@ -799,6 +919,8 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   })
 
   const loggedIn = status?.loggedIn ?? false
+  // 统一自动刷新间隔（分钟；0 = 关闭）：页面刷新与 Command Code 后台明细采集共用
+  const refreshMinutes = useAutoRefreshMinutes()
 
   // ── 数据加载 ──
   const loadStatus = async () => {
@@ -857,18 +979,16 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.loggedIn, usage == null])
 
-  // 自动刷新定时器（经 refreshRef 调用最新 refresh）
+  // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {
-    const minutes = settings.monitoring?.autoRefreshMinutes ?? 0
-    if (!autoRefresh || !loggedIn || minutes <= 0) return
+    if (refreshMinutes <= 0 || !loggedIn) return
     timerRef.current = setInterval(() => {
       refreshRef.current()
-    }, minutes * 60_000)
+    }, refreshMinutes * 60_000)
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, loggedIn, settings.monitoring?.autoRefreshMinutes])
+  }, [refreshMinutes, loggedIn])
 
   // ── 动作 ──
   const handleLogin = async () => {
@@ -894,7 +1014,7 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
     try {
       await window.moaAPI.monitorLogout(sourceId)
     } catch {
-      // 忽略
+      // 登出尽力而为：本地登录态立即复位，失败无需打扰用户
     }
     setStatus({ loggedIn: false, hasApiKey: false })
     setUsage(null)
@@ -937,15 +1057,7 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
           {lastFetchedAt && (
             <span className="text-xs text-muted-foreground">上次刷新 {fmtTime(lastFetchedAt)}</span>
           )}
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="accent-primary"
-            />
-            自动刷新（{settings.monitoring?.autoRefreshMinutes ?? 10} 分钟）
-          </label>
+          <AutoRefreshControl />
           <button
             onClick={refresh}
             disabled={loading || !loggedIn}
@@ -1081,7 +1193,6 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 // ─── 面板：DeepSeek 开放平台用量 ───
 
 function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
-  const settings = useSettingsStore((s) => s.settings)
   const sourceId = source.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(null)
@@ -1090,7 +1201,6 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
   const [loggingIn, setLoggingIn] = useState(false)
-  const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
   const [showApiKeyInput, setShowApiKeyInput] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
@@ -1102,6 +1212,8 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   })
 
   const loggedIn = status?.loggedIn ?? false
+  // 统一自动刷新间隔（分钟；0 = 关闭）：页面刷新与 Command Code 后台明细采集共用
+  const refreshMinutes = useAutoRefreshMinutes()
 
   // ── 数据加载 ──
   const loadStatus = async () => {
@@ -1160,18 +1272,16 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.loggedIn, usage == null])
 
-  // 自动刷新定时器（经 refreshRef 调用最新 refresh）
+  // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {
-    const minutes = settings.monitoring?.autoRefreshMinutes ?? 0
-    if (!autoRefresh || !loggedIn || minutes <= 0) return
+    if (refreshMinutes <= 0 || !loggedIn) return
     timerRef.current = setInterval(() => {
       refreshRef.current()
-    }, minutes * 60_000)
+    }, refreshMinutes * 60_000)
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, loggedIn, settings.monitoring?.autoRefreshMinutes])
+  }, [refreshMinutes, loggedIn])
 
   // ── 动作 ──
   const handleLogin = async () => {
@@ -1198,7 +1308,7 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
     try {
       await window.moaAPI.monitorLogout(sourceId)
     } catch {
-      // 忽略
+      // 登出尽力而为：本地登录态立即复位，失败无需打扰用户
     }
     setStatus({ loggedIn: false, hasApiKey: false })
     setUsage(null)
@@ -1259,15 +1369,7 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
           {lastFetchedAt && (
             <span className="text-xs text-muted-foreground">上次刷新 {fmtTime(lastFetchedAt)}</span>
           )}
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="accent-primary"
-            />
-            自动刷新（{settings.monitoring?.autoRefreshMinutes ?? 10} 分钟）
-          </label>
+          <AutoRefreshControl />
           <button
             onClick={refresh}
             disabled={loading || !loggedIn}

@@ -5,8 +5,10 @@
 //
 // 说明：
 //   - 仅处理 commandcode 类型的已启用源（其余源的接口结构不同，累积逻辑不可复用）
-//   - 每分钟检查一次是否需要采集，间隔从设置读取 → 改设置无需重启应用
-//   - 与手动刷新共用 refreshCommandCodeUsage，因此同样走 fetchProxy（尊重网络代理设置）
+//   - 采集间隔 = 统一自动刷新间隔（monitoring.autoRefreshMinutes，与页面刷新共用；0 = 关闭），
+//     每分钟检查一次是否需要采集，间隔从设置读取 → 改设置无需重启应用
+//   - 与手动刷新共用 refreshCommandCodeUsage，因此同样走 fetchProxy（尊重网络代理设置）；
+//     页面刷新会调用 markUsageCollected 占位，同一间隔内本采集器不再重复拉取
 
 import { readAppSettings } from '../config/appSettings'
 import { getUsageCredential } from '../store/key-store'
@@ -22,11 +24,11 @@ const FIRST_RUN_DELAY_MS = 15_000
 const DEBUG = process.env.MOA_MONITOR_DEBUG === '1'
 
 interface CollectorStatus {
-  /** 是否启用（间隔 > 0 且有已登录的 commandcode 源） */
+  /** 是否启用（统一自动刷新间隔 > 0 且有已登录的 commandcode 源） */
   enabled: boolean
   /** 生效的采集间隔（分钟），0 = 关闭 */
   intervalMinutes: number
-  /** 最近一次采集完成时间（epoch 毫秒），0 = 尚未采集 */
+  /** 最近一次数据采集完成时间（epoch 毫秒；含页面刷新触发的采集），0 = 尚未采集 */
   lastCollectedAt: number
   /** 最近一次采集的错误码（成功后清空） */
   lastError: string | null
@@ -40,11 +42,19 @@ let lastCollectedAt = 0
 let lastError: string | null = null
 let running = false
 
-/** 生效的采集间隔（分钟）：<0 → 0（关闭） */
+/** 生效的采集间隔（分钟）：读取统一的自动刷新间隔（0 = 关闭）。
+ * 合并前是独立的 collectIntervalMinutes，现与页面「自动刷新」共用 monitoring.autoRefreshMinutes。 */
 export function effectiveIntervalMinutes(settings: AppSettings): number {
-  // readAppSettings 已保证字段存在（DEFAULT_MONITORING.collectIntervalMinutes = 15）
-  const n = Math.floor(settings.monitoring.collectIntervalMinutes!)
-  return n < 0 ? 0 : n
+  const n = Math.floor(Number(settings.monitoring.autoRefreshMinutes))
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+/**
+ * 记录一次「数据采集」发生（页面刷新/自动刷新调用，非后台采集器）。
+ * 页面刷新与后台采集共用同一间隔，调用方在拉取前占位 → 采集器跳过同一间隔内的重复拉取。
+ */
+export function markUsageCollected(): void {
+  lastCollectedAt = Date.now()
 }
 
 function commandCodeSources(settings: AppSettings): RemoteUsageSource[] {
@@ -95,12 +105,14 @@ async function collectOnce(trigger: 'first' | 'timer'): Promise<void> {
   }
 }
 
-/** 启动后台采集（幂等）。应用运行期间常驻；间隔从设置读取，改设置无需重启 */
+/** 启动后台采集（幂等）。应用运行期间常驻；间隔从设置读取（统一自动刷新间隔），改设置无需重启 */
 export function startUsageCollector(): void {
   if (timer || firstRunTimer) return
 
   firstRunTimer = setTimeout(() => {
     firstRunTimer = null
+    // 关闭状态不采集：首次采集属于「自动刷新」的一部分，不是独立机制
+    if (effectiveIntervalMinutes(readAppSettings()) <= 0) return
     void collectOnce('first')
   }, FIRST_RUN_DELAY_MS)
 
