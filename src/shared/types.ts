@@ -218,14 +218,20 @@ export interface CommandCodeSubscription {
   planId?: string
   /** 订阅状态（active / trialing / past_due / canceled / inactive，未知值原样保留） */
   status?: string
-  /** 当前计费周期结束（套餐到期）时间：ISO 原样保留（若有） */
+  /** 当前计费周期结束时间：ISO 原样保留（若有）。续费开启时为「下次续费时间」，排定取消时为「服务到期时间」 */
   currentPeriodEnd?: string
-  /** 到期时间归一化（epoch 秒；兼容 ISO / epoch 秒 / epoch 毫秒来源） */
+  /** 当前周期结束时间归一化（epoch 秒；兼容 ISO / epoch 秒 / epoch 毫秒来源） */
   currentPeriodEndTs?: number
-  /** 已排定取消（到期后不再续费） */
+  /** 期末取消标记（cancel_at_period_end）：true = 已排定取消、到期不续费；false = 自动续费开启 */
+  cancelAtPeriodEnd?: boolean
+  /** 已排定取消（cancelAtPeriodEnd=true 或 cancelAt 有值）。字段缺失 = 信息不明，不推断 */
   cancelScheduled?: boolean
-  /** 排定取消时间（epoch 秒；cancelAt 存在时） */
+  /** 排定取消时间（epoch 秒；cancelAt 有值时） */
   cancelAtTs?: number
+  /** 取消完成时间（epoch 秒；canceledAt 有值时） */
+  canceledAtTs?: number
+  /** 订阅结束时间（epoch 秒；endedAt 有值时） */
+  endedAtTs?: number
   /** 计划变更过渡（如降级排定在周期末生效） */
   pendingPhase?: { unitAmount?: number; currency?: string; effectiveDateTs?: number }
 }

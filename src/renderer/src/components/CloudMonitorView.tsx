@@ -143,25 +143,34 @@ function SubscriptionSection({ subscription, available }: { subscription?: Comma
         ? 'text-destructive'
         : 'text-muted-foreground'
 
-  // 到期时间 + 剩余天数/取消提示
+  // 到期/续费状态行（优先级：已取消 > 已过期 > 排定取消 > 扣款失败 > 续费开启 > 信息不明）
   const endTs = subscription.currentPeriodEndTs
   const endLabel = endTs !== undefined ? fmtDateUtc(endTs) : '—'
+  const remainDays = endTs !== undefined ? Math.ceil((endTs * 1000 - Date.now()) / 86_400_000) : undefined
+  const remainText = remainDays !== undefined && remainDays >= 0 ? `剩余 ${remainDays} 天` : null
+  const dueSoon = remainDays !== undefined && remainDays >= 0 && remainDays <= 7
+  const endedOrCanceledTs = subscription.endedAtTs ?? subscription.canceledAtTs
+  const isCanceled = subscription.status === 'canceled' || endedOrCanceledTs !== undefined
   let endNote: string | null = null
   let endTone = 'text-muted-foreground'
-  if (endTs !== undefined) {
-    const remainDays = Math.ceil((endTs * 1000 - Date.now()) / 86_400_000)
-    if (subscription.cancelScheduled) {
-      endNote = '已排定取消，到期后不再续费'
-      endTone = 'text-yellow-600'
-    } else if (remainDays < 0) {
-      endNote = '已到期'
-      endTone = 'text-destructive'
-    } else if (remainDays <= 7) {
-      endNote = `剩余 ${remainDays} 天，即将到期`
-      endTone = 'text-destructive'
-    } else {
-      endNote = `剩余 ${remainDays} 天，到期自动续费`
-    }
+  if (isCanceled) {
+    endNote = endedOrCanceledTs !== undefined ? `已于 ${fmtDateUtc(endedOrCanceledTs)} 结束` : '订阅已取消'
+  } else if (remainDays !== undefined && remainDays < 0) {
+    endNote = '已过期'
+    endTone = 'text-destructive'
+  } else if (subscription.cancelScheduled === true) {
+    endNote = '已排定取消，到期后终止服务'
+    endTone = 'text-yellow-600'
+  } else if (subscription.status === 'past_due') {
+    endNote = '自动续费扣款失败，建议到 Studio 更新支付方式'
+    endTone = 'text-destructive'
+  } else if (subscription.cancelScheduled === false) {
+    endNote = remainText ? `自动续费开启 · ${remainText}` : '自动续费开启'
+    if (dueSoon) endTone = 'text-yellow-600'
+  } else {
+    // 续费状态字段缺失：仅显示剩余天数，不做推断
+    endNote = remainText
+    if (dueSoon) endTone = 'text-destructive'
   }
 
   const phaseNote = subscription.pendingPhase

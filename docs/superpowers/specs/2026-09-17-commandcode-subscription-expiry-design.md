@@ -22,16 +22,18 @@
 | `GET https://api.commandcode.ai/internal/billing/subscriptions?withPending=true` | Cookie `__Secure-commandcode_prod_.session_token` | `{ success: true, data: <subscription> \| null }`，无订阅时 `data: null` | 401 ✓ |
 | `GET https://api.commandcode.ai/alpha/billing/subscriptions` | Bearer Provider API Key（与 `/alpha/billing/credits` 相同） | 待实测，防御性解析 | 401 ✓ |
 
-subscription 对象字段（Studio 前端使用处确认）：
+subscription 对象字段（2026-09-17 真实响应实测确认）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `planId` | string | 如 `individual-pro` / `individual-goat` / `individual-max` / `teams-pro` |
 | `status` | string | `active` / `trialing` / `past_due` / `canceled` / `inactive`（Studio 视 active/trialing/past_due 为有效活跃） |
-| `currentPeriodEnd` | ISO 字符串 | **套餐到期时间**；Studio 用 UTC 口径显示（`timeZone:"UTC"`） |
-| `cancelAt` | ISO/null | 非空 → 已排定取消（到期后不续费），UI 显示 "Cancels <日期>" |
+| `currentPeriodEnd` | ISO 字符串 | **当前计费周期结束时间**；Studio 用 UTC 口径显示（`timeZone:"UTC"`）。续费开启时为「下次续费时间」，排定取消时为「服务到期时间」 |
+| `cancelAtPeriodEnd` | boolean | **续费开关**：false = 自动续费开启；true = 已排定期末取消 |
+| `cancelAt` | ISO/null | 排定取消时间（Stripe 语义，与 cancelAtPeriodEnd 互为信号） |
+| `canceledAt` / `endedAt` | ISO/null | 取消完成时间 / 订阅结束时间 |
 | `pendingPhase` | 对象 | 计划变更过渡：`{ unitAmount, currency, effectiveDate(epoch 秒) }` |
-| `createdAt` / `metadata` | — | Studio 内部升级逻辑用，本功能不展示 |
+| `createdAt` / `metadata` / `quantity` / `priceId` | — | Studio 内部逻辑用，本功能不展示 |
 
 planId → 展示名（取自 Studio 套餐层级常量）：go→Go、goat→GOAT、pro/pro-v1→Pro、provider→Provider、max→Max 10×、ultra→Max 20×、teams-pro→Teams Pro；未知 ID 原样显示。
 
@@ -64,6 +66,7 @@ interface CommandCodeSubscription {
   - `success:false` → 解析失败（区块不可用）；`data:null` → 明确无订阅
   - 兼容数组形态（多订阅取 active/trialing 优先，否则首项）、`{ data: { subscription } }` 嵌套、snake_case 字段名
   - 时间字段归一化为 **epoch 秒**（与 `UsageWindowInfo.resetAt` 一致）：ISO 字符串 / 数字（>1e12 视为毫秒）均可
+  - 续费状态推导 `cancelScheduled`（三来源）：`cancelAtPeriodEnd=true` 或 `cancelAt` 有值 → true；两处都明确为否 → false；字段缺失 → 不设置（UI 不做推断）
 
 ## UI（`CloudMonitorView.tsx` → `CommandCodePanel`）
 
@@ -71,11 +74,13 @@ interface CommandCodeSubscription {
 
 1. **当前套餐**：展示名（大字）+ planId（小字，geek 风格）
 2. **订阅状态**：中文文案（使用中/试用中/逾期未付/已取消/未激活）+ 颜色（active/trialing 绿、past_due 红、其余灰）；有 pendingPhase 时附「套餐将于 <日期> 变更」
-3. **到期时间**：UTC 日期（与 Studio 一致，避免时区差一天）+ 副文案：
-   - 已排定取消 → 「已排定取消，到期后不再续费」（黄）
-   - 已过期 → 「已到期」（红）
-   - 剩余 ≤7 天 → 「剩余 N 天，即将到期」（红）
-   - 其他 → 「剩余 N 天，到期自动续费」（灰）
+3. **到期时间**：UTC 日期（与 Studio 一致，避免时区差一天）+ 状态行（优先级：已取消 > 已过期 > 排定取消 > 扣款失败 > 续费开启 > 信息不明）：
+   - 已取消/已结束 → 「已于 <日期> 结束」/「订阅已取消」（灰）
+   - 已过期 → 「已过期」（红）
+   - 已排定取消 → 「已排定取消，到期后终止服务」（黄）
+   - past_due → 「自动续费扣款失败，建议到 Studio 更新支付方式」（红）
+   - 续费开启（`cancelScheduled=false`）→ 「自动续费开启 · 剩余 N 天」（≤7 天黄，否则灰）
+   - 续费状态字段缺失 → 仅「剩余 N 天」（≤7 天红），不做推断
 
 无订阅/不可用时的空态同现有卡片风格（居中灰字）。
 
@@ -92,4 +97,5 @@ interface CommandCodeSubscription {
 
 - `npx tsc --noEmit -p tsconfig.node.json && npx tsc --noEmit -p tsconfig.web.json`
 - `npm run build`
-- 手动：登录后刷新 → 订阅卡显示套餐/状态/到期时间；无订阅账号显示空态；伪造未知 planId/缺失字段不崩（防御性解析）
+- 真实响应实测（2026-09-17，用登录分区 cookie 探针调用 `refreshCommandCodeUsage` 全链路）：6 端点 200，归一化输出 `{planId: 'individual-goat', status: 'active', currentPeriodEnd: '2026-09-26T07:23:49.000Z', currentPeriodEndTs: 1790407429, cancelAtPeriodEnd: false, cancelScheduled: false}`
+- 手动：登录后刷新 → 订阅卡显示套餐/状态/到期时间/续费状态；无订阅账号显示空态；伪造未知 planId/缺失字段不崩（防御性解析）

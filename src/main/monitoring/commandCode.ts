@@ -413,18 +413,24 @@ function parseSubscription(body: unknown): SubscriptionParse | null {
   const periodEndTs = toEpochSec(periodEndRaw)
   if (periodEndTs !== undefined) sub.currentPeriodEndTs = periodEndTs
 
-  // cancelAt / cancel_at：null → 明确未排定取消；有值 → 已排定取消
+  // 取消/续费状态字段（实测响应含 cancelAtPeriodEnd / cancelAt / canceledAt / endedAt 四件套）
   // 注意用显式 undefined 判断：API 可能同时返回 cancelAt: null 与缺失的 cancel_at，`??` 会把 null 短路掉
   const cancelRaw = obj.cancelAt !== undefined ? obj.cancelAt : obj.cancel_at
-  if (cancelRaw === null) {
-    sub.cancelScheduled = false
-  } else {
-    const cancelTs = toEpochSec(cancelRaw)
-    if (cancelTs !== undefined) {
-      sub.cancelScheduled = true
-      sub.cancelAtTs = cancelTs
-    }
-  }
+  const cancelAtTs = toEpochSec(cancelRaw)
+  if (cancelAtTs !== undefined) sub.cancelAtTs = cancelAtTs
+
+  const flagRaw = obj.cancelAtPeriodEnd !== undefined ? obj.cancelAtPeriodEnd : obj.cancel_at_period_end
+  const periodEndFlag = typeof flagRaw === 'boolean' ? flagRaw : undefined
+  if (periodEndFlag !== undefined) sub.cancelAtPeriodEnd = periodEndFlag
+
+  const canceledTs = toEpochSec(obj.canceledAt ?? obj.canceled_at)
+  if (canceledTs !== undefined) sub.canceledAtTs = canceledTs
+  const endedTs = toEpochSec(obj.endedAt ?? obj.ended_at)
+  if (endedTs !== undefined) sub.endedAtTs = endedTs
+
+  // 推导 cancelScheduled：任一取消信号 → true；两处都明确为否 → false；信息不足 → 不设置（UI 不做推断）
+  if (periodEndFlag === true || cancelAtTs !== undefined) sub.cancelScheduled = true
+  else if (periodEndFlag === false || cancelRaw === null) sub.cancelScheduled = false
 
   const phaseRaw = isObj(obj.pendingPhase) ? obj.pendingPhase : isObj(obj.pending_phase) ? obj.pending_phase : null
   if (phaseRaw) {
