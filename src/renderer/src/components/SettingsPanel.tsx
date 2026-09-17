@@ -1,11 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
 import { useConfigStore } from '../store/configStore'
-import { useConversationStore } from '../store/conversationStore'
 import { useProbeStore, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, SubModelRole } from '../../../shared/types'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, MoAMode, SubModelRole } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { MOA_ROLE_TEMPLATES, getRoleTemplate } from '../../../shared/moaRoles'
 
@@ -16,8 +15,10 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('moa')
 
   useEffect(() => {
-    if (!loaded) loadSettings()
-  }, [loaded, loadSettings])
+    // 每次挂载都重新拉取设置：渲染端启动快照可能过期
+    // （如用量悬浮窗位置由主进程读-改-写维护，整块覆盖会把它抹回旧值）
+    loadSettings()
+  }, [loadSettings])
 
   if (!loaded) {
     return (
@@ -135,35 +136,15 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
       {/* Display Section */}
       {activeSection === 'display' && (
         <div className="space-y-5 max-w-xl">
-          <SettingRow label="子模型输出" hint="子模型输出在对话中的显示方式">
+          <SettingRow label="货币" hint="用量与费用展示的货币单位（费用按固定汇率折算显示）">
             <select
-              value={settings.display.subModelShow}
-              onChange={(e) =>
-                updateSetting('display', {
-                  ...settings.display,
-                  subModelShow: e.target.value as 'always' | 'hidden' | 'perConversation'
-                })
-              }
+              value={settings.currency}
+              onChange={(e) => updateSetting('currency', e.target.value as 'USD' | 'CNY')}
               className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
             >
-              <option value="always">始终显示</option>
-              <option value="hidden">始终隐藏</option>
-              <option value="perConversation">按对话设置</option>
+              <option value="USD">美元 (USD)</option>
+              <option value="CNY">人民币 (CNY)</option>
             </select>
-          </SettingRow>
-
-          <SettingRow label="默认展开子模型" hint="新对话中子模型输出默认是否展开">
-            <ToggleSwitch
-              checked={settings.display.defaultSubModelExpanded}
-              onChange={(v) => updateSetting('display', { ...settings.display, defaultSubModelExpanded: v })}
-            />
-          </SettingRow>
-
-          <SettingRow label="自动清除" hint="发送新消息时自动清除之前的子模型输出">
-            <ToggleSwitch
-              checked={settings.display.autoClearSubOutputs}
-              onChange={(v) => updateSetting('display', { ...settings.display, autoClearSubOutputs: v })}
-            />
           </SettingRow>
 
           <SettingRow label="桌面用量悬浮窗" hint="在桌面角落显示今日/总计用量数字徽章">
@@ -186,15 +167,24 @@ export default function SettingsPanel({ onClose }: { onClose?: () => void }) {
 
 // ── MoA Section ──
 
+/** moa:getConfig 返回形态兼容：裸配置对象 / { success, data }（主进程契约收紧后） */
+function unwrapMoaConfig(res: any): any {
+  return res && typeof res === 'object' && 'success' in res ? res.data : res
+}
+
 function MoASection() {
   const providers = useConfigStore((s) => s.providers)
-  const setMoaMode = useConversationStore((s) => s.setMode)
-  const moaMode = useConversationStore((s) => s.mode)
   const notifySaveResult = useSettingsStore((s) => s.notifySaveResult)
 
   const [subModels, setSubModels] = useState<SubModelConfig[]>([])
   const [aggModelId, setAggModelId] = useState('')
   const [aggProviderId, setAggProviderId] = useState('')
+  // 备用聚合模型（fallback，F8）：主聚合失败时引擎自动重试用；置空 = 不使用
+  const [fallbackProviderId, setFallbackProviderId] = useState('')
+  const [fallbackModelId, setFallbackModelId] = useState('')
+  // 聚合提示词变体（F5）：UI 无编辑入口，加载后原值持有、保存时回传，避免静默重置
+  const [promptVariant, setPromptVariant] = useState<'standard-zh' | 'concise-en' | 'custom'>('standard-zh')
+  const [customAggPrompt, setCustomAggPrompt] = useState<string | undefined>(undefined)
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [architecture, setArchitecture] = useState<MoaArchitecture>('election')
@@ -202,13 +192,17 @@ function MoASection() {
 
   // Load existing config on mount
   useEffect(() => {
-    window.moaAPI.getMoaConfig().then((config: any) => {
+    window.moaAPI.getMoaConfig().then((res: any) => {
+      const config = unwrapMoaConfig(res)
       if (config) {
         setSubModels(config.subModels || [])
         setAggModelId(config.aggregator?.primaryModelId || '')
         setAggProviderId(config.aggregator?.primaryProviderId || '')
+        setFallbackProviderId(config.aggregator?.fallbackProviderId || '')
+        setFallbackModelId(config.aggregator?.fallbackModelId || '')
         if (config.architecture) setArchitecture(config.architecture)
-        if (config.mode) setMoaMode(config.mode)
+        if (config.aggregationPromptVariant) setPromptVariant(config.aggregationPromptVariant)
+        setCustomAggPrompt(config.customAggregationPrompt)
       }
       setLoaded(true)
     })
@@ -217,11 +211,14 @@ function MoASection() {
   // Reload when providers change
   useEffect(() => {
     if (loaded) {
-      window.moaAPI.getMoaConfig().then((config: any) => {
+      window.moaAPI.getMoaConfig().then((res: any) => {
+        const config = unwrapMoaConfig(res)
         if (config) {
           setSubModels(config.subModels || [])
           setAggModelId(config.aggregator?.primaryModelId || '')
           setAggProviderId(config.aggregator?.primaryProviderId || '')
+          setFallbackProviderId(config.aggregator?.fallbackProviderId || '')
+          setFallbackModelId(config.aggregator?.fallbackModelId || '')
           if (config.architecture) setArchitecture(config.architecture)
         }
       })
@@ -260,16 +257,29 @@ function MoASection() {
     setSaving(true)
     try {
       const aggregator: AggregatorConfig | null = aggModelId && aggProviderId
-        ? { primaryModelId: aggModelId, primaryProviderId: aggProviderId, allowQuickSwitch: true }
+        ? {
+            primaryModelId: aggModelId,
+            primaryProviderId: aggProviderId,
+            allowQuickSwitch: true,
+            // 备用模型：有值才写入；留空 = 清除（引擎不再走重试路径）
+            ...(fallbackModelId && fallbackProviderId
+              ? { fallbackModelId, fallbackProviderId }
+              : {})
+          }
         : null
 
-      await window.moaAPI.setMoaConfig({
-        mode: moaMode,
+      // F1：不再写 mode —— 聊天模式仅由输入框按钮控制（不持久化），
+      // 网关运行模式在下方「MoA 网关」区单独设置。
+      // F5：aggregationPromptVariant / customAggregationPrompt 原值回传，避免静默重置。
+      const res: any = await window.moaAPI.setMoaConfig({
         subModels,
         aggregator,
-        aggregationPromptVariant: 'standard-zh',
+        aggregationPromptVariant: promptVariant,
+        customAggregationPrompt: customAggPrompt,
         architecture
       })
+      // 主进程 setMoaConfig 收紧为 { success, data | error } 后，失败须走失败提示
+      if (res?.success === false) throw new Error(res?.error || '保存失败')
       notifySaveResult(true)
     } catch (err) {
       console.error('Failed to save MoA config:', err)
@@ -413,6 +423,28 @@ function MoASection() {
         </p>
       </div>
 
+      {/* 备用聚合模型（fallback）：仅在主聚合模型调用失败时自动重试（F8） */}
+      <div>
+        <label className="text-sm font-medium text-foreground block mb-2">备用聚合模型（可选）</label>
+        <select
+          value={fallbackProviderId ? `${fallbackProviderId}:${fallbackModelId}` : ''}
+          onChange={(e) => {
+            const [pid, mid] = e.target.value.split(':')
+            setFallbackProviderId(pid || '')
+            setFallbackModelId(mid || '')
+          }}
+          className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        >
+          <option value="">不使用备用模型</option>
+          {allModelOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+        <p className="text-xs text-muted-foreground mt-1">
+          主聚合模型调用失败时，自动改用该模型重试一次；不选则失败直接报错。
+        </p>
+      </div>
+
       <button
         onClick={handleSave}
         disabled={saving}
@@ -430,7 +462,28 @@ function MoASection() {
 // ── MoA Gateway Section（并入 MoA 面板：对外网关配置） ──
 
 function GatewaySection() {
-  const { settings, updateSetting } = useSettingsStore()
+  const { settings, updateSetting, notifySaveResult } = useSettingsStore()
+  // 网关运行模式（持久化于 moa_config.mode）：与聊天框当前模式解耦，仅影响网关（F1）
+  const [gatewayMode, setGatewayMode] = useState<MoAMode>('direct')
+
+  useEffect(() => {
+    window.moaAPI.getMoaConfig().then((res: any) => {
+      const config = unwrapMoaConfig(res)
+      if (config?.mode) setGatewayMode(config.mode)
+    })
+  }, [])
+
+  const saveGatewayMode = async (mode: MoAMode) => {
+    setGatewayMode(mode)
+    try {
+      const res: any = await window.moaAPI.setMoaConfig({ mode })
+      if (res?.success === false) throw new Error(res?.error || '保存失败')
+      notifySaveResult(true)
+    } catch (err) {
+      notifySaveResult(false, String(err))
+    }
+  }
+
   return (
     <div className="border-t border-border pt-5 space-y-4">
       <div>
@@ -450,6 +503,18 @@ function GatewaySection() {
 
       {settings.gateway.enabled && (
         <>
+          <SettingRow label="网关运行模式" hint="仅影响网关（第三方客户端），不影响聊天框当前模式">
+            <select
+              value={gatewayMode}
+              onChange={(e) => saveGatewayMode(e.target.value as MoAMode)}
+              className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            >
+              <option value="direct">直通</option>
+              <option value="aggregate">聚合</option>
+              <option value="compare">对比</option>
+            </select>
+          </SettingRow>
+
           <SettingRow label="监听地址" hint="默认 127.0.0.1">
             <input
               type="text"

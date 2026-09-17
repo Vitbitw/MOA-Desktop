@@ -37,6 +37,8 @@ function App() {
   useEffect(() => {
     if (viewMode === 'standard') {
       useConversationStore.getState().cleanupLiveEvents?.()
+      // F3：退订后同步清空 live 状态，避免监控视图残留半途数据与「生成中/运行中」标记
+      useConversationStore.getState().clearLiveState()
     }
   }, [viewMode])
 

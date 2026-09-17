@@ -36,7 +36,8 @@ export function loadMoaConfigFromDb(): void {
       const parsed = JSON.parse(row.value)
       currentConfig = {
         mode: parsed.mode || 'direct',
-        subModels: parsed.subModels || [],
+        // 防御：非数组垃圾值（旧版本/手工改库）会让 getMoaConfig 的 .map 抛 TypeError
+        subModels: Array.isArray(parsed.subModels) ? parsed.subModels : [],
         aggregator: parsed.aggregator || null,
         aggregationPromptVariant: parsed.aggregationPromptVariant || 'standard-zh',
         customAggregationPrompt: parsed.customAggregationPrompt,
@@ -61,18 +62,14 @@ export function getMoaConfig(): MoaRuntimeConfig {
 }
 
 export function setMoaConfig(config: Partial<MoaRuntimeConfig>): MoaRuntimeConfig {
-  currentConfig = { ...currentConfig, ...config }
-
-  // Persist to database
-  try {
-    getDatabase().exec(
-      'INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES (?, ?, ?)',
-      [CONFIG_KEY, JSON.stringify(currentConfig), Date.now()]
-    )
-    console.log('[MoA Config] Saved to DB')
-  } catch (err) {
-    console.error('[MoA Config] Failed to save to DB:', err)
-  }
-
+  // 先写 DB 再提交内存态：写入失败直接抛错（调用方 IPC handler 包装后渲染端收到 {success:false}），
+  // 避免「渲染端以为保存成功、重启后回退」；内存态不被未落盘的脏值污染
+  const nextConfig = { ...currentConfig, ...config }
+  getDatabase().exec(
+    'INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES (?, ?, ?)',
+    [CONFIG_KEY, JSON.stringify(nextConfig), Date.now()]
+  )
+  currentConfig = nextConfig
+  console.log('[MoA Config] Saved to DB')
   return getMoaConfig()
 }

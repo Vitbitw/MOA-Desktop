@@ -7,6 +7,8 @@ export default function InputBox() {
   const setMode = useConversationStore((s) => s.setMode)
   const sendMessage = useConversationStore((s) => s.sendMessage)
   const loading = useConversationStore((s) => s.loading)
+  const failedDraft = useConversationStore((s) => s.failedDraft)
+  const setFailedDraft = useConversationStore((s) => s.setFailedDraft)
 
   const [subCount, setSubCount] = React.useState(3)
 
@@ -15,6 +17,14 @@ export default function InputBox() {
       if (config?.subModels?.length) setSubCount(config.subModels.length)
     })
   }, [])
+
+  // F11：发送失败时 store 回滚乐观消息并把内容写入 failedDraft → 回填输入框后清空
+  React.useEffect(() => {
+    if (failedDraft) {
+      setText(failedDraft)
+      setFailedDraft(null)
+    }
+  }, [failedDraft, setFailedDraft])
 
   const estimatedTokens = Math.ceil(text.length * 1.5) // CN: ~1.5 tokens/char
   const subModelEstimate = estimatedTokens + 200 // system prompt overhead

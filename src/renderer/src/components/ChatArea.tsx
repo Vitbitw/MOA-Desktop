@@ -13,7 +13,7 @@ export default function ChatArea() {
       {/* Mode indicator */}
       <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
         <span className="font-medium">
-          {mode === 'aggregate' ? '🧠 智能聚合 A' : '📊 原始对比 D'}
+          {mode === 'aggregate' ? '🧠 智能聚合 A' : mode === 'compare' ? '📊 原始对比 D' : '直通'}
         </span>
       </div>
 

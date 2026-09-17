@@ -165,7 +165,7 @@ export default function Sidebar({ onOpenUsage, onOpenCloud }: SidebarProps) {
                   </div>
                 )}
                 <div className="text-xs text-muted-foreground mt-0.5">
-                  {conv.mode === 'aggregate' ? '聚合' : '对比'} · {conv.messageCount} 条
+                  {conv.mode === 'aggregate' ? '聚合' : conv.mode === 'compare' ? '对比' : '直通'} · {conv.messageCount} 条
                 </div>
               </button>
 

@@ -129,9 +129,6 @@ export interface AppSettings {
     retryCount: number
   }
   display: {
-    subModelShow: 'always' | 'hidden' | 'perConversation'
-    defaultSubModelExpanded: boolean
-    autoClearSubOutputs: boolean
     usageOverlay: boolean
     usageOverlayPos?: { x: number; y: number }
   }

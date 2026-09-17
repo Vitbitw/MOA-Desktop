@@ -46,6 +46,9 @@ export function getAggregationPrompt(variant: AggregationPromptVariant, customPr
       return CONCISE_PROMPT_EN
     case 'custom':
       return customPrompt || STANDARD_PROMPT_ZH
+    default:
+      // 非法 variant（旧版本/脏配置值）：回退标准中文提示词，避免返回 undefined 被拼进 system prompt
+      return STANDARD_PROMPT_ZH
   }
 }
 
@@ -95,7 +98,9 @@ export function buildCommitteeMessages(
   const systemContent = `${chairSystemPrompt}\n\n—— 专家意见参考 ——\n\n${refs}`
 
   const finalUser = [...transcript].reverse().find((m) => m.role === 'user')
-  const prior = finalUser ? transcript.slice(0, transcript.length - 1) : transcript
+  // 按 finalUser 实际位置截断：末条非 user 时旧的 slice(length-1) 会丢掉中间消息并重复注入 finalUser
+  const idx = finalUser ? transcript.lastIndexOf(finalUser) : transcript.length
+  const prior = transcript.slice(0, idx)
 
   return [
     { role: 'system', content: systemContent },

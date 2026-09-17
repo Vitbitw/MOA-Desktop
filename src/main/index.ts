@@ -11,6 +11,7 @@ import { applyGatewayServer, stopGatewayServer } from './gateway/server'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
+import type { MoaResponse } from './moa/moaEngine'
 import { generateTitle } from './title/titleGenerator'
 import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
@@ -18,7 +19,7 @@ import { invalidateProxyCache } from './local/fetchProxy'
 import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
 import { loginToMimo, refreshMimoUsage } from './monitoring/mimo'
 import { loginToDeepSeek, logoutDeepSeek, getDeepSeekStatus, refreshDeepSeekUsage } from './monitoring/deepseek'
-import { getCumulativeUsage } from './monitoring/usageAccumulator'
+import { getCumulativeUsage, clearCumulativeUsage } from './monitoring/usageAccumulator'
 import { startUsageCollector, stopUsageCollector, getCollectorStatus, markUsageCollected } from './monitoring/collector'
 import { resolveProbeModel, probeSources, getPricingProbeConfig, sourceHasConfiguredKey } from './pricing/probe'
 import { saveUsageCredential } from './store/key-store'
@@ -36,6 +37,21 @@ for (const stream of [process.stdout, process.stderr] as const) {
 }
 
 let mainWindow: BrowserWindow | null = null
+
+/**
+ * 安全向主窗口发送 IPC 事件：窗口未创建 / 已销毁或发送失败时静默丢弃。
+ * UI 通知属非关键路径——主窗口在 MoA 执行中途被关闭时，
+ * 'Object has been destroyed' 不得冒泡打断落库、记账与收尾流程。
+ */
+function safeSendMain(channel: string, ...args: unknown[]): void {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(channel, ...args)
+    }
+  } catch {
+    // 窗口销毁竞态：通知丢失即为预期结果
+  }
+}
 
 // ── 用量监控状态 ──
 // MoA 任务是否正在执行（用于今日用量悬浮窗的 running 状态）
@@ -66,13 +82,13 @@ interface RequestLogRow {
  * 桌面用量悬浮窗同步收到无参信号（渲染端自行拉取数据）。
  */
 function broadcastUsageUpdate() {
-  mainWindow?.webContents.send(IPC_EVENT.USAGE_UPDATED)
+  safeSendMain(IPC_EVENT.USAGE_UPDATED)
   syncUsageWindow()
 }
 
 /** 向主窗口推送一条悬浮通知（渲染进程全局 ToastCenter 展示） */
 function sendToastToRenderer(data: ToastData): void {
-  mainWindow?.webContents.send(IPC_EVENT.RENDERER_TOAST, data)
+  safeSendMain(IPC_EVENT.RENDERER_TOAST, data)
 }
 
 /** 记录一次标题生成的用量日志（source='title'）；tokenUsage 缺失则跳过 */
@@ -139,9 +155,10 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
 
-  // 主窗口关闭时销毁悬浮窗，保证 window-all-closed 能正常退出应用
+  // 主窗口关闭时销毁悬浮窗并失效主窗口引用，保证 window-all-closed 能正常退出应用
   mainWindow.on('closed', () => {
     destroyUsageWindow()
+    mainWindow = null
   })
 }
 
@@ -163,7 +180,7 @@ function createApplicationMenu() {
           label: '新建对话',
           accelerator: 'CmdOrCtrl+N',
           click: () => {
-            mainWindow?.webContents.send(IPC_EVENT.MENU_NEW_CONVERSATION)
+            safeSendMain(IPC_EVENT.MENU_NEW_CONVERSATION)
           }
         },
         { type: 'separator' as const },
@@ -171,7 +188,7 @@ function createApplicationMenu() {
           label: '设置',
           accelerator: 'CmdOrCtrl+,',
           click: () => {
-            mainWindow?.webContents.send(IPC_EVENT.MENU_OPEN_SETTINGS)
+            safeSendMain(IPC_EVENT.MENU_OPEN_SETTINGS)
           }
         },
         { type: 'separator' as const },
@@ -223,7 +240,7 @@ function createApplicationMenu() {
               ? `http://${gateway.host}:${gateway.port}`
               : `http://${DEFAULT_HOST}:${DEFAULT_PORT} (网关未启用)`
             clipboard.writeText(gateway.enabled ? `http://${gateway.host}:${gateway.port}` : '')
-            mainWindow?.webContents.send(IPC_EVENT.MENU_COPY_GATEWAY_URL, url)
+            safeSendMain(IPC_EVENT.MENU_COPY_GATEWAY_URL, url)
           }
         }
       ]
@@ -292,14 +309,39 @@ function registerIpcHandlers() {
 
   handleIpc(IPC.SETTINGS_SET, (_e, key: string, value: unknown) => {
     const current = updateRawAppSettings((raw) => {
+      if (key === 'display') {
+        // display.usageOverlayPos 由主进程维护（悬浮窗拖拽回写，见 usageWindow.saveUsageOverlayPos），
+        // 渲染端整块覆盖携带的快照可能过期 → 写入时保留主进程当前值，忽略 payload 中的该字段
+        const incoming = { ...((value ?? {}) as Record<string, unknown>) }
+        delete incoming.usageOverlayPos
+        const prevPos = (raw.display as Record<string, unknown> | undefined)?.usageOverlayPos
+        if (prevPos !== undefined) incoming.usageOverlayPos = prevPos
+        raw.display = incoming
+        return
+      }
       raw[key] = value
     })
 
     // ── MoA 网关设置变更 → 运行态即时生效（enabled/host/port）──
     if (key === 'gateway') {
-      applyGatewayServer().catch((err: unknown) => {
-        console.error('[Main] Gateway apply failed:', err instanceof Error ? err.message : String(err))
-      })
+      applyGatewayServer()
+        .then((actualPort) => {
+          if (actualPort === null) return
+          // 端口被占用时网关自动顺延：反馈实际监听端口，避免「改了设置但没生效」的错觉
+          const { port } = readAppSettings().gateway
+          if (actualPort !== port) {
+            sendToastToRenderer({
+              type: 'warning',
+              title: '网关端口被占用',
+              message: `网关端口 ${port} 被占用，实际监听 ${actualPort}`
+            })
+          }
+        })
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.error('[Main] Gateway apply failed:', msg)
+          sendToastToRenderer({ type: 'error', title: '网关启动失败', message: msg })
+        })
     }
 
     // ── 网络代理变更 → 清除代理缓存 ──
@@ -333,9 +375,7 @@ function registerIpcHandlers() {
     return getMoaConfig()
   })
 
-  ipcMain.handle(IPC.MOA_SET_CONFIG, (_e, config) => {
-    return setMoaConfig(config)
-  })
+  handleIpc(IPC.MOA_SET_CONFIG, (_e, config) => setMoaConfig(config))
 
   // ── MoA Send Message ──
   handleIpcRaw(IPC.MOA_SEND_MESSAGE, async (_e, msg: {
@@ -362,7 +402,9 @@ function registerIpcHandlers() {
       // Auto-create conversation if none
       if (!convId) {
         convId = crypto.randomUUID()
-        const title = msg.title || (msg.content.length > 30 ? msg.content.slice(0, 30) + '…' : msg.content)
+        // 标题留空：渲染端 maybeAutoTitle 以「空标题」判定自动生成首轮标题，
+        // 截取前 30 字会使其永不触发（侧栏对空标题回退显示「新对话」）
+        const title = msg.title || ''
         db.exec(
           'INSERT INTO conversations (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
           [convId, title, msg.mode, now, now]
@@ -416,18 +458,29 @@ function registerIpcHandlers() {
         [userMsgId, convId, msg.content, msg.mode, now]
       )
 
-      // Execute MoA with event emission
-      const win = BrowserWindow.fromWebContents(_e.sender)
-      const moaResult = await executeMoAWithEvents({
-        messages: [...historyMessages, { role: 'user', content: msg.content }],
-        subModels: config.subModels,
-        aggregator: config.aggregator || undefined,
-        mode: msg.mode as 'aggregate' | 'compare' | 'direct',
-        aggregationPromptVariant: config.aggregationPromptVariant,
-        architecture: config.architecture,
-        emitSubOutput: (output, index) => {
-          if (win) {
-            win.webContents.send(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE, {
+      // 防丢失：在历史查询之后落 assistant 占位行，完成/失败后回填内容——
+      // 执行中途退出不会留下孤儿 user 行（占位若在历史查询前插入，空消息会污染多轮上下文）
+      const asstMsgId = crypto.randomUUID()
+      db.exec(
+        `INSERT INTO messages (id, conversation_id, role, content, mode, sub_outputs, timestamp)
+         VALUES (?, ?, 'assistant', '', ?, NULL, ?)`,
+        [asstMsgId, convId, msg.mode, Date.now()]
+      )
+
+      // Execute MoA with event emission：事件经 safeSendMain 隔离，窗口销毁不得打断执行与落库
+      let moaResult: MoaResponse
+      try {
+        moaResult = await executeMoAWithEvents({
+          messages: [...historyMessages, { role: 'user', content: msg.content }],
+          subModels: config.subModels,
+          aggregator: config.aggregator || undefined,
+          mode: msg.mode as 'aggregate' | 'compare' | 'direct',
+          aggregationPromptVariant: config.aggregationPromptVariant,
+          // 定制聚合提示词须随聊天路径一并传入（此前只在网关路径生效）
+          customAggregationPrompt: config.customAggregationPrompt,
+          architecture: config.architecture,
+          emitSubOutput: (output, index) => {
+            safeSendMain(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE, {
               index,
               modelId: output.modelId,
               providerId: output.providerId,
@@ -438,34 +491,34 @@ function registerIpcHandlers() {
               tokenUsage: output.tokenUsage,
               role: output.role
             } satisfies SubOutputUpdate)
+          },
+          emitAggregationStart: () => {
+            safeSendMain(IPC_EVENT.MOA_AGGREGATION_START)
+          },
+          emitAggregationChunk: (text, done) => {
+            safeSendMain(IPC_EVENT.MOA_AGGREGATION_CHUNK, { text, done } satisfies AggregationChunk)
           }
-        },
-        emitAggregationStart: () => {
-          if (win) {
-            win.webContents.send(IPC_EVENT.MOA_AGGREGATION_START)
-          }
-        },
-        emitAggregationChunk: (text, done) => {
-          if (win) {
-            win.webContents.send(IPC_EVENT.MOA_AGGREGATION_CHUNK, { text, done } satisfies AggregationChunk)
-          }
+        })
+      } catch (err) {
+        // 引擎整体抛错时转译为失败结果继续落库（与 gateway/server.ts 对同一调用的 .catch 先例一致）
+        moaResult = {
+          type: 'aggregate',
+          content: '',
+          subOutputs: [],
+          success: false,
+          error: `执行异常: ${err instanceof Error ? err.message : String(err)}`
         }
-      })
+      }
 
-      // Save assistant response
-      const asstMsgId = crypto.randomUUID()
+      // 回填 assistant 占位行（成功/失败均落内容，sub_outputs 记明细）
       const responseContent = moaResult.success ? moaResult.content : (moaResult.error || '处理失败')
       db.exec(
-        `INSERT INTO messages (id, conversation_id, role, content, mode, sub_outputs, timestamp)
-         VALUES (?, ?, 'assistant', ?, ?, ?, ?)`,
-        [
-          asstMsgId, convId, responseContent, msg.mode,
-          JSON.stringify(moaResult.subOutputs || []), Date.now()
-        ]
+        'UPDATE messages SET content = ?, sub_outputs = ? WHERE id = ?',
+        [responseContent, JSON.stringify(moaResult.subOutputs || []), asstMsgId]
       )
 
       // Update conversation
-      db.exec('UPDATE conversations SET message_count = message_count + 2, updated_at = ? WHERE id = ?', [Date.now(), convId])
+      db.exec('UPDATE conversations SET message_count = message_count + 2, updated_at = ?, mode = ? WHERE id = ?', [Date.now(), msg.mode, convId])
 
       // Log request
       const logId = crypto.randomUUID()
@@ -510,12 +563,10 @@ function registerIpcHandlers() {
       const conversations = db.query('SELECT * FROM conversations ORDER BY updated_at DESC')
 
       // Emit allDone event
-      if (win) {
-        win.webContents.send(IPC_EVENT.MOA_ALL_DONE, {
-          conversationId: convId,
-          conversations
-        })
-      }
+      safeSendMain(IPC_EVENT.MOA_ALL_DONE, {
+        conversationId: convId,
+        conversations
+      })
 
       return { success: true, data: { conversationId: convId, moaResult, conversations } }
     } finally {
@@ -602,7 +653,20 @@ function registerIpcHandlers() {
       } catch {
         models = null
       }
-      if (!models || models.length === 0) continue
+      if (!models || models.length === 0) {
+        // 无明细行（网关 stats 模式写 models='[]'）：按行级字段补一条分组，保证 rows 合计与 totals 可对账
+        const noDetailKey = groupBy === 'mode'
+          ? (row.source === 'title' ? '标题' : (MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct'))
+          : '（仅统计·无明细）'
+        const noDetail = rowMap.get(noDetailKey) || { key: noDetailKey, requests: 0, success: 0, prompt: 0, completion: 0, cost: 0 }
+        noDetail.requests += 1
+        noDetail.success += row.success === 1 ? 1 : 0
+        noDetail.prompt += row.prompt_tokens || 0
+        noDetail.completion += row.completion_tokens || 0
+        noDetail.cost += row.cost || 0
+        rowMap.set(noDetailKey, noDetail)
+        continue
+      }
 
       // 按 groupBy 归组：model→modelId；provider→真实厂商名（providerId 缺失时兜底 modelId）；mode→中文模式标签
       for (const m of models) {
@@ -665,6 +729,8 @@ function registerIpcHandlers() {
   handleIpc(IPC.MONITOR_LOGOUT, (_e, sourceId: string) => {
     logoutCommandCode(sourceId)
     logoutDeepSeek(sourceId)
+    // 登出即清该源本地累计：同一 sourceId 换账号后不得混入旧账号的用量记录
+    clearCumulativeUsage(sourceId)
   })
 
   handleIpc(IPC.MONITOR_SET_API_KEY, (_e, sourceId: string, apiKey: string) => {
@@ -709,7 +775,7 @@ function registerIpcHandlers() {
       }
       // 探查过程中向渲染进程实时推送进度事件
       const emitProgress = (p: ProbeProgressEvent) => {
-        mainWindow?.webContents.send(IPC_EVENT.PRICING_PROBE_PROGRESS, p)
+        safeSendMain(IPC_EVENT.PRICING_PROBE_PROGRESS, p)
       }
       const results = await probeSources(valid, model, emitProgress, force === true)
       return { success: true, data: { results } }
@@ -842,7 +908,7 @@ app.whenReady().then(async () => {
   setOpenUsageHandler(() => {
     mainWindow?.show()
     mainWindow?.focus()
-    mainWindow?.webContents.send(IPC_EVENT.USAGE_OPEN)
+    safeSendMain(IPC_EVENT.USAGE_OPEN)
   })
   maybeCreateUsageOverlay()
 
@@ -852,6 +918,13 @@ app.whenReady().then(async () => {
     if (actualPort !== null) {
       const { port } = readAppSettings().gateway
       console.log(`[Main] Gateway running on port ${actualPort}${actualPort !== port ? ` (requested ${port})` : ''}`)
+      if (actualPort !== port) {
+        sendToastToRenderer({
+          type: 'warning',
+          title: '网关端口被占用',
+          message: `网关端口 ${port} 被占用，实际监听 ${actualPort}`
+        })
+      }
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -869,6 +942,11 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => {
   stopUsageCollector()
   stopGatewayServer()
+  // 退出前清掉定价自动刷新定时器：避免退出流程中仍有探查任务在跑
+  if (pricingAutoRefreshTimer) {
+    clearTimeout(pricingAutoRefreshTimer)
+    pricingAutoRefreshTimer = null
+  }
   getDatabase().flush()
 })
 

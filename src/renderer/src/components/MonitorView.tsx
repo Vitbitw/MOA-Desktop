@@ -43,6 +43,10 @@ export default function MonitorView() {
   const historySubOutputs = activeRound?.subModelOutputs || []
   const historyContent = activeRound?.content || ''
 
+  // 展示模式：历史轮次用该轮消息自身的 mode（F7），live 期间用当前聊天模式；
+  // 旧数据缺 mode 时回退全局 mode，保持与修复前一致
+  const displayMode = !hasLive && activeRound?.mode ? activeRound.mode : mode
+
   // ── Determine what to display ──
   const displayOutputs: LiveSubOutput[] = hasLive
     ? liveSubOutputs
@@ -80,14 +84,14 @@ export default function MonitorView() {
       {/* ── Horizontal split: sub-models (left) + aggregator (right) ── */}
       <div className="flex-1 flex flex-row overflow-hidden min-h-0">
         {/* ── LEFT: Sub-model output grid ── */}
-        <div className={`flex-1 overflow-y-auto min-w-0 ${mode !== 'compare' ? 'border-r border-border' : ''}`}>
+        <div className={`flex-1 overflow-y-auto min-w-0 ${displayMode !== 'compare' ? 'border-r border-border' : ''}`}>
           <div className="p-3">
             {/* Header bar */}
             <div className="flex items-center gap-2 mb-2 text-sm text-muted-foreground">
               <span className="font-semibold uppercase tracking-wider">子模型输出</span>
               <span className="text-muted-foreground/40">|</span>
               <span>
-                {mode === 'aggregate' ? 'A 模式' : mode === 'compare' ? 'D 模式' : '直通'}
+                {displayMode === 'aggregate' ? 'A 模式' : displayMode === 'compare' ? 'D 模式' : '直通'}
               </span>
 
               {/* Round navigation */}
@@ -146,13 +150,13 @@ export default function MonitorView() {
         </div>
 
         {/* ── RIGHT: Aggregator output (hidden in compare mode) ── */}
-        {mode !== 'compare' && (
+        {displayMode !== 'compare' && (
           <div className="flex-shrink-0 bg-card flex flex-col overflow-hidden"
             style={{ width: '40%', minWidth: 300, maxWidth: '50%' }}>
             <AggregatorPanel
               content={displayAggregatorContent}
               running={aggregatorRunning || (loading && hasLive)}
-              mode={mode}
+              mode={displayMode}
               roundLabel={!hasLive && assistantMessages.length > 1
                 ? `第${activeRoundIndex + 1}/${assistantMessages.length}轮`
                 : undefined

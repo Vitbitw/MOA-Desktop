@@ -412,6 +412,7 @@ export function createGatewayServer(): Express {
       aggregator: config.aggregator || undefined,
       mode: config.mode === 'aggregate' ? 'aggregate' : 'compare',
       aggregationPromptVariant: config.aggregationPromptVariant,
+      customAggregationPrompt: config.customAggregationPrompt,
       architecture: config.architecture
     }).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err)
@@ -491,10 +492,15 @@ export function createGatewayServer(): Express {
       res.setHeader('Content-Type', 'text/event-stream')
       res.setHeader('Cache-Control', 'no-cache')
       res.setHeader('Connection', 'keep-alive')
+      // 客户端断开防护（与直连分支一致）：逐 token 写循环持续期间可能已断连，
+      // 继续写已销毁的响应会触发 error；断开即停并跳过收尾帧
+      let clientClosed = false
+      res.on('close', () => { clientClosed = true })
       const content = result.content
       // Simulate token-by-token streaming from the aggregated content
       const tokens = content.split(/(?<=\s|(?<=[，。！？、；：]))/g)
       for (const token of tokens) {
+        if (clientClosed) break
         const payload = JSON.stringify({
           id: `chatcmpl-moa-${Date.now()}`,
           object: 'chat.completion.chunk',
@@ -511,9 +517,11 @@ export function createGatewayServer(): Express {
         model: 'moa-aggregated',
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
       })
-      res.write(`data: ${donePayload}\n\n`)
-      res.write('data: [DONE]\n\n')
-      res.end()
+      if (!clientClosed) {
+        res.write(`data: ${donePayload}\n\n`)
+        res.write('data: [DONE]\n\n')
+        res.end()
+      }
     } else {
       res.json({
         id: `chatcmpl-moa-${Date.now()}`,
@@ -613,9 +621,38 @@ export function startGatewayServer(app: Express, port: number, host: string): Pr
   }
 }
 
-export function stopGatewayServer(): void {
-  if (server) { server.close(); server = null; console.log('[Gateway] stopped') }
+/** 停止网关。返回 Promise：旧 server 真正 close 完成后 resolve；无运行实例时立即 resolve。
+ *  本函数不会 reject，调用方可以不 await（before-quit 等场景安全）。 */
+export function stopGatewayServer(): Promise<void> {
+  const s = server
+  server = null
   runningConfig = null
+  if (!s) return Promise.resolve()
+  return new Promise((resolve) => {
+    s.close(() => {
+      console.log('[Gateway] stopped')
+      resolve()
+    })
+  })
+}
+
+/** apply 串行化链：并发 apply（设置高频变更）排队执行，避免交错 stop/start 造成端口漂移或双监听 */
+let applyChain: Promise<unknown> = Promise.resolve()
+
+async function applyGatewayServerInternal(): Promise<number | null> {
+  const { enabled, host, port } = readAppSettings().gateway
+  if (!enabled) {
+    await stopGatewayServer()
+    return null
+  }
+  if (server && runningConfig && runningConfig.host === host && runningConfig.port === port) {
+    return (server.address() as AddressInfo | null)?.port ?? port
+  }
+  // 等待旧 server 真正关闭后再按新配置启动（否则旧实例仍占用端口 → 新实例顺延 port+1）
+  await stopGatewayServer()
+  const actualPort = await startGatewayServer(createGatewayServer(), port, host)
+  runningConfig = { host, port }
+  return actualPort
 }
 
 /**
@@ -625,17 +662,9 @@ export function stopGatewayServer(): void {
  * - host/port 变化 → 停止后按新配置重启。
  * 返回实际监听端口（未启用时 null）。
  */
-export async function applyGatewayServer(): Promise<number | null> {
-  const { enabled, host, port } = readAppSettings().gateway
-  if (!enabled) {
-    stopGatewayServer()
-    return null
-  }
-  if (server && runningConfig && runningConfig.host === host && runningConfig.port === port) {
-    return (server.address() as AddressInfo | null)?.port ?? port
-  }
-  stopGatewayServer()
-  const actualPort = await startGatewayServer(createGatewayServer(), port, host)
-  runningConfig = { host, port }
-  return actualPort
+export function applyGatewayServer(): Promise<number | null> {
+  const seq = applyChain.then(() => applyGatewayServerInternal())
+  // 排队链上先前的失败不阻塞后续 apply；本次调用的 rejection 仍由 seq 透传给调用方
+  applyChain = seq.catch(() => undefined)
+  return seq
 }

@@ -59,6 +59,10 @@ interface ConversationState {
   mode: MoAMode
   loading: boolean
   error: string | null
+  /** 发送失败被回滚的用户草稿（InputBox 回填后清空）；null = 无待回填草稿 */
+  failedDraft: string | null
+  /** 会话切换序号：newConversation/selectConversation 递增；发送流程据此判定等待期用户是否切走（F4） */
+  convSwitchSeq: number
 
   // ── Title generation ──
   titleLoading: Record<string, boolean>
@@ -70,6 +74,7 @@ interface ConversationState {
   setMode: (mode: MoAMode) => void
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
+  setFailedDraft: (draft: string | null) => void
 
   // ── Live streaming state ──
   liveSubOutputs: LiveSubOutput[]
@@ -107,6 +112,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   mode: 'aggregate',
   loading: false,
   error: null,
+  failedDraft: null,
+  convSwitchSeq: 0,
   titleLoading: {},
 
   setConversations: (conversations) => set({ conversations }),
@@ -116,6 +123,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   setMode: (mode) => set({ mode }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
+  setFailedDraft: (failedDraft) => set({ failedDraft }),
 
   // ── Live streaming initial values ──
   liveSubOutputs: [],
@@ -139,7 +147,11 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     aggregatorRunning: false
   }),
 
-  newConversation: () => set({ currentConversationId: null, messages: [] }),
+  newConversation: () => {
+    // 新建会话时同步清空 live 展示，避免监控视图残留上一会话的运行数据（F3）
+    get().clearLiveState()
+    set((state) => ({ currentConversationId: null, messages: [], convSwitchSeq: state.convSwitchSeq + 1 }))
+  },
 
   refreshConversations: async () => {
     try {
@@ -161,7 +173,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   },
 
   selectConversation: async (id) => {
-    set({ loading: true, error: null })
+    // 切换会话即结束上一会话的 live 展示，监控视图回到历史视图（F3）
+    get().clearLiveState()
+    set((state) => ({ loading: true, error: null, convSwitchSeq: state.convSwitchSeq + 1 }))
     try {
       const res = await window.moaAPI.getMessages(id)
       if (res.success) {
@@ -204,14 +218,13 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     //    （连续快速发两条消息时，第一次的 onAllDone 会 cleanup 掉第二次刚注册的监听）
     const requestId = crypto.randomUUID()
 
-    // 1. Clear previous live state
-    set({
-      liveSubOutputs: [],
-      aggregatorText: '',
-      aggregatorRunning: false,
-      error: null,
-      liveCleanupRef: null
-    })
+    // 请求发起时的会话切换序号快照：响应回来时据此判断用户是否已切换/新建会话（F4）。
+    // 用序号而非会话 id 比较——「新会话首发（null）」与「期间又点新建（仍 null）」无法用 id 区分
+    const snapshotSwitchSeq = get().convSwitchSeq
+
+    // 1. Clear previous live state（live 复位统一走 clearLiveState，避免两处各写一份字段）
+    set({ error: null, liveCleanupRef: null })
+    get().clearLiveState()
 
     // 2. Register IPC event listeners (BEFORE sending)
     const unsubs: (() => void)[] = []
@@ -240,6 +253,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           get().updateLiveSubOutput(data.index, patch)
         } else {
           set((state) => ({
+            // F10：插入后按 index 升序，面板顺序固定为配置顺序而非子模型完成顺序
             liveSubOutputs: [...state.liveSubOutputs, {
               index: data.index,
               modelId: data.modelId,
@@ -250,7 +264,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               durationMs: data.durationMs,
               tokenUsage: data.tokenUsage,
               role: data.role
-            }]
+            }].sort((a, b) => a.index - b.index)
           }))
         }
       }))
@@ -300,6 +314,27 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       error: null
     }))
 
+    /**
+     * 发送失败统一收尾（F2）：释放本轮 IPC 监听并复位聚合运行标记；
+     * 未切走时回滚乐观 user 消息、把内容写入 failedDraft 供 InputBox 回填；
+     * 已切走时只报错并刷新列表，不触碰当前视图（F4）。
+     */
+    const settleFailure = (message: string) => {
+      cleanupIfCurrent()
+      if (get().convSwitchSeq !== snapshotSwitchSeq) {
+        set({ error: message, loading: false, aggregatorRunning: false })
+        get().refreshConversations()
+        return
+      }
+      set((state) => ({
+        messages: state.messages.filter((m) => m.id !== tempId),
+        failedDraft: content,
+        error: message,
+        loading: false,
+        aggregatorRunning: false
+      }))
+    }
+
     // 5. Call backend (existing code continues for backward compatibility)
     try {
       const res = await window.moaAPI.sendMessage({
@@ -313,6 +348,14 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           conversationId: string
           moaResult: { content: string; subOutputs?: SubModelOutput[]; error?: string; success?: boolean }
           conversations: any[]
+        }
+
+        // F4：请求在途时用户已切换/新建会话 → 仅刷新会话列表；不注入消息、
+        // 不回跳 currentConversationId、不生成标题（否则本次回复会串进别的会话视图与标题）
+        if (get().convSwitchSeq !== snapshotSwitchSeq) {
+          get().clearLiveState()
+          await get().refreshConversations()
+          return
         }
 
         const moaResult = data.moaResult
@@ -356,17 +399,20 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           loading: false
         }))
 
+        // F3：本轮已完成，清空 live 状态 → hasLive=false，监控面板回到历史视图展示刚完成的轮次
+        get().clearLiveState()
+
         // ── 自动标题生成（fire-and-forget）──
         // 此时 messages 已含本轮 assistant 回复，上下文完整；
         // 主进程 first_message 路径与 renderer first_reply/first_and_manual 路径互斥，不会重复生成。
         const finalMessages = [...patchedMessages, asstMsg]
         get().maybeAutoTitle(data.conversationId, finalMessages)
       } else {
-        set({ error: String(res.error || '请求失败'), loading: false })
+        // F2：失败路径同样要释放监听并复位聚合运行标记，否则「生成中/运行中」会永久卡住
+        settleFailure(String(res.error || '请求失败'))
       }
     } catch (err) {
-      cleanupIfCurrent()
-      set({ error: String(err), loading: false })
+      settleFailure(String(err))
     } finally {
       set({ loading: false })
     }

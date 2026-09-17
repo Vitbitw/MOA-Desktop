@@ -125,9 +125,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
     retryCount: 2
   },
   display: {
-    subModelShow: 'hidden',
-    defaultSubModelExpanded: false,
-    autoClearSubOutputs: false,
     usageOverlay: false
   },
   pricing: {},

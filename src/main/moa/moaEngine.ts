@@ -156,7 +156,11 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
   const subOutputs: SubModelOutput[] = []
   const timeoutMs = req.subTimeoutMs ?? 60_000
 
-  const promises = resolvedSubs.map((sm, index) =>
+  // direct 模式只用首个可用子模型（subOutputs[0]）：只调用它，其余子模型不发起请求，
+  // 避免白付 N-1 份调用费用。index 语义不变——direct 时仅 index 0 有事件与输出
+  const subsToCall = req.mode === 'direct' ? resolvedSubs.slice(0, 1) : resolvedSubs
+
+  const promises = subsToCall.map((sm, index) =>
     callSubModel({
       providerBaseUrl: sm.providerBaseUrl,
       providerId: sm.providerId,
@@ -167,7 +171,9 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
       timeoutMs
     }).then((result) => {
       subOutputs[index] = { ...result, role: sm.role }
-      events?.emitSubOutput(subOutputs[index], index)
+      // 事件发射隔离：emit 抛错不得落入下方 .catch 被当作子模型失败处理（否则会用
+      // errorOutput 覆盖已成功的真实输出，聚合模式误报「所有子模型均失败」且用量漏记）
+      try { events?.emitSubOutput(subOutputs[index], index) } catch { /* 事件失败不影响业务结果 */ }
       return subOutputs[index]
     }).catch((err: unknown) => {
       const errMsg = err instanceof Error ? err.message : String(err)
@@ -181,7 +187,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
         role: sm.role
       }
       subOutputs[index] = errorOutput
-      events?.emitSubOutput(errorOutput, index)
+      try { events?.emitSubOutput(errorOutput, index) } catch { /* 事件失败不影响业务结果 */ }
       return errorOutput
     })
   )
@@ -239,7 +245,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
     }
   }
 
-  events?.emitAggregationStart()
+  try { events?.emitAggregationStart() } catch { /* 事件失败不得使 executeMoA reject */ }
 
   // 按架构分叉：主席团模式用主持人提示词 + 完整历史 + 专家意见；选举模式沿用融合器提示词
   const isCommittee = req.architecture === 'committee'
@@ -274,7 +280,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
       if (fallbackAgg) {
         const fallbackResult = await callAggregator(fallbackAgg, aggMessages, req.aggTimeoutMs ?? 120_000)
         if (fallbackResult.success) {
-          events?.emitAggregationChunk(fallbackResult.content, true)
+          try { events?.emitAggregationChunk(fallbackResult.content, true) } catch { /* 忽略事件失败 */ }
           return {
             type: 'aggregate',
             content: fallbackResult.content,
@@ -291,7 +297,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
     }
 
     // Aggregation failed — degrade to compare
-    events?.emitAggregationChunk('', true)
+    try { events?.emitAggregationChunk('', true) } catch { /* 忽略事件失败 */ }
     return {
       type: 'aggregate',
       content: '',
@@ -303,7 +309,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
     }
   }
 
-  events?.emitAggregationChunk(aggResult.content, true)
+  try { events?.emitAggregationChunk(aggResult.content, true) } catch { /* 忽略事件失败 */ }
 
   return {
     type: 'aggregate',

@@ -115,8 +115,8 @@ contextBridge.exposeInMainWorld('moaAPI', {
     return () => ipcRenderer.removeListener(IPC_EVENT.MENU_NEW_CONVERSATION, handler)
   },
 
-  onMenuCopyGatewayUrl: (callback: () => void) => {
-    const handler = () => callback()
+  onMenuCopyGatewayUrl: (callback: (url: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, url: string) => callback(url)
     ipcRenderer.on(IPC_EVENT.MENU_COPY_GATEWAY_URL, handler)
     return () => ipcRenderer.removeListener(IPC_EVENT.MENU_COPY_GATEWAY_URL, handler)
   },

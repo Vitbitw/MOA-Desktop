@@ -152,8 +152,13 @@ export function getCollectorState(sourceId: string): CollectorRunState {
   }
 }
 
-/** 清空某监控源的本地累计（退出登录/重置时可选调用） */
+/**
+ * 清空某监控源的本地累计（退出登录/重置时调用）：用量记录 + 采集运行状态一并清除。
+ * 只清 cc_usage_records 不够——换账号后 cc_collector_state 里旧账号的轮次/插入数仍会被 UI 展示，
+ * 且同一 sourceId 的累计数字会与旧账号串号。
+ */
 export function clearCumulativeUsage(sourceId: string): void {
   const db = getDatabase()
   db.exec('DELETE FROM cc_usage_records WHERE source_id = ?', [sourceId])
+  db.exec('DELETE FROM cc_collector_state WHERE source_id = ?', [sourceId])
 }
