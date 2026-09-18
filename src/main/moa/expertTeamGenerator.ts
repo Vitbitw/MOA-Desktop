@@ -13,6 +13,9 @@ import type { ExpertTeamPlan, GeneratedExpert } from '../../shared/types'
 const EXPERT_NAME_MAX = 50
 const EXPERT_PROMPT_MAX = 4000
 
+/** 码点安全截断（N-2）：超长时按 Unicode 码点取前 max 个（不切裂 emoji 代理对）；未超长原样返回（BMP 与 slice 等价） */
+const clip = (s: string, max: number): string => (s.length > max ? [...s].slice(0, max).join('') : s)
+
 export interface GenerateExpertsRequest {
   requirement: string
   seats: string[]
@@ -114,7 +117,7 @@ export function parseExpertPlan(content: string): { reason?: string; experts: Ge
     const name = typeof item.name === 'string' ? item.name.trim() : ''
     const prompt = typeof item.prompt === 'string' ? item.prompt.trim() : ''
     if (!name || !prompt) continue
-    experts.push({ name: name.slice(0, EXPERT_NAME_MAX), prompt: prompt.slice(0, EXPERT_PROMPT_MAX) })
+    experts.push({ name: clip(name, EXPERT_NAME_MAX), prompt: clip(prompt, EXPERT_PROMPT_MAX) })
   }
 
   const reason = obj && typeof obj.reason === 'string' && obj.reason.trim() ? obj.reason.trim() : undefined

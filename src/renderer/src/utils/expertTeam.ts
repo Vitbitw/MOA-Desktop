@@ -1,4 +1,5 @@
 import type { SubModelConfig, GeneratedExpert, SubModelRole } from '../../../shared/types'
+import { splitModelKey } from '../../../shared/modelKey'
 
 /** 模型下拉选项（与 MoASection 的 allModelOptions 同形） */
 export interface ModelOption {
@@ -27,12 +28,6 @@ export interface ImportPlan {
     /** 被移除的席位（其原有角色/提示词将一并移除） */
     shrunk: Array<{ modelId: string }>
   }
-}
-
-/** 'providerId:modelId' → 两段（缺失段回退 ''） */
-const splitModelKey = (key: string): { providerId: string; modelId: string } => {
-  const [providerId = '', modelId = ''] = key.split(':')
-  return { providerId, modelId }
 }
 
 /** 现有席位 → 'providerId:modelId' key */

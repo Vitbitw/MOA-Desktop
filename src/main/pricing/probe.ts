@@ -11,6 +11,7 @@ import { getAllProviders, fetchAndCacheModels } from '../providers/providerManag
 import { getMoaConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
 import { defaultPricingProbeUrlByName } from '../../shared/defaults'
+import { splitModelKey } from '../../shared/modelKey'
 import type { ProbedPricingEntry, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
 
 const HTTP_TIMEOUT_MS = 20_000
@@ -48,7 +49,7 @@ export function resolveProbeModel(): ProbeModel | null {
   const providers = getAllProviders()
 
   if (probeModelId && probeModelId.includes(':')) {
-    const [pid, mid] = probeModelId.split(':')
+    const { providerId: pid, modelId: mid } = splitModelKey(probeModelId)
     if (pid && mid) {
       const p = providers.find((prov) => prov.id === pid)
       if (p?.enabled && p.apiKey) {
@@ -557,7 +558,7 @@ export function extractJsonArray<T = RawProbeEntry>(content: string): T[] | null
   return null
 }
 
-/** 从 LLM 输出中提取第一个平衡花括号 JSON 对象（剥 markdown 代码块、容错前置说明与拖尾文字）。失败返回 null */
+/** 从 LLM 输出中提取第一个平衡花括号 JSON 对象（剥 markdown 代码块、容错前置说明与拖尾文字；字符串感知：引号内 {} 不计入平衡——N-1）。失败返回 null */
 export function extractJsonObject(content: string): Record<string, unknown> | null {
   let s = content.replace(/```[a-zA-Z]*/g, '').trim()
   // 截掉前置说明文字（定位到首个 [ 或 {）
@@ -568,9 +569,16 @@ export function extractJsonObject(content: string): Record<string, unknown> | nu
   if (braceStart === -1) return null
   let depth = 0
   let braceEnd = -1
+  let inString = false // 字符串感知（N-1）：双引号内的 {} 不计入平衡深度
   for (let i = braceStart; i < s.length; i++) {
     const ch = s[i]
-    if (ch === '{') depth++
+    if (inString) {
+      if (ch === '\\') i++ // 转义：跳过被转义字符
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') inString = true
+    else if (ch === '{') depth++
     else if (ch === '}') {
       depth--
       if (depth === 0) { braceEnd = i; break }

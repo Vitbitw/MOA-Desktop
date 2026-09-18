@@ -1,14 +1,16 @@
-// 冒烟测试：主席团专家团 —— 主进程生成器 src/main/moa/expertTeamGenerator.ts + 渲染端席位映射 src/renderer/src/utils/expertTeam.ts（T4）
+// 冒烟测试：主席团专家团 —— 主进程生成器 src/main/moa/expertTeamGenerator.ts + 渲染端席位映射 src/renderer/src/utils/expertTeam.ts + 共享 key 解析 src/shared/modelKey.ts（T4 + T5 补强）
 // 覆盖：① parseExpertPlan 宽容解析（标准对象 / markdown 代码块 / 前后杂文 / 纯数组 / 方括号 reason / 脏项丢弃 / 超长截断 / 垃圾输入）
 //      ② resolveGeneratorModel 三级解析（主模型 → 首个可用子模型 → 首个可用厂商首模型）
 //      ③ generateExpertTeam 入口（空需求 / 无可用生成模型 / 流式失败 / 成功路径 / 解析失败 / reason 缺省）
 //      ④ initialDrafts 草案初始化（沿用现有席位 / 复用首个席位模型 / 池空回退空串）
 //      ⑤ buildImportPlan 导入计划（新 uuid / order 重排 / role 清空 / 席位扩充缩减 / skipped）
+//      ⑥ 评审补强（T5）：buildExpertPlanPrompt 全文片段断言（SF-3）/ 含冒号 modelId 无损（SF-1）/ 字符串内 } 的 reason 提取（N-1）/ 码点安全截断（N-2）
 // 用法：node test-e2e/expert-team.cjs
-// 加载方式：esbuild bundle 两个被测模块（独立构建）：
+// 加载方式：esbuild bundle 三个被测模块（独立构建）：
 //   - expertTeamGenerator.ts：stub electron / appSettings / providerManager / moaConfig / fetchProxy / streamChat 六个外部模块
 //     （'../pricing/probe' 不 stub，用真实现——被测解析逻辑依赖其 extractJsonObject / extractJsonArray）；
-//   - expertTeam.ts（渲染端）：零 stub（仅 type import），直接 bundle。
+//   - expertTeam.ts（渲染端）：零 stub（仅 type import），直接 bundle；
+//   - modelKey.ts（共享）：无依赖，直接 bundle（splitModelKey 直测）。
 //   stub 与用例经 globalThis.__expertTeamTest 通信（bundle 与测试同进程）。
 // 返回码：全部通过 0，有失败 1
 const path = require('path')
@@ -130,6 +132,19 @@ const mdl = (id, providerId) => ({ id, name: id, providerId: providerId || 'p1' 
 /** 专家（GeneratedExpert） */
 const exp = (name, prompt) => ({ name, prompt })
 
+/** 是否含孤立代理项（UTF-16 高/低代理不成对；N-2 用例） */
+function hasLoneSurrogate(s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const n = s.charCodeAt(i + 1)
+      if (!(n >= 0xdc00 && n <= 0xdfff)) return true
+      i++
+    } else if (c >= 0xdc00 && c <= 0xdfff) return true
+  }
+  return false
+}
+
 /** 重置假 streamChat 状态（providers / moaConfig 由各用例自行设置） */
 function resetChat() {
   ctl.streamChatResult = { content: '' }
@@ -138,12 +153,14 @@ function resetChat() {
 
 let main = null
 let renderer = null
+let shared = null
 
 // ── 用例 ──
 
 ;(async () => {
   main = await bundle('../src/main/moa/expertTeamGenerator.ts', [stubPlugin])
   renderer = await bundle('../src/renderer/src/utils/expertTeam.ts')
+  shared = await bundle('../src/shared/modelKey.ts')
 
   console.log('══ 模块导出（签名对齐任务卡）══')
   ok(
@@ -202,6 +219,12 @@ let renderer = null
     const p = main.parseExpertPlan(content)
     eq(p.reason, '推荐[5]位专家以覆盖多维[含安全/性能]', '[5] 方括号不影响花括号平衡扫描，reason 原样保留')
     eq(p.experts.map((e) => e.name), ['安全工程师', '性能专家'], '[5] 专家列表不受影响')
+
+    // N-1 补强：字符串内含 } 时平衡扫描须跳过字符串上下文（不得误判对象提前闭合）
+    const content2 = '{"reason":"需 } 收尾说明","experts":[{"name":"甲","prompt":"p-甲"}]}'
+    const p2 = main.parseExpertPlan(content2)
+    eq(p2.reason, '需 } 收尾说明', '[5] reason 含 }（字符串内）→ 对象扫描不误截断，reason 完整保留')
+    eq(p2.experts.map((e) => e.name), ['甲'], '[5] 字符串内 } 不影响专家提取')
   }
 
   caseHeader(6, 'parseExpertPlan：缺字段项被丢弃（空 name / 空 prompt / 缺字段 / 非字符串）')
@@ -231,7 +254,7 @@ let renderer = null
     eq(p.reason, '全非法', '[7] reason 仍从包裹对象取出（与专家列表解耦）')
   }
 
-  caseHeader(8, 'parseExpertPlan：超长截断（name 60→50 / prompt 4100→4000）')
+  caseHeader(8, 'parseExpertPlan：超长截断（name 60→50 / prompt 4100→4000）+ 码点安全（emoji 不切裂）')
   {
     const content = JSON.stringify({ reason: 'r', experts: [exp('名'.repeat(60), '词'.repeat(4100))] })
     const p = main.parseExpertPlan(content)
@@ -239,6 +262,11 @@ let renderer = null
     eq(p.experts[0].prompt.length, 4000, '[8] prompt 4100 字 → 截断为 4000')
     eq(p.experts[0].name, '名'.repeat(50), '[8] name 截断取前 50 字')
     eq(p.experts[0].prompt, '词'.repeat(4000), '[8] prompt 截断取前 4000 字')
+
+    // N-2 补强：按 UTF-16 码元截断会切裂 emoji 代理对（'a' + 50🚀 = 101 码元），修复后按码点截 50
+    const emojiPlan = main.parseExpertPlan(JSON.stringify({ experts: [exp('a' + '🚀'.repeat(50), 'p-emoji')] }))
+    eq([...emojiPlan.experts[0].name].length, 50, '[8] emoji 超长 name → 按码点截 50（代理对完整）')
+    ok(!hasLoneSurrogate(emojiPlan.experts[0].name), '[8] 截断结果无孤立代理项')
   }
 
   caseHeader(9, 'parseExpertPlan：空内容 / 纯垃圾文本 / 截断 JSON → 0 专家（不抛错）')
@@ -388,14 +416,14 @@ let renderer = null
 
   // ═══ initialDrafts ═══
 
-  caseHeader(20, 'initialDrafts：existing 2 席 + experts 4 个 → 前 2 席沿用、第 3/4 席复用 existing[0] 模型')
+  caseHeader(20, 'initialDrafts：existing 2 席 + experts 4 个 → 前 2 席沿用、第 3/4 席复用 existing[0] 模型（pool[0] 不同亦有判别力）')
   {
     const existing = [seat('p1', 'm1'), seat('p2', 'm2')]
     const experts = [exp('甲', 'p-甲'), exp('乙', 'p-乙'), exp('丙', 'p-丙'), exp('丁', 'p-丁')]
-    const pool = [opt('p1:m1'), opt('p3:m3')]
+    const pool = [opt('p3:m3'), opt('p1:m1')] // 池首（p3:m3）≠ existing[0]（p1:m1）：锁死「复用 existing[0]」而非 pool 顺序
     const drafts = renderer.initialDrafts(experts, existing, pool)
     eq(drafts.length, 4, '[20] 草案数量 = 专家数量')
-    eq(drafts.map((d) => d.modelKey), ['p1:m1', 'p2:m2', 'p1:m1', 'p1:m1'], '[20] 前 2 席沿用现有席位，新增 2 席复用 existing[0] 模型')
+    eq(drafts.map((d) => d.modelKey), ['p1:m1', 'p2:m2', 'p1:m1', 'p1:m1'], '[20] 前 2 席沿用现有席位，新增 2 席复用 existing[0] 模型（池首不同仍不取 pool[0]）')
     eq(drafts.map((d) => d.name), ['甲', '乙', '丙', '丁'], '[20] name 来自专家')
     eq(drafts.map((d) => d.prompt), ['p-甲', 'p-乙', 'p-丙', 'p-丁'], '[20] prompt 来自专家')
   }
@@ -503,7 +531,49 @@ let renderer = null
     eq(plan.subModels[0].expertName, '乙', '[28] 保留的是有模型的草案')
   }
 
-  eq(caseCount, 28, '用例数 = 28（与任务卡清单一致）')
+  // ═══ 评审补强（T5）：buildExpertPlanPrompt 全文（SF-3）+ 含冒号 modelId（SF-1） ═══
+
+  caseHeader(29, 'buildExpertPlanPrompt：设计 §5.3 关键片段逐字断言 + seats 空/非空两分支（SF-3）')
+  {
+    const requirement = '设计一个分布式任务调度系统'
+    const withSeats = main.buildExpertPlanPrompt({ requirement, seats: ['席位A', '席位B'] })
+    // 关键片段逐字硬编码（≥8 条，取自设计 §5.3；不读取 .hermes 下被 gitignore 的文档，测试资产自包含）
+    const fragments = [
+      '你是多模型协作（主席团模式）的专家团队规划师',
+      '【任务需求】',
+      '【当前配置】',
+      '【规划要求】',
+      '【输出要求】',
+      '通常 2-6 位',
+      '新席位默认复用现有第一个席位的模型',
+      '只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释',
+      '参考本轮上下文，只输出你的意见',
+      '"reason": "一句话说明推荐这个数量的理由"'
+    ]
+    for (const f of fragments) ok(withSeats.includes(f), `[29] prompt 含关键片段「${f}」`)
+    ok(withSeats.includes('已配置专家席位：2 个（席位A、席位B）'), '[29] seats 非空 → 含席位清单 join 结果')
+    const noSeats = main.buildExpertPlanPrompt({ requirement, seats: [] })
+    ok(noSeats.includes('已配置专家席位：0 个（无，将自动创建席位）'), '[29] seats 空 → 含「（无，将自动创建席位）」')
+    ok(noSeats.includes(requirement), '[29] seats 空分支同样嵌入需求原文')
+  }
+
+  caseHeader(30, 'splitModelKey：按首个冒号切分（含冒号 modelId 无损）+ buildImportPlan round-trip（SF-1）')
+  {
+    eq(shared.splitModelKey(''), { providerId: '', modelId: '' }, '[30] 空串 → 两段均空串')
+    eq(shared.splitModelKey('p1'), { providerId: 'p1', modelId: '' }, '[30] 无冒号 → 整串为 providerId（旧默认值行为）')
+    eq(shared.splitModelKey('p1:m1'), { providerId: 'p1', modelId: 'm1' }, '[30] 常规两段切分')
+    eq(shared.splitModelKey('ollama:llama3.1:8b'), { providerId: 'ollama', modelId: 'llama3.1:8b' }, '[30] 含冒号 modelId 无损保留')
+    eq(shared.splitModelKey(':m1'), { providerId: '', modelId: 'm1' }, '[30] 前导冒号 → providerId 空串')
+
+    // round-trip：含冒号 modelKey 导入后席位 modelId 不失真（评审 SF-1 原始缺陷面）
+    const colonKey = 'ollama:llama3.1:8b'
+    const plan = renderer.buildImportPlan([], [opt(colonKey)], [{ name: '甲', prompt: 'p-甲', modelKey: colonKey }])
+    eq(plan.skipped, 0, '[30] 含冒号 modelKey 在池中 → 不跳过')
+    eq(plan.subModels.map((s) => s.providerId + ':' + s.modelId), [colonKey], '[30] 导入后 providerId:modelId 逐字 round-trip')
+    eq(plan.subModels[0].modelId, 'llama3.1:8b', '[30] 席位 modelId 保留完整冒号后缀')
+  }
+
+  eq(caseCount, 30, '用例数 = 30（T4 的 28 + T5 补强 2）')
 
   console.log('\n──────────────────────────────')
   console.log(`通过 ${pass} / 失败 ${fail}`)

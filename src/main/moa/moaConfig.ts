@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import type { SubModelConfig, AggregatorConfig, MoAMode, MoaArchitecture } from '../../shared/types'
 import { getDatabase } from '../db/database'
 
@@ -37,15 +38,37 @@ export function loadMoaConfigFromDb(): void {
     )
     if (row && row.value) {
       const parsed = JSON.parse(row.value)
+      // 防御：非数组垃圾值（旧版本/手工改库）会让 getMoaConfig 的 .map 抛 TypeError
+      const subModels: SubModelConfig[] = Array.isArray(parsed.subModels) ? parsed.subModels : []
+      // 旧配置迁移（N-5）：主进程一次性补全缺失的席位 id 并落库（幂等：已有 id 的项不动）。
+      // 渲染端不再补 id —— 避免 providers 变化触发的二次加载重新生成 id、打断编辑态。
+      let migrated = false
+      for (const sm of subModels) {
+        if (sm && typeof sm === 'object' && !sm.id) {
+          sm.id = crypto.randomUUID()
+          migrated = true
+        }
+      }
       currentConfig = {
         mode: parsed.mode || 'direct',
-        // 防御：非数组垃圾值（旧版本/手工改库）会让 getMoaConfig 的 .map 抛 TypeError
-        subModels: Array.isArray(parsed.subModels) ? parsed.subModels : [],
+        subModels,
         aggregator: parsed.aggregator || null,
         aggregationPromptVariant: parsed.aggregationPromptVariant || 'standard-zh',
         customAggregationPrompt: parsed.customAggregationPrompt,
         architecture: parsed.architecture || 'election',
         gatewayArchitecture: parsed.gatewayArchitecture || undefined
+      }
+      if (migrated) {
+        // 回写失败仅记日志、不阻断加载（内存态已带新 id，本次会话可用；下次启动重试落库）
+        try {
+          getDatabase().exec(
+            'INSERT OR REPLACE INTO moa_config (key, value, updated_at) VALUES (?, ?, ?)',
+            [CONFIG_KEY, JSON.stringify(currentConfig), Date.now()]
+          )
+          console.log('[MoA Config] Migrated subModels seat ids to DB')
+        } catch (err) {
+          console.error('[MoA Config] Failed to persist seat id migration:', err)
+        }
       }
       console.log('[MoA Config] Loaded from DB:', JSON.stringify(currentConfig))
     }

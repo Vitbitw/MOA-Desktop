@@ -7,6 +7,7 @@ import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, Chev
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, SubModelRole } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { MOA_ROLE_TEMPLATES } from '../../../shared/moaRoles'
+import { splitModelKey } from '../../../shared/modelKey'
 import ExpertTeamSection from './ExpertTeamSection'
 
 type SettingsSection = 'moa' | 'providers' | 'network' | 'display' | 'pricing' | 'title'
@@ -173,10 +174,6 @@ function unwrapMoaConfig(res: any): any {
   return res && typeof res === 'object' && 'success' in res ? res.data : res
 }
 
-/** 加载时内存补全缺失的席位 id（旧配置缺省；不改原对象，保存时随 subModels 自然落库） */
-const withIds = (list: SubModelConfig[]): SubModelConfig[] =>
-  list.map((s) => (s.id ? s : { ...s, id: crypto.randomUUID() }))
-
 function MoASection() {
   const providers = useConfigStore((s) => s.providers)
   const notifySaveResult = useSettingsStore((s) => s.notifySaveResult)
@@ -200,7 +197,7 @@ function MoASection() {
     window.moaAPI.getMoaConfig().then((res: any) => {
       const config = unwrapMoaConfig(res)
       if (config) {
-        setSubModels(withIds(config.subModels || []))
+        setSubModels(config.subModels || [])
         setAggModelId(config.aggregator?.primaryModelId || '')
         setAggProviderId(config.aggregator?.primaryProviderId || '')
         setFallbackProviderId(config.aggregator?.fallbackProviderId || '')
@@ -219,7 +216,7 @@ function MoASection() {
       window.moaAPI.getMoaConfig().then((res: any) => {
         const config = unwrapMoaConfig(res)
         if (config) {
-          setSubModels(withIds(config.subModels || []))
+          setSubModels(config.subModels || [])
           setAggModelId(config.aggregator?.primaryModelId || '')
           setAggProviderId(config.aggregator?.primaryProviderId || '')
           setFallbackProviderId(config.aggregator?.fallbackProviderId || '')
@@ -241,7 +238,7 @@ function MoASection() {
   )
 
   const addSubModel = (value: string) => {
-    const [providerId, modelId] = value.split(':')
+    const { providerId, modelId } = splitModelKey(value)
     if (!providerId || !modelId) return
     // 不拦截重复模型：同一模型可占多个席位（各配不同专家提示词），由席位 id 区分
     setSubModels((prev) => [
@@ -426,7 +423,7 @@ function MoASection() {
         <select
           value={aggProviderId ? `${aggProviderId}:${aggModelId}` : ''}
           onChange={(e) => {
-            const [pid, mid] = e.target.value.split(':')
+            const { providerId: pid, modelId: mid } = splitModelKey(e.target.value)
             setAggProviderId(pid || '')
             setAggModelId(mid || '')
           }}
@@ -450,7 +447,7 @@ function MoASection() {
         <select
           value={fallbackProviderId ? `${fallbackProviderId}:${fallbackModelId}` : ''}
           onChange={(e) => {
-            const [pid, mid] = e.target.value.split(':')
+            const { providerId: pid, modelId: mid } = splitModelKey(e.target.value)
             setFallbackProviderId(pid || '')
             setFallbackModelId(mid || '')
           }}
@@ -881,7 +878,7 @@ function TitleSettingsSection() {
         <select
           value={titleCfg.providerId ? `${titleCfg.providerId}:${titleCfg.modelId}` : ''}
           onChange={(e) => {
-            const [pid, mid] = e.target.value.split(':')
+            const { providerId: pid, modelId: mid } = splitModelKey(e.target.value)
             setTitle({ providerId: pid || '', modelId: mid || '' })
           }}
           className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
