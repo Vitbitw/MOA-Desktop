@@ -5,12 +5,17 @@ import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { getAllProviders } from '../providers/providerManager'
 import { getMoaConfig } from '../moa/moaConfig'
-import { executeMoA } from '../moa/moaEngine'
+import { executeMoAWithEvents, resolveSubModels } from '../moa/moaEngine'
+import { createThrottledEmitter, STREAM_PUSH_INTERVAL_MS } from '../moa/streamThrottle'
+import type { ThrottledEmitter } from '../moa/streamThrottle'
+import { parseOpenAIChunk, readSseStream } from '../moa/sseReader'
 import { getDatabase } from '../db/database'
 import { readAppSettings } from '../config/appSettings'
 import { buildUsageEntries, sumUsage } from '../moa/usage'
 import type { Provider, SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
+import { broadcastToUi, GATEWAY_ROUND_START, GATEWAY_SUB_UPDATE, GATEWAY_AGG_START, GATEWAY_AGG_CHUNK, GATEWAY_ROUND_DONE } from '../uiBridge'
+import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from '../uiBridge'
 
 let server: Server | null = null
 /** 当前 server 对应的设置值（host/port），applyGatewayServer 幂等判断用 */
@@ -194,9 +199,21 @@ function findProviderForModel(model: string): { baseUrl: string; apiKey: string;
   return { baseUrl: p.baseUrl, apiKey: p.apiKey, models: p.models }
 }
 
-/** 直连模式选路由：优先按 model 精确匹配，回落第一个可用 provider。 */
+/** 直连路由选路：优先按 model 精确匹配，回落第一个可用 provider。 */
 function routeForRequest(model: string | undefined): { baseUrl: string; apiKey: string; models: Provider['models'] } | null {
   return (model && findProviderForModel(model)) || firstUsableProvider()
+}
+
+/**
+ * 造「旁路 tap」流：返回 stream 与其 controller（ReadableStream 构造时 start 同步执行，返回时 controller 必已就绪）。
+ * direct 透传时把读到的 chunk 镜像进该流，交给 readSseStream 增量解析——不改变原透传字节。
+ */
+function createTapStream(): { stream: ReadableStream<Uint8Array>; controller: ReadableStreamDefaultController<Uint8Array> } {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) { controller = c }
+  })
+  return { stream, controller }
 }
 
 export function createGatewayServer(): Express {
@@ -277,14 +294,53 @@ export function createGatewayServer(): Express {
     // ── Direct mode ──
     if (config.mode === 'direct' || config.subModels.length === 0) {
       const reqStart = Date.now()
+      const roundId = crypto.randomUUID()
+      // 请求名不在该 provider 模型列表时回落到其第一个模型；否则透传原名
+      let upstreamModel = requestedModel || ''
+      if (!provider.models.some((m) => m.id === upstreamModel)) {
+        upstreamModel = provider.models[0]?.id || upstreamModel
+      }
+
+      // 直通轮次同样直播（T4）：单模型清单；终态 subUpdate + roundDone 由 finishDirectRound 统一广播
+      // （含异常路径；directDone 防重复）。旁路解析只观察字节，不改透传内容。
+      let directAcc = ''
+      let directUsage: { prompt: number; completion: number } | undefined
+      const dirEmitter = createThrottledEmitter<GatewaySubUpdatePayload>(STREAM_PUSH_INTERVAL_MS, (update) => {
+        broadcastToUi(GATEWAY_SUB_UPDATE, update)
+      })
+      let directDone = false
+      const finishDirectRound = (status: 'success' | 'error', error?: string): void => {
+        if (directDone) return
+        directDone = true
+        const update: GatewaySubUpdatePayload = {
+          roundId,
+          index: 0,
+          modelId: upstreamModel,
+          providerId: provider.baseUrl,
+          content: directAcc,
+          status,
+          durationMs: Date.now() - reqStart
+        }
+        if (error !== undefined) update.error = error
+        if (directUsage !== undefined) update.tokenUsage = directUsage
+        dirEmitter.flush(update)
+        dirEmitter.dispose()
+        broadcastToUi(GATEWAY_ROUND_DONE, {
+          roundId,
+          success: status === 'success',
+          error: status === 'success' ? undefined : (error || '直通请求失败'),
+          durationMs: Date.now() - reqStart
+        })
+      }
+      broadcastToUi(GATEWAY_ROUND_START, {
+        roundId,
+        mode: 'direct',
+        subModels: [{ index: 0, modelId: upstreamModel, role: '' }]
+      } satisfies GatewayRoundStartPayload)
+
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
-        // 请求名不在该 provider 模型列表时回落到其第一个模型；否则透传原名
-        let upstreamModel = requestedModel || ''
-        if (!provider.models.some((m) => m.id === upstreamModel)) {
-          upstreamModel = provider.models[0]?.id || upstreamModel
-        }
         // 上游请求统一走 fetchProxy（本地回环地址自动直连，云端 provider 可走网络代理）
         // 自带超时信号：fetchProxy 不再套用全局 timeoutMs，避免误伤非流式慢速上游
         const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
@@ -309,6 +365,7 @@ export function createGatewayServer(): Express {
           res.status(502).json({
             error: { message: `Upstream ${upstream.status}: ${errBody.slice(0, 500)}`, type: 'upstream_error' }
           })
+          finishDirectRound('error', `Upstream ${upstream.status}: ${errBody.slice(0, 300)}`)
           return
         }
 
@@ -317,13 +374,36 @@ export function createGatewayServer(): Express {
           res.setHeader('Cache-Control', 'no-cache')
           res.setHeader('Connection', 'keep-alive')
           const reader = upstream.body?.getReader()
-          if (!reader) { res.status(502).json({ error: { message: 'No body', type: 'upstream_error' } }); return }
+          if (!reader) {
+            res.status(502).json({ error: { message: 'No body', type: 'upstream_error' } })
+            finishDirectRound('error', 'No body')
+            return
+          }
           // P2-6：客户端断开时 cancel 上游读取流，释放上游长连接（否则 SSE 永不结束会一直挂着）
           let clientClosed = false
           res.on('close', () => {
             clientClosed = true
             try { void reader.cancel().catch(() => {}) } catch { /* ignore */ }
           })
+          // 旁路直播解析（不改透传字节）：单一 reader 读到的每个 chunk 镜像进 tap 流，
+          // readSseStream 增量切事件 → parseOpenAIChunk 提 content 累计 + usage；解析异常静默，不影响透传。
+          const tap = createTapStream()
+          const tapDone = readSseStream(tap.stream, (data) => {
+            const chunk = parseOpenAIChunk(data)
+            if (!chunk) return
+            if (typeof chunk.content === 'string' && chunk.content !== '') {
+              directAcc += chunk.content
+              dirEmitter.push({
+                roundId,
+                index: 0,
+                modelId: upstreamModel,
+                providerId: provider.baseUrl,
+                content: directAcc,
+                status: 'running'
+              })
+            }
+            if (chunk.usage) directUsage = chunk.usage
+          }).catch(() => { /* 旁路解析异常不影响透传与记账 */ })
           const decoder = new TextDecoder()
           let buffer = ''
           let sawDone = false
@@ -331,6 +411,10 @@ export function createGatewayServer(): Express {
             if (clientClosed) break
             const { done, value } = await reader.read()
             if (done) break
+            // 镜像给旁路解析（不 await，不阻塞透传）
+            if (value && value.length > 0) {
+              try { tap.controller.enqueue(value) } catch { /* tap 已关闭 */ }
+            }
             buffer += decoder.decode(value, { stream: true })
             const lines = buffer.split('\n')
             buffer = lines.pop() || ''
@@ -342,7 +426,12 @@ export function createGatewayServer(): Express {
               res.write(line + '\n')
             }
           }
-          if (!clientClosed) {
+          // 上游读完：关闭 tap 并等旁路解析收尾（残余 buffer 按最后一帧处理）
+          try { tap.controller.close() } catch { /* 已关闭 */ }
+          await tapDone
+          // 快照断开标志：res.end() 之后 close 事件仍会触发（正常完成），不得误判为提前断开
+          const closedEarly = clientClosed
+          if (!closedEarly) {
             if (buffer) {
               // 收尾残片（上游无尾换行时留在 buffer）里也可能带 [DONE]
               if (buffer.trim() === 'data: [DONE]') sawDone = true
@@ -352,17 +441,19 @@ export function createGatewayServer(): Express {
             if (!sawDone) res.write('data: [DONE]\n\n')
             res.end()
           }
-          // 流式不做 token 级解析，仅记录请求计数与成功状态
+          // 流式不做 token 级记账解析（口径不变）；旁路解析结果只用于 UI 直播
           logGatewayRequest({
             moaMode: 'direct',
-            success: !clientClosed,
+            success: !closedEarly,
             prompt: 0,
             completion: 0,
             durationMs: Date.now() - reqStart,
             subCount: 1,
             models: upstreamModel ? [{ modelId: upstreamModel, role: 'sub', prompt: 0, completion: 0 }] : [],
-            error: clientClosed ? '客户端提前断开' : null
+            error: closedEarly ? '客户端提前断开' : null
           })
+          if (closedEarly) finishDirectRound('error', '客户端提前断开')
+          else finishDirectRound('success')
         } else {
           const data = await upstream.json()
           const usage = data.usage || {}
@@ -381,6 +472,12 @@ export function createGatewayServer(): Express {
             }] : []
           })
           res.json(data)
+          // 非流式 direct：完成时一次性终态（content/usage 来自直回 JSON）
+          directAcc = typeof data.choices?.[0]?.message?.content === 'string' ? data.choices[0].message.content : ''
+          if (typeof usage.prompt_tokens === 'number' || typeof usage.completion_tokens === 'number') {
+            directUsage = { prompt: usage.prompt_tokens || 0, completion: usage.completion_tokens || 0 }
+          }
+          finishDirectRound('success')
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -397,8 +494,9 @@ export function createGatewayServer(): Express {
           })
         }
         // SSE 已开写后不能再发 JSON 错误体（headers 已发送，Express 会二次抛错挂死响应）——直接收流
-        if (stream && res.headersSent) { res.end(); return }
+        if (stream && res.headersSent) { res.end(); finishDirectRound('error', msg); return }
         res.status(502).json({ error: { message: `Gateway: ${msg}`, type: 'gateway_error' } })
+        finishDirectRound('error', msg)
       }
       return
     }
@@ -407,14 +505,131 @@ export function createGatewayServer(): Express {
     // X1 修复：executeMoA 主体无整体异常防护，Express 4 又不捕获 async handler 的
     // rejection——任何内部抛错（DB 故障等）都会变成 unhandled rejection 崩溃主进程
     const reqStart = Date.now()
-    const result = await executeMoA({
+    const roundId = crypto.randomUUID()
+
+    // 客户端断开 → 立即中止引擎（T4）：close 且响应未正常结束（!res.writableEnded）→ controller.abort()。
+    // abort 经 MoaRequest.signal 透传——不再发起聚合、进行中调用随即中断（省后续费用）；
+    // 正常完成（res.end/res.json）后的 close 不触发（writableEnded 已置位）。
+    const controller = new AbortController()
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort()
+    })
+
+    // roundStart 广播：子模型清单经与引擎相同的 resolveSubModels 得到（index 与 subUpdate 对齐）。
+    // UI 收到即切监控视图；清单只含模型身份，不含密钥。
+    const roundSubs = resolveSubModels(config.subModels).map((sm, index) => ({
+      index,
+      modelId: sm.modelId,
+      role: sm.role
+    }))
+    broadcastToUi(GATEWAY_ROUND_START, {
+      roundId,
+      mode: config.mode,
+      subModels: roundSubs,
+      aggregator: config.aggregator ? { modelId: config.aggregator.primaryModelId } : undefined
+    } satisfies GatewayRoundStartPayload)
+
+    // 每个子模型 index 一个节流发射器 + 聚合一个（与 app 内路径同机制；终态 flush+dispose，见 streamThrottle）
+    const subEmitters = new Map<number, ThrottledEmitter<GatewaySubUpdatePayload>>()
+    const subEmitterOf = (index: number): ThrottledEmitter<GatewaySubUpdatePayload> => {
+      let emitter = subEmitters.get(index)
+      if (!emitter) {
+        emitter = createThrottledEmitter<GatewaySubUpdatePayload>(STREAM_PUSH_INTERVAL_MS, (update) => {
+          broadcastToUi(GATEWAY_SUB_UPDATE, update)
+        })
+        subEmitters.set(index, emitter)
+      }
+      return emitter
+    }
+    const aggEmitter = createThrottledEmitter<GatewayAggChunkPayload>(STREAM_PUSH_INTERVAL_MS, (chunk) => {
+      broadcastToUi(GATEWAY_AGG_CHUNK, chunk)
+    })
+
+    // ── 对外真流式转发（stream:true）：聚合增量 text.slice(lastSentLen) 逐帧写 SSE（不节流）──
+    let lastSentLen = 0
+    let clientGotContent = false
+    let clientStreamClosed = false
+    const writeSse = (payload: unknown): void => {
+      try {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`)
+      } catch { /* 客户端已断开：abort 链路负责中止引擎 */ }
+    }
+    const chunkFrame = (delta: Record<string, unknown>, finishReason: string | null): unknown => ({
+      id: `chatcmpl-moa-${Date.now()}`,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model: 'moa-aggregated',
+      choices: [{ index: 0, delta, finish_reason: finishReason }]
+    })
+    /** 对外收流结束（finish_reason:'stop' + [DONE]）：正常完成 / 聚合失败已开流 / fallback 已开流三情形共用 */
+    const finishClientStream = (): void => {
+      if (!stream || clientStreamClosed) return
+      clientStreamClosed = true
+      if (controller.signal.aborted || res.writableEnded) return
+      writeSse(chunkFrame({}, 'stop'))
+      try { res.write('data: [DONE]\n\n') } catch { /* 客户端已断开 */ }
+      try { res.end() } catch { /* 客户端已断开 */ }
+    }
+
+    const result = await executeMoAWithEvents({
       messages: messages || [],
       subModels: config.subModels,
       aggregator: config.aggregator || undefined,
       mode: config.mode === 'aggregate' ? 'aggregate' : 'compare',
       aggregationPromptVariant: config.aggregationPromptVariant,
       customAggregationPrompt: config.customAggregationPrompt,
-      architecture: config.architecture
+      architecture: config.architecture,
+      // 客户端断开 → abort 链路：信号透传引擎（中止后不再发起聚合、进行中调用随之中断）
+      signal: controller.signal,
+      emitSubOutput: (output, index) => {
+        const update: GatewaySubUpdatePayload = {
+          roundId,
+          index,
+          modelId: output.modelId,
+          providerId: output.providerId,
+          content: output.content,
+          status: output.status
+        }
+        if (output.error !== undefined) update.error = output.error
+        if (output.durationMs !== undefined) update.durationMs = output.durationMs
+        if (output.tokenUsage !== undefined) update.tokenUsage = output.tokenUsage
+        if (output.role !== undefined) update.role = output.role
+        const emitter = subEmitterOf(index)
+        if (output.status === 'running') {
+          emitter.push(update)
+        } else {
+          // 终态：立即发终值（丢弃 pending）+ dispose，此后不得再补发旧文本
+          emitter.flush(update)
+          emitter.dispose()
+        }
+      },
+      emitAggregationStart: () => {
+        broadcastToUi(GATEWAY_AGG_START, { roundId } satisfies GatewayAggStartPayload)
+      },
+      emitAggregationChunk: (text, done) => {
+        // ① UI 节流广播（text=累计全文；done=true 终态 flush+dispose）
+        const chunk: GatewayAggChunkPayload = { roundId, text, done }
+        if (!done) {
+          aggEmitter.push(chunk)
+        } else {
+          aggEmitter.flush(chunk)
+          aggEmitter.dispose()
+        }
+        // ② 对外真增量转发（不节流）：只写与已发送长度的差
+        if (!stream || clientStreamClosed || controller.signal.aborted) return
+        if (!done && text === '') {
+          // fallback 聚合重置（引擎在 primary 失败后发出）：已写过增量 → 对外收流结束（已流出的内容
+          // 不可撤回），UI 继续 fallback 直播；未写过 → lastSentLen 归零，fallback 内容无缝接续
+          if (clientGotContent) finishClientStream()
+          else lastSentLen = 0
+          return
+        }
+        const delta = text.slice(lastSentLen)
+        if (delta === '') return
+        lastSentLen = text.length
+        clientGotContent = true
+        writeSse(chunkFrame({ content: delta }, null))
+      }
     }).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err)
       return {
@@ -426,39 +641,41 @@ export function createGatewayServer(): Express {
       }
     })
 
+    // 一轮结束：清空全部节流发射器（防泄漏；已 dispose 的重复调用为无操作）
+    for (const emitter of subEmitters.values()) emitter.dispose()
+    aggEmitter.dispose()
+
     // 用量明细（成功子模型 + 聚合器）统一计账
     const moaInputs = usageInputsFromMoa(result)
     const moaEntries = moaInputs.map((m) => ({ ...m, cost: 0 }))
     const moaTotals = sumUsage(buildUsageEntries(moaEntries))
 
-    if (!result.success) {
-      logGatewayRequest({
-        moaMode: config.mode,
-        success: false,
-        prompt: moaTotals.prompt,
-        completion: moaTotals.completion,
-        durationMs: Date.now() - reqStart,
-        subCount: result.subOutputs.length,
-        models: moaInputs,
-        error: result.error || 'MoA execution failed'
-      })
+    // 中止判定：客户端断开（close 且未正常结束）→ abort 已发生；success 恒 false（§4.4.4/§4.7）
+    const aborted = controller.signal.aborted
+    const ok = result.success && !aborted
+
+    // 记账：成功/失败/中止均落一条；中止按已发生用量记，error_detail 标注「客户端断开中止」
+    logGatewayRequest({
+      moaMode: config.mode,
+      success: ok,
+      prompt: moaTotals.prompt,
+      completion: moaTotals.completion,
+      durationMs: Date.now() - reqStart,
+      subCount: result.subOutputs.length,
+      models: moaInputs,
+      error: ok ? null : aborted ? '客户端断开中止' : (result.error || 'MoA execution failed')
+    })
+
+    // ── 对外响应收尾 ──
+    if (aborted) {
+      // 客户端已断开：不再写任何帧（abort 链路已中止引擎；直播停在中断处，UI 靠 aborted 事件标注）
+    } else if (!ok && !clientGotContent) {
+      // 失败且未写过增量（含未开流的流式/非流式客户端）：维持现状 502 JSON
       res.status(502).json({
         error: { message: result.error || 'MoA execution failed', type: 'moa_error' }
       })
-      return
-    }
-
-    if (config.mode === 'compare') {
-      logGatewayRequest({
-        moaMode: 'compare',
-        success: true,
-        prompt: moaTotals.prompt,
-        completion: moaTotals.completion,
-        durationMs: Date.now() - reqStart,
-        subCount: result.subOutputs.length,
-        models: moaInputs
-      })
-      // Return sub-model outputs as a structured JSON for external tools
+    } else if (config.mode === 'compare') {
+      // compare 对外 JSON 保持现状（子模型流只直播给 UI）
       res.json({
         id: `chatcmpl-moa-${Date.now()}`,
         object: 'chat.completion',
@@ -476,53 +693,9 @@ export function createGatewayServer(): Express {
         }],
         usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       })
-      return
-    }
-
-    // ── Aggregate mode ──
-    logGatewayRequest({
-      moaMode: 'aggregate',
-      success: true,
-      prompt: moaTotals.prompt,
-      completion: moaTotals.completion,
-      durationMs: Date.now() - reqStart,
-      subCount: result.subOutputs.length,
-      models: moaInputs
-    })
-    if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream')
-      res.setHeader('Cache-Control', 'no-cache')
-      res.setHeader('Connection', 'keep-alive')
-      // 客户端断开防护（与直连分支一致）：逐 token 写循环持续期间可能已断连，
-      // 继续写已销毁的响应会触发 error；断开即停并跳过收尾帧
-      let clientClosed = false
-      res.on('close', () => { clientClosed = true })
-      const content = result.content
-      // Simulate token-by-token streaming from the aggregated content
-      const tokens = content.split(/(?<=\s|(?<=[，。！？、；：]))/g)
-      for (const token of tokens) {
-        if (clientClosed) break
-        const payload = JSON.stringify({
-          id: `chatcmpl-moa-${Date.now()}`,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: 'moa-aggregated',
-          choices: [{ index: 0, delta: { content: token }, finish_reason: null }]
-        })
-        res.write(`data: ${payload}\n\n`)
-      }
-      const donePayload = JSON.stringify({
-        id: `chatcmpl-moa-${Date.now()}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: 'moa-aggregated',
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
-      })
-      if (!clientClosed) {
-        res.write(`data: ${donePayload}\n\n`)
-        res.write('data: [DONE]\n\n')
-        res.end()
-      }
+    } else if (stream) {
+      // 聚合成功 / 失败但已开流：收流结束（finish_reason:'stop' + [DONE]）
+      finishClientStream()
     } else {
       res.json({
         id: `chatcmpl-moa-${Date.now()}`,
@@ -541,6 +714,15 @@ export function createGatewayServer(): Express {
           : {})
       })
     }
+
+    // roundDone 广播：aborted:true = 客户端断开中止（success 恒 false；error 保留引擎文案，如「已中止」）
+    broadcastToUi(GATEWAY_ROUND_DONE, {
+      roundId,
+      success: ok,
+      error: ok ? undefined : (result.error || (aborted ? '客户端断开中止' : 'MoA 执行失败')),
+      aborted,
+      durationMs: Date.now() - reqStart
+    } satisfies GatewayRoundDonePayload)
   }))
 
   // ── Non-completions passthrough ──

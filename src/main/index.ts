@@ -8,6 +8,7 @@ import { IPC, IPC_EVENT } from '../shared/ipc-channels'
 import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { applyGatewayServer, stopGatewayServer } from './gateway/server'
+import { initUiBridge } from './uiBridge'
 import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
@@ -912,6 +913,9 @@ app.whenReady().then(async () => {
 
   // Set up Chinese application menu
   createApplicationMenu()
+
+  // UI 广播桥注入：网关等模块经 broadcastToUi 推送直播事件（窗口未创建/销毁时静默）
+  initUiBridge(safeSendMain)
 
   // Create window
   createWindow()
