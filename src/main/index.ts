@@ -23,6 +23,7 @@ import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommand
 import { loginToMimo, refreshMimoUsage } from './monitoring/mimo'
 import { loginToDeepSeek, logoutDeepSeek, getDeepSeekStatus, refreshDeepSeekUsage } from './monitoring/deepseek'
 import { getCumulativeUsage, clearCumulativeUsage } from './monitoring/usageAccumulator'
+import { saveUsageSnapshot, getUsageSnapshot, clearUsageSnapshot } from './monitoring/snapshotStore'
 import { startUsageCollector, stopUsageCollector, getCollectorStatus, markUsageCollected } from './monitoring/collector'
 import { resolveProbeModel, probeSources, getPricingProbeConfig, sourceHasConfiguredKey } from './pricing/probe'
 import { saveUsageCredential } from './store/key-store'
@@ -742,8 +743,9 @@ function registerIpcHandlers() {
   handleIpc(IPC.MONITOR_LOGOUT, (_e, sourceId: string) => {
     logoutCommandCode(sourceId)
     logoutDeepSeek(sourceId)
-    // 登出即清该源本地累计：同一 sourceId 换账号后不得混入旧账号的用量记录
+    // 登出即清该源本地累计与用量快照：同一 sourceId 换账号后不得混入/展示旧账号数据
     clearCumulativeUsage(sourceId)
+    clearUsageSnapshot(sourceId)
   })
 
   handleIpc(IPC.MONITOR_SET_API_KEY, (_e, sourceId: string, apiKey: string) => {
@@ -756,6 +758,9 @@ function registerIpcHandlers() {
   // 后台采集器状态（是否启用 / 间隔 / 上次采集时间 / 上次错误）
   handleIpc(IPC.MONITOR_COLLECTOR_STATUS, () => getCollectorStatus())
 
+  // 重启前持久化的用量快照（渲染层首进先渲染它，再按统一自动刷新间隔决定是否刷新）
+  handleIpc(IPC.MONITOR_GET_SNAPSHOT, (_e, sourceId: string) => getUsageSnapshot(sourceId))
+
   handleIpcRaw(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
     // 页面刷新与后台采集共用同一「自动刷新间隔」：这里先占位，
     // 采集器据此跳过同一间隔内的重复拉取（见 collector.markUsageCollected）
@@ -767,6 +772,8 @@ function registerIpcHandlers() {
           ? await refreshDeepSeekUsage(source)
           : await refreshCommandCodeUsage(source)
     if (result.ok) {
+      // 落盘快照：渲染层页面缓存只活在会话内，重启后首进由此恢复
+      saveUsageSnapshot(source.id, result.data)
       return { success: true, data: result.data }
     }
     return { success: false, error: result.error, code: result.code }

@@ -60,6 +60,8 @@ interface MoaAPI {
     data?: { enabled: boolean; intervalMinutes: number; lastCollectedAt: number; lastError: string | null; running: boolean }
     error?: string
   }>
+  /** 上次会话持久化的用量快照（应用重启后先渲染它，再按统一自动刷新间隔决定是否刷新）；无快照时 data 为 null */
+  monitorGetSnapshot: (sourceId: string) => Promise<{ success: boolean; data?: MonitorUsage | null; error?: string }>
 
   // Pricing Probe
   probePricing: (sources: PricingProbeSource[], force?: boolean) =>

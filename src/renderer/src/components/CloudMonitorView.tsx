@@ -387,6 +387,8 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   )
   // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
   const lastFetchedAt = usage?.fetchedAt ?? null
+  // 快照恢复是否已完成（会话内模块缓存 / 主进程持久化快照）：TTL 判定须等它完成，避免快照未到先误拉
+  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(sourceId)?.usage != null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数（拿到过期的 loading/status）
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -464,11 +466,29 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     }
   }
 
-  // 挂载：读取状态（用量本体从快照恢复，见各 useState 的惰性初始化）
+  // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
+  const hydrateUsage = async () => {
+    if (!sourceId) return
+    if (getCloudSnapshot(sourceId)?.usage != null) return
+    try {
+      const res = await window.moaAPI.monitorGetSnapshot(sourceId)
+      if (res.success && res.data) {
+        setUsage(res.data as CommandCodeUsage)
+        patchCloudSnapshot(sourceId, { usage: res.data })
+      }
+    } catch {
+      // 快照读取失败不阻塞页面（按无快照处理）
+    } finally {
+      setSnapshotReady(true)
+    }
+  }
+
+  // 挂载：读取状态 + 本地累计；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
   useEffect(() => {
     if (!sourceId) return
     loadStatus()
     void loadCumulative()
+    void hydrateUsage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId])
 
@@ -488,13 +508,13 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId])
 
-  // 登录态就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
+  // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
   useEffect(() => {
-    if (sourceId && status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
+    if (sourceId && snapshotReady && status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.loggedIn])
+  }, [status?.loggedIn, snapshotReady])
 
   // 明细口径选择写回快照：切视图往返后保持用户选择
   useEffect(() => {
@@ -1005,6 +1025,8 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数
   const refreshRef = useRef<() => Promise<void>>(async () => {})
+  // 快照恢复是否已完成（会话内模块缓存 / 主进程持久化快照）：TTL 判定须等它完成，避免快照未到先误拉
+  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(sourceId)?.usage != null)
   useEffect(() => {
     refreshRef.current = refresh
   })
@@ -1058,19 +1080,36 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
     }
   }
 
-  // 挂载：读取状态（用量本体从快照恢复，见各 useState 的惰性初始化）
+  // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
+  const hydrateUsage = async () => {
+    if (getCloudSnapshot(sourceId)?.usage != null) return
+    try {
+      const res = await window.moaAPI.monitorGetSnapshot(sourceId)
+      if (res.success && res.data) {
+        setUsage(res.data as MimoUsage)
+        patchCloudSnapshot(sourceId, { usage: res.data })
+      }
+    } catch {
+      // 快照读取失败不阻塞页面（按无快照处理）
+    } finally {
+      setSnapshotReady(true)
+    }
+  }
+
+  // 挂载：读取状态；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
   useEffect(() => {
     loadStatus()
+    void hydrateUsage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId])
 
-  // 登录态就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
+  // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
   useEffect(() => {
-    if (status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
+    if (snapshotReady && status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.loggedIn])
+  }, [status?.loggedIn, snapshotReady])
 
   // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {
@@ -1302,6 +1341,8 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   const lastFetchedAt = usage?.fetchedAt ?? null
   const [showApiKeyInput, setShowApiKeyInput] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
+  // 快照恢复是否已完成（会话内模块缓存 / 主进程持久化快照）：TTL 判定须等它完成，避免快照未到先误拉
+  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(sourceId)?.usage != null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -1358,19 +1399,36 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
     }
   }
 
-  // 挂载：读取状态（用量本体从快照恢复，见各 useState 的惰性初始化）
+  // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
+  const hydrateUsage = async () => {
+    if (getCloudSnapshot(sourceId)?.usage != null) return
+    try {
+      const res = await window.moaAPI.monitorGetSnapshot(sourceId)
+      if (res.success && res.data) {
+        setUsage(res.data as DeepSeekUsage)
+        patchCloudSnapshot(sourceId, { usage: res.data })
+      }
+    } catch {
+      // 快照读取失败不阻塞页面（按无快照处理）
+    } finally {
+      setSnapshotReady(true)
+    }
+  }
+
+  // 挂载：读取状态；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
   useEffect(() => {
     loadStatus()
+    void hydrateUsage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId, source])
 
-  // 登录态就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
+  // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
   useEffect(() => {
-    if (status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
+    if (snapshotReady && status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.loggedIn])
+  }, [status?.loggedIn, snapshotReady])
 
   // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {

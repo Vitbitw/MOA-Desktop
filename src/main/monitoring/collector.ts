@@ -14,6 +14,7 @@ import { readAppSettings } from '../config/appSettings'
 import { getUsageCredential } from '../store/key-store'
 import { refreshCommandCodeUsage, usageTokenKey } from './commandCode'
 import { getCumulativeUsage, recordCollectorRun } from './usageAccumulator'
+import { saveUsageSnapshot } from './snapshotStore'
 import type { AppSettings, RemoteUsageSource } from '../../shared/types'
 
 /** 检查周期（毫秒）：每分钟判断一次是否到点 */
@@ -85,6 +86,8 @@ async function collectOnce(trigger: 'first' | 'timer'): Promise<void> {
         // 状态写入失败不影响采集本身
       }
       if (res.ok) {
+        // 后台采集同样更新落盘快照：页面未打开时也在刷新，重启后首进可直接恢复
+        saveUsageSnapshot(source.id, res.data)
         lastError = null
       } else if (res.code === 'not_authenticated' || res.code === 'session_expired') {
         lastError = res.code

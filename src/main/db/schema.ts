@@ -82,6 +82,16 @@ CREATE TABLE IF NOT EXISTS cc_collector_state (
   total_inserted  INTEGER NOT NULL DEFAULT 0
 );
 
+-- 云监控页面用量快照：渲染层页面缓存（lib/cloudMonitorCache.ts）只活在会话内，
+-- 这里持久化最近一次成功拉取的归一化用量（monitor:refresh 返回值），
+-- 应用重启后首进由此恢复上次数据（再由渲染层按统一自动刷新间隔决定是否静默刷新）。
+-- 写入点：页面刷新成功 / 后台采集成功；登出时清除（换账号不残留）。
+CREATE TABLE IF NOT EXISTS monitor_snapshots (
+  source_id  TEXT PRIMARY KEY,
+  usage_json TEXT NOT NULL,
+  fetched_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS moa_config (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
