@@ -2,6 +2,7 @@ import React from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
 import { formatCost } from '../lib/usageFormat'
+import { expiredWindows, fmtRemaining, isStaleAfterReset } from '../lib/usageWindow'
 import { ExternalLink, KeyRound, Loader2, LogOut, RefreshCw } from 'lucide-react'
 import type {
   CommandCodeSubscription,
@@ -39,19 +40,6 @@ function fmtTime(ts: number): string {
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
-/** 从 epoch 秒计算距重置的剩余时间文案 */
-function fmtRemaining(resetAtSec: number): string {
-  const remainMs = resetAtSec * 1000 - Date.now()
-  if (remainMs <= 0) return '即将重置'
-  const totalMin = Math.ceil(remainMs / 60_000)
-  const d = Math.floor(totalMin / 1440)
-  const h = Math.floor((totalMin % 1440) / 60)
-  const m = totalMin % 60
-  if (d > 0) return `${d}天${h}小时后重置`
-  if (h > 0) return `${h}小时${m}分钟后重置`
-  return `${m}分钟后重置`
-}
-
 function barColor(pct: number): string {
   if (pct >= 90) return 'bg-destructive'
   if (pct >= 70) return 'bg-yellow-500'
@@ -72,8 +60,42 @@ function fmtSpan(fromTs?: number, toTs?: number): string | null {
 
 // ─── 子组件：额度窗口卡 ───
 
-function WindowCard({ title, info, disabled }: { title: string; info?: UsageWindowInfo; disabled?: boolean }) {
+/**
+ * 额度窗口卡。
+ * - 倒计时每秒自走：只在父级重渲染时算一次的话，文案会冻在旧值（用户看到「即将重置」不再变化）
+ * - 数据快照早于窗口重置时刻 → 展示的是上一个窗口的用量：数值置灰并提示
+ *   （面板会在到点后补拉一次，见 CommandCodePanel 的「窗口到点补拉」）
+ */
+function WindowCard({
+  title,
+  info,
+  disabled,
+  fetchedAt,
+  autoRefreshOn
+}: {
+  title: string
+  info?: UsageWindowInfo
+  disabled?: boolean
+  /** 该数据的拉取时间（epoch 毫秒）；用于判断展示的是不是重置前的旧窗口 */
+  fetchedAt?: number
+  /** 自动刷新是否开启（决定到点提示文案：正在刷新 / 请手动刷新） */
+  autoRefreshOn?: boolean
+}) {
   const used = info?.usedPercent
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const staleAfterReset = isStaleAfterReset(info, now, fetchedAt)
+  const countdownText =
+    info?.resetAt === undefined
+      ? '—'
+      : staleAfterReset
+        ? autoRefreshOn
+          ? '窗口已到重置时刻 · 正在刷新…'
+          : '窗口已到重置时刻 · 请手动刷新'
+        : fmtRemaining(info.resetAt, now)
   return (
     <div className="rounded-lg border border-border bg-card px-4 py-3">
       <div className="text-xs text-muted-foreground mb-2">{title}</div>
@@ -81,14 +103,16 @@ function WindowCard({ title, info, disabled }: { title: string; info?: UsageWind
         <div className="text-sm text-muted-foreground leading-5">配置 Provider API Key 后显示</div>
       ) : info && used !== undefined ? (
         <>
-          <div className="flex items-baseline justify-between mb-1.5">
+          <div className={`flex items-baseline justify-between mb-1.5 ${staleAfterReset ? 'opacity-40' : ''}`}>
             <span className="text-lg font-semibold tabular-nums text-foreground">{Math.round(used)}% 已用</span>
             <span className="text-xs text-muted-foreground">{100 - Math.round(used)}% 剩余</span>
           </div>
-          <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+          <div className={`h-1.5 rounded-full bg-muted overflow-hidden ${staleAfterReset ? 'opacity-40' : ''}`}>
             <div className={`h-full rounded-full ${barColor(used)}`} style={{ width: `${Math.min(100, used)}%` }} />
           </div>
-          <div className="mt-1.5 text-xs text-muted-foreground">{info.resetAt ? fmtRemaining(info.resetAt) : '—'}</div>
+          <div className={`mt-1.5 text-xs ${staleAfterReset ? 'text-yellow-600' : 'text-muted-foreground'}`}>
+            {countdownText}
+          </div>
         </>
       ) : (
         <div className="text-sm text-muted-foreground">暂无数据</div>
@@ -422,6 +446,35 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     }
   }, [refreshMinutes, loggedIn, sourceId])
 
+  // 窗口到点补拉：5h/7d 越过重置时刻后，页面上的数值仍是重置前拉的旧窗口 →
+  // 立即补拉一次（否则最长要等一个轮询间隔才翻新，倒计时则会一直停在“即将重置”）。
+  // 每个 resetAt 最多尝试 3 次、两次补拉至少间隔 30s：防止服务端持续返回旧窗口时无休止轮询。
+  const resetRefreshTriesRef = useRef<Map<number, number>>(new Map())
+  const lastResetRefreshAtRef = useRef(0)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (refreshMinutes <= 0 || !loggedIn || lastFetchedAt == null) return
+      if (resetRefreshTriesRef.current.size > 100) resetRefreshTriesRef.current.clear()
+      const pending = expiredWindows(
+        [usage?.windows?.fiveHour, usage?.windows?.weekly],
+        Date.now(),
+        lastFetchedAt
+      ).filter(
+        (w): w is UsageWindowInfo & { resetAt: number } =>
+          w.resetAt !== undefined && (resetRefreshTriesRef.current.get(w.resetAt) ?? 0) < 3
+      )
+      if (pending.length === 0) return
+      const now = Date.now()
+      if (now - lastResetRefreshAtRef.current < 30_000) return
+      lastResetRefreshAtRef.current = now
+      for (const w of pending) {
+        resetRefreshTriesRef.current.set(w.resetAt, (resetRefreshTriesRef.current.get(w.resetAt) ?? 0) + 1)
+      }
+      refreshRef.current()
+    }, 5_000)
+    return () => clearInterval(timer)
+  }, [refreshMinutes, loggedIn, usage, lastFetchedAt])
+
   // ── 动作 ──
   const handleLogin = async () => {
     if (!source) return
@@ -620,8 +673,20 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
           <section>
             <h3 className="text-xs font-semibold text-muted-foreground mb-2">额度</h3>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <WindowCard title="5小时窗口" info={usage.windows?.fiveHour} disabled={!windowsAvailable} />
-              <WindowCard title="7天窗口" info={usage.windows?.weekly} disabled={!windowsAvailable} />
+              <WindowCard
+                title="5小时窗口"
+                info={usage.windows?.fiveHour}
+                disabled={!windowsAvailable}
+                fetchedAt={lastFetchedAt ?? undefined}
+                autoRefreshOn={refreshMinutes > 0}
+              />
+              <WindowCard
+                title="7天窗口"
+                info={usage.windows?.weekly}
+                disabled={!windowsAvailable}
+                fetchedAt={lastFetchedAt ?? undefined}
+                autoRefreshOn={refreshMinutes > 0}
+              />
               <div className="rounded-lg border border-border bg-card px-4 py-3">
                 <div className="text-xs text-muted-foreground mb-2">月度额度余额</div>
                 <div className="text-lg font-semibold tabular-nums text-foreground">
