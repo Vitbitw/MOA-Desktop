@@ -4,7 +4,7 @@
 
 | 命令 | 脚本 | 作用 |
 | --- | --- | --- |
-| `npm run test:all` | （串行跑下表全部 10 个测试脚本） | 一键全量回归：任一失败即退出码 1（`test:monitor` 含在内） |
+| `npm run test:all` | （串行跑下表全部 13 个测试脚本） | 一键全量回归：任一失败即退出码 1（`test:monitor` 含在内） |
 | `npm run test:sse` | `sse-parser.cjs` | SSE 解析器：多行 data / event 透传 / 多工具调用增量 / 末帧 usage / finish_reason |
 | `npm run test:throttle` | `stream-throttle.cjs` | 节流推送器：窗口合并、终态 flush+dispose 语义 |
 | `npm run test:stream` | `stream-call.cjs` | 通用流式调用层 streamChat：三档超时 / 回退链 / 200 直回 JSON 抢救 / abort / extraBody 透传 / tool_calls 增量 |
@@ -15,6 +15,9 @@
 | `npm run test:anthropic-env` | `anthropic-endpoint.cjs` | POST /v1/messages 端到端（真实网关 + mock 上游）：流式/非流式、tools、tool_use 块、abort、direct、compare、截断映射 |
 | `npm run test:usage-window` | `usage-window.cjs` | 云端额度窗口纯函数：倒计时文案 / 重置后旧快照判定 / 待补拉筛选与闭环（5h/7d 到点自动刷新） |
 | `npm run test:monitor` | `monitor-behavior.cjs` | 云监控采集纯函数：游标分页 / 页大小探针 / 记录与 charts 解析 / 聚合 / 失败分层 / 月度额度窗口计算 |
+| `npm run test:cloud-cache` | `cloud-monitor-cache.cjs` | 云监控页面快照缓存：get/patch/clear 语义（局部更新不丢字段、登出清空）+ 挂载拉取判定（新鲜/过期/自动刷新关闭） |
+| `npm run test:snapshot-store` | `monitor-snapshot-store.cjs` | 云监控用量快照持久化：save/get 往返、同源覆盖与源间隔离、clear、损坏 JSON 与 DB 抛错降级 |
+| `npm run test:expert-team` | `expert-team.cjs` | 主席团专家团：LLM 输出宽容解析 / 生成模型解析与错误路径 / 席位映射与自动扩充缩减 |
 | `npm run db:inspect` | `db-inspect.cjs` | 只读诊断本地 SQLite：`cc_usage_records` 采集批次、按模型汇总、监控设置 |
 
 ## monitor-behavior.cjs
