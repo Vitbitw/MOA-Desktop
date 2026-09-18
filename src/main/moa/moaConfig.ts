@@ -4,6 +4,7 @@ import { getDatabase } from '../db/database'
 const CONFIG_KEY = 'moa_runtime_config'
 
 export interface MoaRuntimeConfig {
+  /** 已废弃：网关固定聚合模式、聊天模式由输入框按钮控制，此字段不再影响行为（保留仅为旧配置兼容） */
   mode: MoAMode
   subModels: SubModelConfig[]
   aggregator: AggregatorConfig | null

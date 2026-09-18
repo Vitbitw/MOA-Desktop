@@ -2,7 +2,7 @@
 // MoA 真流式对外转发（真增量帧 + finish/[DONE]、非一次性到达）、UI 事件广播全序列
 // （roundStart → subUpdate（含 running）→ aggStart → aggChunk（含 false / done:true）→ roundDone）、
 // 客户端断开 abort 链路（引擎中止、聚合不发起、roundDone aborted:true、记账标注）、
-// direct 旁路直播（逐字节透传，含畸形流）、聚合 fallback 无缝接续 / 已开流收流结束、非流式客户端 JSON 现状、
+// 透传兜底旁路直播（未配置子模型；逐字节透传，含畸形流）、聚合 fallback 无缝接续 / 已开流收流结束、非流式客户端 JSON 现状、
 // MoA 流式 SSE 响应头（T4.1）+ 引擎失败未开流 502 JSON 保持。
 // 用法：node test-e2e/gateway-stream.cjs
 // 加载方式：esbuild bundle（stdin 聚合入口：server / uiBridge / moaConfig 共享同一模块实例）+
@@ -429,7 +429,7 @@ const SUB_MODELS = [
       '记账：中止按已发生用量记 + error_detail 标注', log && log.params)
   }
 
-  console.log('\n[3] direct 模式：透传字节不变 + 单模型直播事件 + 非流式 direct 终态一次')
+  console.log('\n[3] 透传兜底（未配置子模型）：透传字节不变 + 单模型直播事件 + 非流式终态一次')
   {
     moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
     mock.scripts.set('direct-1', { frames: ['直', '通'], gapMs: 80, usage: { prompt_tokens: 5, completion_tokens: 7 }, content: '非流式直通' })
@@ -459,7 +459,7 @@ const SUB_MODELS = [
     eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 结束')
     eq(evts[evts.length - 1]?.payload.success, true, 'roundDone.success = true')
 
-    // 非流式 direct：roundStart → 完成时终态一次 → roundDone
+    // 非流式透传兜底：roundStart → 完成时终态一次 → roundDone
     const mark2 = uiMark()
     const client2 = await gatewayRequest(GW_PORT, { model: 'direct-1', stream: false, messages: [{ role: 'user', content: 'hi' }] })
     const evts2 = uiSince(mark2)
@@ -472,7 +472,7 @@ const SUB_MODELS = [
     eq(evts2[evts2.length - 1]?.channel, 'gateway:roundDone', '非流式以 roundDone 结束')
   }
 
-  console.log('\n[3b] direct 字节级透传：心跳注释/事件间空行/多字节切块/畸形行（Buffer.compare === 0）')
+  console.log('\n[3b] 透传兜底字节级透传：心跳注释/事件间空行/多字节切块/畸形行（Buffer.compare === 0）')
   {
     moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
     // 自含原样字节脚本：注释心跳 + emoji 跨 write 拦腰截断 + 事件间多余空行（M7 类变异：
@@ -530,8 +530,9 @@ const SUB_MODELS = [
     gw.settings.gateway.transparency = 'default'
   }
 
-  console.log('\n[5] compare 模式：子模型直播（无 agg 事件）+ 对外 JSON 保持现状')
+  console.log('\n[5] 旧配置残留 mode:\'compare\'：模式不可配置，网关仍按聚合执行（出口必给唯一答案）')
   {
+    // 网关固定聚合模式（direct/compare 已从网关移除）：残留旧值不得改变行为
     moaConfig.setMoaConfig({ mode: 'compare', subModels: SUB_MODELS, aggregator: { primaryModelId: 'agg-1', primaryProviderId: 'prov-1' } })
     const mark = uiMark()
     const client = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: false, messages: [{ role: 'user', content: 'hi' }] })
@@ -539,21 +540,15 @@ const SUB_MODELS = [
 
     eq(client.status, 200, 'HTTP 200')
     const body = JSON.parse(client.raw)
-    eq(body.model, 'moa-compare', 'JSON model = moa-compare')
-    ok(body.choices[0].message.content.includes('=== sub-a (success) ==='), 'JSON 汇总各子模型输出')
-    eq(evts[0]?.payload.mode, 'compare', 'roundStart.mode = compare')
-    eq(evts[0]?.payload.subModels.length, 2, 'compare 全部子模型在清单中')
-    ok(evts.some((e) => e.channel === 'gateway:subUpdate' && e.payload.status === 'success'), '子模型流直播可见')
-    eq(chanCount(evts, 'gateway:aggStart') + chanCount(evts, 'gateway:aggChunk'), 0, 'compare 无 agg 事件')
+    eq(body.model, 'moa-aggregated', '残留 compare 被忽略：JSON model = moa-aggregated')
+    eq(body.choices[0].message.content, '聚合结果', 'JSON content = 聚合全文（唯一最终答案）')
+    eq(evts[0]?.payload.mode, 'aggregate', 'roundStart.mode = aggregate')
+    eq(evts[0]?.payload.subModels.length, 2, '全部子模型在清单中')
+    ok(evts.some((e) => e.channel === 'gateway:subUpdate' && e.payload.status === 'success'), '子模型流直播照常')
+    eq(chanCount(evts, 'gateway:aggStart'), 1, '聚合确实发生：恰一次 aggStart')
+    ok(evts.some((e) => e.channel === 'gateway:aggChunk' && e.payload.done === true), '含聚合终态 aggChunk')
     eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 结束')
     eq(evts[evts.length - 1]?.payload.success, true, 'roundDone.success = true')
-
-    // compare + stream:true 对外仍为 JSON（现状语义）
-    const mark2 = uiMark()
-    const client2 = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: true, messages: [{ role: 'user', content: 'hi' }] })
-    eq(client2.status, 200, 'compare + stream:true HTTP 200')
-    eq(JSON.parse(client2.raw).model, 'moa-compare', 'compare 对外始终 JSON（现状保持）')
-    eq(uiSince(mark2)[uiSince(mark2).length - 1]?.channel, 'gateway:roundDone', 'compare stream 轮次仍以 roundDone 结束')
   }
 
   console.log('\n[6] 聚合 fallback（未写增量）：对外无缝接续，UI 收 fallback 全文')

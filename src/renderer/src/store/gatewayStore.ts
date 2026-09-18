@@ -15,7 +15,8 @@ import type {
   GatewaySubModelRef
 } from '../../../shared/ipc-channels'
 
-export type GatewayMode = 'aggregate' | 'compare' | 'direct'
+/** 网关轮次形态：'aggregate' = MoA 聚合轮（固定）；'direct' = 未配置子模型时的单模型透传兜底（均为事实标注，不可配置） */
+export type GatewayMode = 'aggregate' | 'direct'
 
 /** 当前代理轮次（监视器只保留本轮） */
 export interface GatewayRound {

@@ -94,10 +94,11 @@ export interface GatewaySubModelRef {
 
 export interface GatewayRoundStartPayload {
   roundId: string
-  mode: 'aggregate' | 'compare' | 'direct'
-  /** direct 轮次仅第 1 个（实际调用的单模型） */
+  /** MoA 聚合轮固定 'aggregate'；'direct' = 未配置子模型时的单模型透传兜底轮（模式不可配置） */
+  mode: 'aggregate' | 'direct'
+  /** 透传兜底轮仅第 1 个（实际调用的单模型） */
   subModels: GatewaySubModelRef[]
-  /** 聚合模型（compare / direct 无）；仅为身份标注，不含密钥 */
+  /** 聚合模型（透传兜底轮无）；仅为身份标注，不含密钥 */
   aggregator?: { modelId: string }
 }
 

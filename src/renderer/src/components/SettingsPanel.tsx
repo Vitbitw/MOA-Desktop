@@ -4,7 +4,7 @@ import { useConfigStore } from '../store/configStore'
 import { useProbeStore, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, MoAMode, SubModelRole } from '../../../shared/types'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, SubModelRole } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { MOA_ROLE_TEMPLATES } from '../../../shared/moaRoles'
 
@@ -268,8 +268,8 @@ function MoASection() {
           }
         : null
 
-      // F1：不再写 mode —— 聊天模式仅由输入框按钮控制（不持久化），
-      // 网关运行模式在下方「MoA 网关」区单独设置。
+      // F1：不再写 mode —— 聊天模式仅由输入框按钮控制（不持久化）；
+      // 网关固定聚合模式（模式不可配置），协作架构见下方「MoA 网关」区。
       // F5：aggregationPromptVariant / customAggregationPrompt 原值回传，避免静默重置。
       const res: any = await window.moaAPI.setMoaConfig({
         subModels,
@@ -456,29 +456,25 @@ function MoASection() {
         {saving ? '保存中...' : '保存配置'}
       </button>
 
-      <GatewaySection />
+      <GatewaySection architecture={architecture} onArchitectureChange={setArchitecture} />
     </div>
   )
 }
 
 // ── MoA Gateway Section（并入 MoA 面板：对外网关配置） ──
 
-function GatewaySection() {
+function GatewaySection({ architecture, onArchitectureChange }: {
+  architecture: MoaArchitecture
+  onArchitectureChange: (arch: MoaArchitecture) => void
+}) {
   const { settings, updateSetting, notifySaveResult } = useSettingsStore()
-  // 网关运行模式（持久化于 moa_config.mode）：与聊天框当前模式解耦，仅影响网关（F1）
-  const [gatewayMode, setGatewayMode] = useState<MoAMode>('direct')
 
-  useEffect(() => {
-    window.moaAPI.getMoaConfig().then((res: any) => {
-      const config = unwrapMoaConfig(res)
-      if (config?.mode) setGatewayMode(config.mode)
-    })
-  }, [])
-
-  const saveGatewayMode = async (mode: MoAMode) => {
-    setGatewayMode(mode)
+  // 网关固定聚合模式（出口必须给出唯一最终答案，模式不可配置，F1 语义延伸）；
+  // 协作架构与聊天侧共用同一配置：即改即存 + 回写父组件 state（MoA 面板顶部 toggle 与子模型角色区随之同步）。
+  const saveArchitecture = async (arch: MoaArchitecture) => {
+    onArchitectureChange(arch)
     try {
-      const res: any = await window.moaAPI.setMoaConfig({ mode })
+      const res: any = await window.moaAPI.setMoaConfig({ architecture: arch })
       if (res?.success === false) throw new Error(res?.error || '保存失败')
       notifySaveResult(true)
     } catch (err) {
@@ -492,7 +488,7 @@ function GatewaySection() {
         <label className="text-sm font-medium text-foreground block">MoA 网关（对外暴露）</label>
         <p className="text-xs text-muted-foreground mt-1">
           把 MoA 能力以 OpenAI 兼容接口开放给第三方软件（Cline / Cursor / Cherry Studio 等）；
-          缺省模型遵循上方 MoA 配置的首个子模型。
+          网关固定聚合模式（始终输出一份融合后的最终答案），缺省模型遵循上方 MoA 配置的首个子模型。
         </p>
       </div>
 
@@ -505,15 +501,19 @@ function GatewaySection() {
 
       {settings.gateway.enabled && (
         <>
-          <SettingRow label="网关运行模式" hint="仅影响网关（第三方客户端），不影响聊天框当前模式">
+          <SettingRow
+            label="协作架构"
+            hint={architecture === 'election'
+              ? '子模型并行输出完整答案，聚合模型拼接提炼成最终答案'
+              : '子模型带角色输出专家意见，主模型（聚合模型）参考意见后亲自作答'}
+          >
             <select
-              value={gatewayMode}
-              onChange={(e) => saveGatewayMode(e.target.value as MoAMode)}
+              value={architecture}
+              onChange={(e) => saveArchitecture(e.target.value as MoaArchitecture)}
               className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
             >
-              <option value="direct">直通</option>
-              <option value="aggregate">聚合</option>
-              <option value="compare">对比</option>
+              <option value="election">🗳️ 选举模式</option>
+              <option value="committee">🪑 主席团模式</option>
             </select>
           </SettingRow>
 

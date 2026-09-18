@@ -555,7 +555,7 @@ const TOOLS_REQUEST = {
       '记账：中止按已发生用量记 + error_detail 标注', log && log.params)
   }
 
-  console.log('\n[6] direct 模式：单模型透传 + Anthropic 事件转换 + extraBody（tools）透传')
+  console.log('\n[6] 透传兜底（未配置子模型）：单模型透传 + Anthropic 事件转换 + extraBody（tools）透传')
   {
     moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
     mock.scripts.set('direct-1', { frames: ['直', '通'], gapMs: 70, usage: { prompt_tokens: 5, completion_tokens: 7 }, content: '非流式直通' })
@@ -694,7 +694,7 @@ const TOOLS_REQUEST = {
     ok(!client.raw.includes('[DONE]'), '无 OpenAI [DONE] 帧')
   }
 
-  console.log('\n[10] direct 非流式工具型上游：content:null + tool_calls → tool_use 块（T7-SF2②）')
+  console.log('\n[10] 透传兜底非流式工具型上游：content:null + tool_calls → tool_use 块（T7-SF2②）')
   {
     moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
     mock.scripts.set('direct-tc', {
@@ -712,32 +712,23 @@ const TOOLS_REQUEST = {
     eq(body.usage, { input_tokens: 2, output_tokens: 3 }, 'usage 来自上游 JSON')
   }
 
-  console.log('\n[11] compare 模式：子模型对照汇总（流式 + 非流式）（T7-SF2③）')
+  console.log('\n[11] 旧配置残留 mode:\'compare\'：模式不可配置，网关仍按聚合执行（Anthropic 端点同语义）')
   {
-    moaConfig.setMoaConfig({ mode: 'compare', subModels: SUB_MODELS, aggregator: null })
+    moaConfig.setMoaConfig({ mode: 'compare', subModels: SUB_MODELS, aggregator: { primaryModelId: 'agg-1', primaryProviderId: 'prov-1' } })
 
     const mark = uiMark()
     const client = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] })
     const evts = uiSince(mark)
     eq(client.status, 200, 'HTTP 200')
-    eq(eventNames(client.raw), [
-      'message_start', 'content_block_start', 'content_block_delta', 'content_block_stop', 'message_delta', 'message_stop'
-    ], 'compare 流式事件序列（单文本块）')
-    ok(textOf(client.raw).includes('sub-a') && textOf(client.raw).includes('sub-b'),
-      'compare 流式内容 = 子模型对照汇总（两子模型均在）', textOf(client.raw).slice(0, 120))
-    eq(messageDelta(client.raw)?.delta?.stop_reason, 'end_turn', 'compare stop_reason = end_turn')
-    eq(chanCount(evts, 'gateway:aggStart'), 0, 'compare 无聚合：无 aggStart')
+    eq(textOf(client.raw), '聚合结果', '残留 compare 被忽略：文本 = 聚合全文（唯一最终答案）')
+    eq(messageStart(client.raw)?.message?.model, 'moa-aggregated', 'message_start.message.model = moa-aggregated')
+    eq(messageDelta(client.raw)?.delta?.stop_reason, 'end_turn', 'stop_reason = end_turn')
+    eq(chanCount(evts, 'gateway:aggStart'), 1, '聚合确实发生：恰一次 aggStart')
     eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 收尾')
-
-    const client2 = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 100, stream: false, messages: [{ role: 'user', content: 'hi' }] })
-    const body2 = JSON.parse(client2.raw)
-    eq(body2.content?.[0]?.type, 'text', 'compare 非流式 = 单 text 块')
-    ok(String(body2.content?.[0]?.text).includes('sub-a') && String(body2.content?.[0]?.text).includes('sub-b'),
-      'compare 非流式内容含两子模型')
-    eq(body2.stop_reason, 'end_turn', '非流式 stop_reason = end_turn')
+    eq(evts[evts.length - 1]?.payload.success, true, 'roundDone.success = true')
   }
 
-  console.log('\n[12] direct 断开与上游失败：上游恰一次 + 连接被取消 + 错误体（T7-SF2④）')
+  console.log('\n[12] 透传兜底断开与上游失败：上游恰一次 + 连接被取消 + 错误体（T7-SF2④）')
   {
     moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
 

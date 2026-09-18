@@ -391,7 +391,8 @@ async function executeMoaRound(opts: {
   }))
   broadcastToUi(GATEWAY_ROUND_START, {
     roundId,
-    mode: config.mode,
+    // 网关固定聚合模式（模式不可配置）：透传兜底轮的 'direct' 广播在下方分支单独发出
+    mode: 'aggregate',
     subModels: roundSubs,
     aggregator: config.aggregator ? { modelId: config.aggregator.primaryModelId } : undefined
   } satisfies GatewayRoundStartPayload)
@@ -416,7 +417,8 @@ async function executeMoaRound(opts: {
     messages: opts.messages,
     subModels: config.subModels,
     aggregator: config.aggregator || undefined,
-    mode: config.mode === 'aggregate' ? 'aggregate' : 'compare',
+    // 网关固定聚合：出口必须给出唯一最终答案（compare/direct 不是网关可选项）
+    mode: 'aggregate',
     aggregationPromptVariant: config.aggregationPromptVariant,
     customAggregationPrompt: config.customAggregationPrompt,
     architecture: config.architecture,
@@ -738,7 +740,8 @@ export function createGatewayServer(): Express {
       uptimeSeconds: Math.floor(process.uptime()),
       activeRequests,
       queueLength,
-      moaConfig: { subCount: config.subModels.length, mode: config.mode },
+      // mode 反映实际执行路径：未配置子模型时退化为单模型透传，否则恒为聚合
+      moaConfig: { subCount: config.subModels.length, mode: config.subModels.length === 0 ? 'direct' : 'aggregate' },
       // model 字段透出实际可用的首个模型名（旧实现误填 config.mode，与字段语义不符）
       providers: [{ name: 'default', status: provider ? 'ok' : 'no_key', model: provider?.models[0]?.id ?? '' }]
     })
@@ -777,8 +780,8 @@ export function createGatewayServer(): Express {
 
     const { messages, stream } = req.body
 
-    // ── Direct mode ──
-    if (config.mode === 'direct' || config.subModels.length === 0) {
+    // ── 透传兜底：未配置子模型时无法聚合，退化为单模型透传（网关固定聚合，direct/compare 不再是可选模式）──
+    if (config.subModels.length === 0) {
       const reqStart = Date.now()
       const roundId = crypto.randomUUID()
       // 请求名不在该 provider 模型列表时回落到其第一个模型；否则透传原名
@@ -987,7 +990,7 @@ export function createGatewayServer(): Express {
       return
     }
 
-    // ── MoA mode (aggregate / compare) ──
+    // ── MoA 聚合轮（网关固定聚合模式）──
     // X1 修复：executeMoA 主体无整体异常防护，Express 4 又不捕获 async handler 的
     // rejection——任何内部抛错（DB 故障等）都会变成 unhandled rejection 崩溃主进程
     const reqStart = Date.now()
@@ -1024,7 +1027,7 @@ export function createGatewayServer(): Express {
 
     // 记账：成功/失败/中止均落一条；中止按已发生用量记，error_detail 标注「客户端断开中止」
     logGatewayRequest({
-      moaMode: config.mode,
+      moaMode: 'aggregate',
       success: ok,
       prompt: moaTotals.prompt,
       completion: moaTotals.completion,
@@ -1041,25 +1044,6 @@ export function createGatewayServer(): Express {
       // 失败且未写过增量（含未开流的流式/非流式客户端）：维持现状 502 JSON
       res.status(502).json({
         error: { message: result.error || 'MoA execution failed', type: 'moa_error' }
-      })
-    } else if (config.mode === 'compare') {
-      // compare 对外 JSON 保持现状（子模型流只直播给 UI）
-      res.json({
-        id: `chatcmpl-moa-${Date.now()}`,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model: 'moa-compare',
-        choices: [{
-          index: 0,
-          message: {
-            role: 'assistant',
-            content: result.subOutputs.map((o, i) =>
-              `=== ${o.modelId} (${o.status}) ===\n${o.content || o.error || ''}`
-            ).join('\n\n')
-          },
-          finish_reason: 'stop'
-        }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       })
     } else if (stream) {
       // 聚合成功 / 失败但已开流：收流结束（finish_reason:'stop' + [DONE]）
@@ -1106,13 +1090,13 @@ export function createGatewayServer(): Express {
       return
     }
 
-    // ── Direct mode：单模型透传（上游 OpenAI 兼容），响应/事件转换为 Anthropic 形态 ──
-    if (config.mode === 'direct' || config.subModels.length === 0) {
+    // ── 透传兜底：未配置子模型（同 chat/completions：上游 OpenAI 兼容），响应/事件转换为 Anthropic 形态 ──
+    if (config.subModels.length === 0) {
       await handleAnthropicDirect({ res, provider, converted, model: req.body?.model, stream })
       return
     }
 
-    // ── MoA mode (aggregate / compare)：与 chat/completions 共用执行核心（事件桥 / abort / 记账同链路）──
+    // ── MoA 聚合轮：与 chat/completions 共用执行核心（事件桥 / abort / 记账同链路）──
     const reqStart = Date.now()
     const roundId = crypto.randomUUID()
 
@@ -1141,7 +1125,7 @@ export function createGatewayServer(): Express {
     const ok = result.success && !aborted
 
     logGatewayRequest({
-      moaMode: config.mode,
+      moaMode: 'aggregate',
       success: ok,
       prompt: moaTotals.prompt,
       completion: moaTotals.completion,
@@ -1162,17 +1146,6 @@ export function createGatewayServer(): Express {
     } else if (!ok && !sink.hasContent()) {
       // 失败且未开流：Anthropic 错误 JSON（type:'error'，客户端按 Anthropic schema 解析）
       sink.writeError(502, result.error || 'MoA execution failed')
-    } else if (config.mode === 'compare') {
-      // compare 无聚合模型：最终消息 = 各子模型输出对照汇总（流式按单文本块送出）
-      const summary = result.subOutputs
-        .map((o) => `=== ${o.modelId} (${o.status}) ===\n${o.content || o.error || ''}`)
-        .join('\n\n')
-      if (stream) {
-        sink.onAggChunk(summary, false)
-        sink.finish({ finishReason: 'stop' })
-      } else {
-        res.json(openAIToAnthropic({ content: summary, finishReason: 'stop' }))
-      }
     } else if (stream) {
       // 聚合成功（或失败但已开流）：收尾事件 content_block_stop + [tool_use 块] + message_delta + message_stop
       sink.finish({ toolCalls: aggToolCalls, finishReason, usage: result.aggregatorUsage })

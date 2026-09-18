@@ -84,7 +84,7 @@ function GatewayMonitorView({ round }: { round: GatewayRound }) {
 
       <div className="flex-1 flex flex-row overflow-hidden min-h-0">
         {/* ── LEFT: 子模型输出网格（复用会话视图面板） ── */}
-        <div className={`flex-1 overflow-y-auto min-w-0 ${round.mode !== 'compare' ? 'border-r border-border' : ''}`}>
+        <div className="flex-1 overflow-y-auto min-w-0 border-r border-border">
           <div className="p-3">
             <div className="flex items-center gap-2 mb-2 text-sm text-muted-foreground">
               <span className="font-semibold uppercase tracking-wider">子模型输出</span>
@@ -99,31 +99,29 @@ function GatewayMonitorView({ round }: { round: GatewayRound }) {
           </div>
         </div>
 
-        {/* ── RIGHT: 聚合输出（compare 无；direct 空态；中止提示） ── */}
-        {round.mode !== 'compare' && (
-          <div className="flex-shrink-0 bg-card flex flex-col overflow-hidden"
-            style={{ width: '40%', minWidth: 300, maxWidth: '50%' }}>
-            {round.aborted && (
-              <div className="px-4 py-2 text-sm text-red-400 bg-red-500/10 border-b border-red-500/30 flex-shrink-0">
-                已中止（客户端断开）
-              </div>
-            )}
-            {round.mode === 'direct' ? (
-              <div className="flex-1 flex items-center justify-center px-4 text-center text-sm text-muted-foreground">
-                直通模式，无聚合输出
-              </div>
-            ) : (
-              <div className="flex-1 min-h-0 flex flex-col">
-                <AggregatorPanel
-                  content={round.aggText}
-                  running={round.aggRunning}
-                  mode={round.mode}
-                  architecture={architecture}
-                />
-              </div>
-            )}
-          </div>
-        )}
+        {/* ── RIGHT: 聚合输出（透传兜底轮为空态；中止提示） ── */}
+        <div className="flex-shrink-0 bg-card flex flex-col overflow-hidden"
+          style={{ width: '40%', minWidth: 300, maxWidth: '50%' }}>
+          {round.aborted && (
+            <div className="px-4 py-2 text-sm text-red-400 bg-red-500/10 border-b border-red-500/30 flex-shrink-0">
+              已中止（客户端断开）
+            </div>
+          )}
+          {round.mode === 'direct' ? (
+            <div className="flex-1 flex items-center justify-center px-4 text-center text-sm text-muted-foreground">
+              未配置子模型：单模型透传，无聚合输出
+            </div>
+          ) : (
+            <div className="flex-1 min-h-0 flex flex-col">
+              <AggregatorPanel
+                content={round.aggText}
+                running={round.aggRunning}
+                mode={round.mode}
+                architecture={architecture}
+              />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
