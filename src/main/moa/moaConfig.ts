@@ -12,6 +12,8 @@ export interface MoaRuntimeConfig {
   customAggregationPrompt?: string
   /** 协作架构：'election'（选举/拼接）| 'committee'（主席团/专家意见）。旧配置缺省 'election' */
   architecture: MoaArchitecture
+  /** 网关独立协作架构：缺省（undefined）= 跟随全局 architecture；仅影响网关出口（聊天侧恒用全局） */
+  gatewayArchitecture?: MoaArchitecture
 }
 
 interface DbConfigRow {
@@ -42,7 +44,8 @@ export function loadMoaConfigFromDb(): void {
         aggregator: parsed.aggregator || null,
         aggregationPromptVariant: parsed.aggregationPromptVariant || 'standard-zh',
         customAggregationPrompt: parsed.customAggregationPrompt,
-        architecture: parsed.architecture || 'election'
+        architecture: parsed.architecture || 'election',
+        gatewayArchitecture: parsed.gatewayArchitecture || undefined
       }
       console.log('[MoA Config] Loaded from DB:', JSON.stringify(currentConfig))
     }
@@ -58,7 +61,8 @@ export function getMoaConfig(): MoaRuntimeConfig {
     subModels: currentConfig.subModels.map((sm) => ({ ...sm })),
     aggregator: currentConfig.aggregator ? { ...currentConfig.aggregator } : null,
     customAggregationPrompt: currentConfig.customAggregationPrompt,
-    architecture: currentConfig.architecture
+    architecture: currentConfig.architecture,
+    gatewayArchitecture: currentConfig.gatewayArchitecture
   }
 }
 

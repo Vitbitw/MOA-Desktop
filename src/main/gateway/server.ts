@@ -421,7 +421,8 @@ async function executeMoaRound(opts: {
     mode: 'aggregate',
     aggregationPromptVariant: config.aggregationPromptVariant,
     customAggregationPrompt: config.customAggregationPrompt,
-    architecture: config.architecture,
+    // 网关出口架构：独立配置优先（gatewayArchitecture），缺省跟随全局（聊天侧恒用全局）
+    architecture: config.gatewayArchitecture ?? config.architecture,
     // 附加请求字段（tools / tool_choice / temperature 等）逐路透传（Anthropic 端点用；缺省 undefined 不变更行为）
     extraBody: opts.extraBody,
     // 客户端断开 → abort 链路：信号透传引擎（中止后不再发起聚合、进行中调用随之中断）

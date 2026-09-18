@@ -133,10 +133,15 @@ async function loadGateway() {
 // ── mock 上游（node:http，按 body.model 分派脚本） ──
 
 const mock = {
-  requests: [], // { model, stream, t }
+  requests: [], // { model, stream, t, body }
   scripts: new Map(), // model → { frames, gapMs, httpStatus, midFail, midFailDelayMs, usage, content, rawParts, holdOpen }
   sentStreams: [], // { model, bytes }：按请求顺序记录 mock 实际写往上游连接的全部字节（direct 逐字节比对基准）
   count(model) { return this.requests.filter((r) => r.model === model).length },
+  /** 最近一次该 model 的请求体（含 messages/system 等，供提示词分叉断言） */
+  lastBody(model) {
+    const hit = this.requests.filter((r) => r.model === model).pop()
+    return hit ? hit.body : null
+  },
   /** 最近一次该 model 的流式上游字节（无记录时空 Buffer） */
   sentOf(model) {
     const hit = this.sentStreams.filter((s) => s.model === model).pop()
@@ -153,7 +158,7 @@ const sseUsage = (usage) =>
 
 async function mockHandle(body, res) {
   const model = String(body.model || '')
-  mock.requests.push({ model, stream: body.stream === true, t: Date.now() })
+  mock.requests.push({ model, stream: body.stream === true, t: Date.now(), body })
   const script = mock.scripts.get(model)
   if (!script) {
     res.writeHead(404, { 'Content-Type': 'application/json' })
@@ -632,6 +637,41 @@ const SUB_MODELS = [
     eq(chanCount(evts, 'gateway:aggStart'), 0, '无 aggStart 事件')
     eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 结束')
     eq(evts[evts.length - 1]?.payload.success, false, 'roundDone.success = false')
+  }
+
+  console.log('\n[9] 网关独立协作架构：gatewayArchitecture 优先，未设置时跟随全局 architecture')
+  {
+    mock.scripts.set('sub-a', { frames: ['甲'], gapMs: 10 })
+    mock.scripts.set('sub-b', { frames: ['乙'], gapMs: 10 })
+    mock.scripts.set('agg-1', { frames: ['主持结果'], gapMs: 10 })
+
+    // ① 独立架构生效：全局选举 + 网关主席团 → 聚合请求用主席团提示词（CHAIR_PROMPT_ZH）
+    moaConfig.setMoaConfig({
+      architecture: 'election',
+      gatewayArchitecture: 'committee',
+      subModels: SUB_MODELS,
+      aggregator: { primaryModelId: 'agg-1', primaryProviderId: 'prov-1' }
+    })
+    const client1 = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client1.status, 200, 'HTTP 200（独立架构=主席团）')
+    const agg1 = mock.lastBody('agg-1')
+    ok(String(agg1?.messages?.[0]?.content || '').includes('主席团主持人'),
+      '独立架构生效：聚合请求 system = 主席团提示词（CHAIR_PROMPT_ZH）', String(agg1?.messages?.[0]?.content || '').slice(0, 40))
+
+    // ② 清除独立架构（undefined）→ 跟随全局；全局改为主席团同样跟随
+    moaConfig.setMoaConfig({ architecture: 'committee', gatewayArchitecture: undefined })
+    const client2 = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client2.status, 200, 'HTTP 200（跟随全局=主席团）')
+    const agg2 = mock.lastBody('agg-1')
+    ok(String(agg2?.messages?.[0]?.content || '').includes('主席团主持人'), '未设置独立架构：跟随全局 committee')
+
+    // ③ 全局切回选举 + 未设置独立 → 聚合用选举提示词（STANDARD_PROMPT_ZH）
+    moaConfig.setMoaConfig({ architecture: 'election', gatewayArchitecture: undefined })
+    const client3 = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client3.status, 200, 'HTTP 200（跟随全局=选举）')
+    const agg3 = mock.lastBody('agg-1')
+    ok(String(agg3?.messages?.[0]?.content || '').includes('多模型融合器'),
+      '跟随全局 election：聚合请求 system = 选举提示词（STANDARD_PROMPT_ZH）')
   }
 
   console.log('\n──────────────────────────────')

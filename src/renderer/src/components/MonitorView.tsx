@@ -13,14 +13,18 @@ function modeLabelOf(mode: string): string {
   return mode === 'aggregate' ? 'A 模式' : mode === 'compare' ? 'D 模式' : '直通'
 }
 
-/** 当前 MoA 架构（历史轮次不存架构，统用当前配置文案） */
-function useArchitecture(): MoaArchitecture {
+/** 当前 MoA 架构（历史轮次不存架构，统用当前配置文案）；scope='gateway' 读网关独立架构（缺省跟随全局） */
+function useArchitecture(scope: 'chat' | 'gateway' = 'chat'): MoaArchitecture {
   const [architecture, setArchitecture] = React.useState<MoaArchitecture>('election')
   React.useEffect(() => {
-    window.moaAPI.getMoaConfig().then((config: any) => {
-      if (config?.architecture) setArchitecture(config.architecture)
+    window.moaAPI.getMoaConfig().then((res: any) => {
+      const config = res && typeof res === 'object' && 'success' in res ? res.data : res
+      const arch = scope === 'gateway'
+        ? (config?.gatewayArchitecture || config?.architecture)
+        : config?.architecture
+      if (arch) setArchitecture(arch)
     })
-  }, [])
+  }, [scope])
   return architecture
 }
 
@@ -44,7 +48,7 @@ export default function MonitorView() {
  */
 function GatewayMonitorView({ round }: { round: GatewayRound }) {
   const dismiss = useGatewayStore((s) => s.dismiss)
-  const architecture = useArchitecture()
+  const architecture = useArchitecture('gateway')
 
   const status = round.running
     ? { text: '运行中', cls: 'text-blue-500', pulse: true }

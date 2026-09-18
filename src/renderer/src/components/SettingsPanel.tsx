@@ -456,25 +456,33 @@ function MoASection() {
         {saving ? '保存中...' : '保存配置'}
       </button>
 
-      <GatewaySection architecture={architecture} onArchitectureChange={setArchitecture} />
+      <GatewaySection architecture={architecture} />
     </div>
   )
 }
 
 // ── MoA Gateway Section（并入 MoA 面板：对外网关配置） ──
 
-function GatewaySection({ architecture, onArchitectureChange }: {
+function GatewaySection({ architecture }: {
+  /** 全局协作架构（只读）：网关独立架构缺省时跟随它，选项文案需展示当前全局值 */
   architecture: MoaArchitecture
-  onArchitectureChange: (arch: MoaArchitecture) => void
 }) {
   const { settings, updateSetting, notifySaveResult } = useSettingsStore()
+  // 网关独立协作架构（undefined = 跟随全局）：与聊天侧解耦，仅影响网关出口
+  const [gatewayArch, setGatewayArch] = useState<MoaArchitecture | undefined>(undefined)
 
-  // 网关固定聚合模式（出口必须给出唯一最终答案，模式不可配置，F1 语义延伸）；
-  // 协作架构与聊天侧共用同一配置：即改即存 + 回写父组件 state（MoA 面板顶部 toggle 与子模型角色区随之同步）。
-  const saveArchitecture = async (arch: MoaArchitecture) => {
-    onArchitectureChange(arch)
+  useEffect(() => {
+    window.moaAPI.getMoaConfig().then((res: any) => {
+      const config = unwrapMoaConfig(res)
+      setGatewayArch(config?.gatewayArchitecture || undefined)
+    })
+  }, [])
+
+  // 即改即存；选「跟随全局」传 undefined（JSON 序列化自动省略键，读回即跟随态）
+  const saveGatewayArchitecture = async (arch: MoaArchitecture | undefined) => {
+    setGatewayArch(arch)
     try {
-      const res: any = await window.moaAPI.setMoaConfig({ architecture: arch })
+      const res: any = await window.moaAPI.setMoaConfig({ gatewayArchitecture: arch })
       if (res?.success === false) throw new Error(res?.error || '保存失败')
       notifySaveResult(true)
     } catch (err) {
@@ -503,15 +511,18 @@ function GatewaySection({ architecture, onArchitectureChange }: {
         <>
           <SettingRow
             label="协作架构"
-            hint={architecture === 'election'
-              ? '子模型并行输出完整答案，聚合模型拼接提炼成最终答案'
-              : '子模型带角色输出专家意见，主模型（聚合模型）参考意见后亲自作答'}
+            hint={gatewayArch === undefined
+              ? `跟随全局协作架构（上方 MoA 配置当前为${architecture === 'election' ? '选举' : '主席团'}）；仅影响网关出口`
+              : gatewayArch === 'election'
+                ? '子模型并行输出完整答案，聚合模型拼接提炼成最终答案；仅影响网关出口'
+                : '子模型带角色输出专家意见，主模型（聚合模型）参考意见后亲自作答；仅影响网关出口'}
           >
             <select
-              value={architecture}
-              onChange={(e) => saveArchitecture(e.target.value as MoaArchitecture)}
+              value={gatewayArch ?? 'follow'}
+              onChange={(e) => saveGatewayArchitecture(e.target.value === 'follow' ? undefined : (e.target.value as MoaArchitecture))}
               className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
             >
+              <option value="follow">跟随全局（当前：{architecture === 'election' ? '选举' : '主席团'}）</option>
               <option value="election">🗳️ 选举模式</option>
               <option value="committee">🪑 主席团模式</option>
             </select>
