@@ -4,10 +4,11 @@ import { buildAggregationMessages, buildCommitteeMessages, getAggregationPrompt,
 import { getRoleTemplate } from '../../shared/moaRoles'
 import { DEFAULT_SUB_MODEL_TIMEOUT, DEFAULT_AGGREGATOR_TIMEOUT } from '../../shared/defaults'
 import { streamChat } from './streamChat'
+import type { ChatMessage, ToolCallResult } from './streamChat'
 import type { SubModelConfig, AggregatorConfig, SubModelOutput, MoaArchitecture, SubModelRole } from '../../shared/types'
 
 export interface MoaRequest {
-  messages: Array<{ role: string; content: string }>
+  messages: ChatMessage[]
   subModels: SubModelConfig[]
   aggregator?: AggregatorConfig
   mode: 'aggregate' | 'compare' | 'direct'
@@ -20,6 +21,8 @@ export interface MoaRequest {
   architecture?: MoaArchitecture
   /** 外部中止信号（网关客户端断开等）：中止后不再发起聚合、进行中调用随之中断（app 内路径不传） */
   signal?: AbortSignal
+  /** 附加请求字段（tools / tool_choice / temperature 等）：逐路透传给子模型与聚合模型（Anthropic 端点用；缺省不传） */
+  extraBody?: Record<string, unknown>
 }
 
 export interface MoaResponse {
@@ -32,6 +35,8 @@ export interface MoaResponse {
   /** 实际使用的聚合模型身份（fallback 生效时不是 primary） */
   aggregatorModelId?: string
   aggregatorProviderId?: string
+  /** 聚合模型输出的 tool_calls（聚合成功且有工具调用时透出；Anthropic 端点转 tool_use 用） */
+  aggregatorToolCalls?: ToolCallResult[]
   success: boolean
   partialFailure?: boolean
   error?: string
@@ -104,14 +109,16 @@ function resolveAggregator(aggregator: AggregatorConfig): {
 /**
  * Call the aggregator model with built aggregation messages. Return content string.
  * 流式实现（T2）：经 streamChat 收流，onDelta 逐段回调累计文本；signal 透传外部中止。
+ * T7：extraBody 透传（tools/tool_choice 等）；返回值带 toolCalls（聚合模型工具调用，转 tool_use 用）。
  */
 async function callAggregator(
   aggInfo: { providerBaseUrl: string; apiKey: string; modelId: string },
-  messages: Array<{ role: string; content: string }>,
+  messages: ChatMessage[],
   timeoutMs: number,
   onDelta?: (accumulatedText: string) => void,
-  signal?: AbortSignal
-): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number } }> {
+  signal?: AbortSignal,
+  extraBody?: Record<string, unknown>
+): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[] }> {
   const result = await streamChat({
     providerBaseUrl: aggInfo.providerBaseUrl,
     apiKey: aggInfo.apiKey,
@@ -119,15 +126,17 @@ async function callAggregator(
     messages,
     timeoutMs,
     signal,
-    onDelta
+    onDelta,
+    extraBody
   })
 
-  const output: { content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number } } = {
+  const output: { content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[] } = {
     content: result.content,
     success: result.error === undefined
   }
   if (result.error !== undefined) output.error = result.error
   if (result.usage !== undefined) output.usage = result.usage
+  if (result.toolCalls !== undefined) output.toolCalls = result.toolCalls
   return output
 }
 
@@ -166,6 +175,8 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
       systemPrompt: sm.systemPrompt,
       timeoutMs,
       signal: req.signal,
+      // 附加字段（tools 等）透传：子模型可出 tool_calls 作为专家意见（不进最终响应）
+      extraBody: req.extraBody,
       // 流式增量 → running 累计事件（引擎不做节流：节流由 host 层 index.ts / 网关广播负责）
       onDelta: (acc) => {
         try {
@@ -294,7 +305,8 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
     aggMessages,
     req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT,
     onAggDelta,
-    req.signal
+    req.signal,
+    req.extraBody
   )
 
   if (!aggResult.success) {
@@ -313,11 +325,12 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
           aggMessages,
           req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT,
           onAggDelta,
-          req.signal
+          req.signal,
+          req.extraBody
         )
         if (fallbackResult.success) {
           try { events?.emitAggregationChunk(fallbackResult.content, true) } catch { /* 忽略事件失败 */ }
-          return {
+          const fallbackResponse: MoaResponse = {
             type: 'aggregate',
             content: fallbackResult.content,
             subOutputs,
@@ -328,6 +341,9 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
             success: true,
             partialFailure: successfulCount < subOutputs.length
           }
+          // 聚合模型 tool_calls 透出（Anthropic 端点转 tool_use；无则不设字段，向后兼容）
+          if (fallbackResult.toolCalls) fallbackResponse.aggregatorToolCalls = fallbackResult.toolCalls
+          return fallbackResponse
         }
       }
     }
@@ -347,7 +363,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
 
   try { events?.emitAggregationChunk(aggResult.content, true) } catch { /* 忽略事件失败 */ }
 
-  return {
+  const aggregateResponse: MoaResponse = {
     type: 'aggregate',
     content: aggResult.content,
     subOutputs,
@@ -358,6 +374,9 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
     success: true,
     partialFailure: successfulCount < subOutputs.length
   }
+  // 聚合模型 tool_calls 透出（Anthropic 端点转 tool_use；无则不设字段，向后兼容）
+  if (aggResult.toolCalls) aggregateResponse.aggregatorToolCalls = aggResult.toolCalls
+  return aggregateResponse
 }
 
 /** MoA engine entry point (pure call, no events). */

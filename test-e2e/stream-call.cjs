@@ -1,5 +1,5 @@
 // 冒烟测试：src/main/moa/streamChat.ts + src/main/moa/subModelCaller.ts 的流式调用层
-// （SSE 收流 / 回退链 / 三档超时 / abort 组合 / 200 直回 JSON 本地抢救；永不 throw 的返回约定）
+// （SSE 收流 / 回退链 / 三档超时 / abort 组合 / 200 直回 JSON 本地抢救 / T7：extraBody 透传 + tool_calls 增量收集）
 // 用法：node test-e2e/stream-call.cjs
 // 加载方式：esbuild bundle 两个 TS 入口（同 sse-parser.cjs 思路），'../local/fetchProxy' 用 esbuild plugin
 //          替换为 stub（直接走全局 fetch）——fetchProxy 真实实现依赖 Electron/DB（读代理设置），测试不依赖它。
@@ -239,6 +239,39 @@ async function handle(scenario, body, res) {
     res.write(FINISH_FRAME)
     res.end()
     return
+  }
+  // T7：tool_calls 增量（跨帧分片：index 0 分两条拼接，index 1 一次给全）+ 文本混合
+  if (scenario === 'tools') {
+    startSse(res)
+    res.write(frameOf('我来'))
+    res.write(
+      'data: ' + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'Read', arguments: '{"pa' } }] }, finish_reason: null }] }) + '\n\n'
+    )
+    await sleep(20)
+    res.write(
+      'data: ' + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: 'th":"a.txt"}' } }] }, finish_reason: null }] }) + '\n\n'
+    )
+    res.write(
+      'data: ' + JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: 'call_2', function: { name: 'Bash', arguments: '{"cmd":"ls"}' } }] }, finish_reason: null }] }) + '\n\n'
+    )
+    res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }) + '\n\n')
+    res.write(USAGE_FRAME)
+    res.write(DONE_FRAME)
+    res.end()
+    return
+  }
+  // T7：中转忽略 stream:true 直回 JSON，且 content 为 null（仅 tool_calls）→ 本地抢救路径
+  if (scenario === 'tools-json') {
+    return sendJson(res, 200, {
+      choices: [{
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 'call_9', type: 'function', function: { name: 'Glob', arguments: '{"pattern":"*.ts"}' } }]
+        }
+      }],
+      usage: { prompt_tokens: 2, completion_tokens: 3 }
+    })
   }
   // normal（含 opts-unsupported 重发）：两帧 + finish + usage 终结帧 + [DONE]；
   // [DONE] 后故意不关连接 → 客户端应收到 [DONE] 即停止读取
@@ -659,6 +692,51 @@ const chatOpts = (scenario, extra) =>
     } finally {
       AbortSignal.any = originalAny
     }
+  }
+
+  console.log('\n[15] T7：extraBody 透传（tools/tool_choice/temperature）+ tool_calls 增量收集（向后兼容）')
+  {
+    // ① 无 extraBody / 无 tool_calls：返回值不带 toolCalls 字段（向后兼容）
+    const plain = await streamChat(chatOpts('normal'))
+    eq(plain.content, '你好', '常规调用内容不变')
+    eq('toolCalls' in plain, false, '无工具调用时不返回 toolCalls 字段（向后兼容）')
+
+    // ② extraBody 并入请求体（tools/tool_choice/temperature 透传；model/messages/stream 由本层统一）
+    const before = requestLog.length
+    const withTools = await streamChat(chatOpts('tools', {
+      extraBody: {
+        tools: [{ type: 'function', function: { name: 'Read', parameters: { type: 'object', properties: {} } } }],
+        tool_choice: 'auto',
+        temperature: 0.4,
+        // 恶意覆盖：model/messages/stream 以本层为准
+        model: 'hijack',
+        messages: [{ role: 'user', content: 'hijack' }],
+        stream: false
+      }
+    }))
+    const sent = requestLog.slice(before)
+    eq(sent.length, 1, '单次请求（未触发回退）')
+    eq(sent[0].body.model, 'mock-model', 'model 以本层为准（extraBody 同名被覆盖）')
+    eq(sent[0].body.messages, [{ role: 'user', content: 'hi' }], 'messages 以本层为准')
+    eq(sent[0].body.stream, true, 'stream 以本层为准')
+    eq(sent[0].body.temperature, 0.4, 'temperature 透传')
+    eq(sent[0].body.tool_choice, 'auto', 'tool_choice 透传')
+    eq(sent[0].body.tools?.[0]?.function?.name, 'Read', 'tools 透传')
+    eq(sent[0].body.stream_options, { include_usage: true }, 'stream_options 仍在')
+
+    // ③ tool_calls 增量收集：按 index 归并（id/name 取首非空、arguments 逐帧拼接），顺序按 index 升序
+    eq(withTools.content, '我来', '文本与工具调用并存')
+    eq(withTools.toolCalls, [
+      { id: 'call_1', name: 'Read', arguments: '{"path":"a.txt"}' },
+      { id: 'call_2', name: 'Bash', arguments: '{"cmd":"ls"}' }
+    ], 'tool_calls 增量按 index 累积（跨帧 arguments 拼接）')
+    eq(withTools.usage, { prompt: 10, completion: 5 }, 'usage 照常提取')
+
+    // ④ 非流式回退（200 直回 JSON、content:null + tool_calls）同样收集工具调用
+    const viaSalvage = await streamChat(chatOpts('tools-json'))
+    eq(viaSalvage.error, undefined, '直回 JSON 抢救成功（无错误）')
+    eq(viaSalvage.content, '', 'content 缺省为空串')
+    eq(viaSalvage.toolCalls, [{ id: 'call_9', name: 'Glob', arguments: '{"pattern":"*.ts"}' }], '抢救路径收集 tool_calls')
   }
 
   console.log('\n──────────────────────────────')

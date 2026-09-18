@@ -1,6 +1,7 @@
 import type { SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
 import { combineSignals, streamChat } from './streamChat'
+import type { ChatMessage } from './streamChat'
 
 export interface SubModelCallOptions {
   providerBaseUrl: string
@@ -8,11 +9,32 @@ export interface SubModelCallOptions {
   providerId?: string
   apiKey: string
   modelId: string
-  messages: Array<{ role: string; content: string }>
+  messages: ChatMessage[]
   systemPrompt?: string
   timeoutMs: number
+  /** 附加请求字段（tools / tool_choice / temperature / top_p / stop 等）：并入请求体透传（Anthropic 端点用） */
+  extraBody?: Record<string, unknown>
   /** 外部中止信号（网关客户端断开等）；与内部 AbortSignal.timeout 组合，触发即中断请求 */
   signal?: AbortSignal
+}
+
+/**
+ * 组装请求消息：MoA 角色/默认 systemPrompt + 调用方消息。
+ * 调用方消息已含 system（Anthropic 端点转换而来）时**合并进同一条**（角色提示词在前），
+ * 不新增第二条 system 消息——Claude Code 等客户端的 system 指令不得被角色模板挤掉。
+ */
+function buildRequestMessages(messages: ChatMessage[], systemPrompt?: string): ChatMessage[] {
+  if (!systemPrompt) return messages
+  const idx = messages.findIndex((m) => m.role === 'system')
+  if (idx === -1) return [{ role: 'system', content: systemPrompt }, ...messages]
+  const existing = messages[idx]
+  if (typeof existing.content === 'string') {
+    const merged = messages.slice()
+    merged[idx] = { ...existing, content: `${systemPrompt}\n\n${existing.content}` }
+    return merged
+  }
+  // 内容块数组等非常规 system 内容：角色提示词单独前置一条，原内容原样保留
+  return [...messages.slice(0, idx), { role: 'system', content: systemPrompt }, ...messages.slice(idx)]
 }
 
 /**
@@ -21,14 +43,13 @@ export interface SubModelCallOptions {
  */
 export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelOutput> {
   const startTime = Date.now()
-  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal } = opts
+  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, extraBody } = opts
 
   // Build payload
   const body: Record<string, unknown> = {
+    ...extraBody,
     model: modelId,
-    messages: systemPrompt
-      ? [{ role: 'system', content: systemPrompt }, ...messages]
-      : messages,
+    messages: buildRequestMessages(messages, systemPrompt),
     stream: false
   }
 
@@ -112,16 +133,18 @@ export type SubModelStreamOptions = SubModelCallOptions & {
  */
 export async function callSubModelStream(opts: SubModelStreamOptions): Promise<SubModelOutput> {
   const startTime = Date.now()
-  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, onDelta } = opts
+  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, onDelta, extraBody } = opts
 
   const result = await streamChat({
     providerBaseUrl,
     apiKey,
     modelId,
-    messages: systemPrompt ? [{ role: 'system', content: systemPrompt }, ...messages] : messages,
+    messages: buildRequestMessages(messages, systemPrompt),
     timeoutMs,
     signal,
     onDelta,
+    // 附加字段（tools 等）透传给子模型：子模型可出 tool_calls 作为专家意见（不进最终响应）
+    extraBody,
     // 回退链级 3：stream:true 被 400 拒绝（中转不支持）→ 复用现有非流式实现
     nonStreamFallback: async () => {
       const r = await callSubModel(opts)
