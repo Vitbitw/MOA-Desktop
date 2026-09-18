@@ -549,7 +549,25 @@ export function createGatewayServer(): Express {
     let lastSentLen = 0
     let clientGotContent = false
     let clientStreamClosed = false
+    // SSE 响应头延迟到「首个对外写帧之前」才设置（T4.1 评审修订，补回归的旧版 L493-495 行为）：
+    // 真流式边收边写，头必须随首帧就位；但引擎失败且未开流时走 res.status(502).json——
+    // 实测 Express 4.22.2 的 res.json 仅在 content-type 未设置时才设 application/json
+    // （!this.get('Content-Type')），若在分支入口无条件 setHeader，502 的 JSON 体会被标成
+    // text/event-stream（实验：/upfront → content-type: text/event-stream + JSON 体）。
+    // 故不预置，统一由本函数在首次写帧前补齐；失败未开流路径因从未调用而保持 application/json。
+    let sseHeadersSet = false
+    const ensureSseHeaders = (): void => {
+      if (sseHeadersSet || !stream || res.headersSent) return
+      sseHeadersSet = true
+      try {
+        res.setHeader('Content-Type', 'text/event-stream')
+        res.setHeader('Cache-Control', 'no-cache')
+        res.setHeader('Connection', 'keep-alive')
+      } catch { /* 头已发出（防御）：不阻塞写帧 */ }
+    }
     const writeSse = (payload: unknown): void => {
+      // 首个对外帧（内容帧或收流 stop 帧）之前先把三个头就位
+      ensureSseHeaders()
       try {
         res.write(`data: ${JSON.stringify(payload)}\n\n`)
       } catch { /* 客户端已断开：abort 链路负责中止引擎 */ }

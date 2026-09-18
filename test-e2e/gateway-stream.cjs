@@ -2,7 +2,8 @@
 // MoA 真流式对外转发（真增量帧 + finish/[DONE]、非一次性到达）、UI 事件广播全序列
 // （roundStart → subUpdate（含 running）→ aggStart → aggChunk（含 false / done:true）→ roundDone）、
 // 客户端断开 abort 链路（引擎中止、聚合不发起、roundDone aborted:true、记账标注）、
-// direct 旁路直播（透传字节不变）、聚合 fallback 无缝接续 / 已开流收流结束、非流式客户端 JSON 现状。
+// direct 旁路直播（逐字节透传，含畸形流）、聚合 fallback 无缝接续 / 已开流收流结束、非流式客户端 JSON 现状、
+// MoA 流式 SSE 响应头（T4.1）+ 引擎失败未开流 502 JSON 保持。
 // 用法：node test-e2e/gateway-stream.cjs
 // 加载方式：esbuild bundle（stdin 聚合入口：server / uiBridge / moaConfig 共享同一模块实例）+
 //   plugin stub：electron、../db/database、../config/appSettings、../providers/providerManager、
@@ -133,8 +134,14 @@ async function loadGateway() {
 
 const mock = {
   requests: [], // { model, stream, t }
-  scripts: new Map(), // model → { frames, gapMs, httpStatus, midFail, midFailDelayMs, usage, content }
-  count(model) { return this.requests.filter((r) => r.model === model).length }
+  scripts: new Map(), // model → { frames, gapMs, httpStatus, midFail, midFailDelayMs, usage, content, rawParts, holdOpen }
+  sentStreams: [], // { model, bytes }：按请求顺序记录 mock 实际写往上游连接的全部字节（direct 逐字节比对基准）
+  count(model) { return this.requests.filter((r) => r.model === model).length },
+  /** 最近一次该 model 的流式上游字节（无记录时空 Buffer） */
+  sentOf(model) {
+    const hit = this.sentStreams.filter((s) => s.model === model).pop()
+    return hit ? hit.bytes : Buffer.alloc(0)
+  }
 }
 
 const sseFrame = (content) =>
@@ -169,18 +176,36 @@ async function mockHandle(body, res) {
     return
   }
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
+  // 逐字节记录实际写往上游连接的字节（T4.1：direct 透传逐字节比对基准；字符串按 utf8、Buffer 原样）
+  const sent = []
+  const write = (part) => {
+    sent.push(Buffer.isBuffer(part) ? part : Buffer.from(part, 'utf8'))
+    res.write(part)
+  }
+  // rawParts：自含原样字节脚本（心跳注释/事件间空行/多字节切块/畸形行），与 frames 二选一
+  if (script.rawParts) {
+    for (const part of script.rawParts) {
+      write(part)
+      await sleep(script.gapMs || 10)
+    }
+    mock.sentStreams.push({ model, bytes: Buffer.concat(sent) })
+    if (!script.holdOpen) res.end()
+    return
+  }
   for (const frame of script.frames || []) {
-    res.write(sseFrame(frame))
+    write(sseFrame(frame))
     await sleep(script.gapMs || 10)
   }
   if (script.midFail) {
     await sleep(script.midFailDelayMs || 30)
+    mock.sentStreams.push({ model, bytes: Buffer.concat(sent) })
     res.destroy() // 200 后流中途断开（无 [DONE]）
     return
   }
-  res.write(sseFinish())
-  if (script.usage) res.write(sseUsage(script.usage))
-  res.write('data: [DONE]\n\n')
+  write(sseFinish())
+  if (script.usage) write(sseUsage(script.usage))
+  write('data: [DONE]\n\n')
+  mock.sentStreams.push({ model, bytes: Buffer.concat(sent) })
   if (!script.holdOpen) res.end()
 }
 
@@ -198,7 +223,7 @@ function gatewayRequest(port, body, opts = {}) {
     const req = http.request(
       { host: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json' } },
       (res) => {
-        res.on('data', (d) => chunks.push({ t: Date.now(), text: d.toString('utf8') }))
+        res.on('data', (d) => chunks.push({ t: Date.now(), text: d.toString('utf8'), buf: d }))
         res.on('end', () => done({ status: res.statusCode, headers: res.headers, ended: true }))
         res.on('close', () => done({ status: res.statusCode, headers: res.headers, closed: true }))
         res.on('error', () => done({ status: res.statusCode, error: true }))
@@ -305,6 +330,10 @@ const SUB_MODELS = [
     const roundId = roundIdOf(evts)
 
     eq(client.status, 200, 'HTTP 200')
+    // T4.1：MoA 真流式分支须在首帧前补上 SSE 三个响应头（旧版 L493-495 行为回归）
+    ok(String(client.headers['content-type'] || '').includes('text/event-stream'), 'MoA 流式响应头 content-type 含 text/event-stream', client.headers['content-type'])
+    eq(client.headers['cache-control'], 'no-cache', 'MoA 流式响应头 cache-control = no-cache')
+    eq(client.headers['connection'], 'keep-alive', 'MoA 流式响应头 connection = keep-alive')
     eq(sseContent(client.raw), '聚合结果', '增量拼接 = 聚合全文')
     eq(parseSseData(client.raw)[parseSseData(client.raw).length - 1], '[DONE]', '以 [DONE] 结束')
     eq(finishCount(client.raw), 1, '恰一帧 finish_reason:stop')
@@ -410,7 +439,11 @@ const SUB_MODELS = [
     const evts = uiSince(mark)
 
     eq(client.status, 200, 'HTTP 200')
-    ok(client.raw.includes('"content":"直"') && client.raw.includes('"content":"通"'), '上游帧原样透传（未改字节）')
+    // T4.1：子串断言升级为逐字节比对（评审变异 M7「事件间插空行」可整体漏过子串检查）
+    const directUp = mock.sentOf('direct-1')
+    const directGot = Buffer.concat(client.chunks.map((c) => c.buf))
+    ok(directUp.length > 0, 'mock 已记录上游字节（比对基准非空）', { n: directUp.length })
+    ok(Buffer.compare(directGot, directUp) === 0, '上游帧逐字节透传（Buffer.compare === 0）', { client: directGot.length, upstream: directUp.length })
     ok(client.raw.trimEnd().endsWith('data: [DONE]'), '客户端收到 [DONE]')
     eq(evts[0]?.channel, 'gateway:roundStart', 'roundStart 已广播')
     eq(evts[0]?.payload.mode, 'direct', 'roundStart.mode = direct')
@@ -437,6 +470,42 @@ const SUB_MODELS = [
     eq(term2.length, 1, '非流式 direct 终态恰一次')
     eq(term2[0]?.payload.content, '非流式直通', '非流式终态 content = 直回内容')
     eq(evts2[evts2.length - 1]?.channel, 'gateway:roundDone', '非流式以 roundDone 结束')
+  }
+
+  console.log('\n[3b] direct 字节级透传：心跳注释/事件间空行/多字节切块/畸形行（Buffer.compare === 0）')
+  {
+    moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
+    // 自含原样字节脚本：注释心跳 + emoji 跨 write 拦腰截断 + 事件间多余空行（M7 类变异：
+    // 语义等价但字节改变）+ 畸形行 + JSON 内孤立 \r + [DONE]；逐字节比对须全部原样保留。
+    const emojiFrame = sseFrame('甲🙂乙')
+    const emojiBuf = Buffer.from(emojiFrame, 'utf8')
+    const cut = emojiBuf.indexOf(Buffer.from('🙂', 'utf8')) + 2 // 把 4 字节 emoji 切成 2+2 两次 write
+    mock.scripts.set('direct-1', {
+      gapMs: 15,
+      rawParts: [
+        ': keep-alive\r\n\r\n',
+        emojiBuf.subarray(0, cut),
+        emojiBuf.subarray(cut),
+        '\n',
+        'data: {"malformed\n\n',
+        'data: {"broken":"a\rb"}\n\n',
+        sseFinish(),
+        'data: [DONE]\n\n'
+      ]
+    })
+
+    const mark = uiMark()
+    const client = await gatewayRequest(GW_PORT, { model: 'direct-1', stream: true, messages: [{ role: 'user', content: 'hi' }] })
+    const up = mock.sentOf('direct-1')
+    const got = Buffer.concat(client.chunks.map((c) => c.buf))
+
+    eq(client.status, 200, 'HTTP 200')
+    ok(up.length > 0, 'mock 已记录上游字节（比对基准非空）', { n: up.length })
+    ok(Buffer.compare(got, up) === 0, '上游字节逐字节透传（含畸形流，Buffer.compare === 0）', { client: got.length, upstream: up.length })
+    ok(client.raw.includes('甲🙂乙') && !client.raw.includes('\uFFFD'), '多字节内容完好（无 U+FFFD）')
+    ok(client.raw.includes(': keep-alive') && client.raw.includes('a\rb'), '心跳注释与孤立 \\r 原样保留')
+    ok(client.raw.trimEnd().endsWith('data: [DONE]'), '以 [DONE] 收尾')
+    eq(uiSince(mark).filter((e) => e.channel === 'gateway:roundDone').length, 1, 'roundDone 恰一次（旁路解析对畸形数据容错）')
   }
 
   console.log('\n[4] 非流式客户端（aggregate stream:false）：完整 JSON + UI 事件仍全')
@@ -541,6 +610,33 @@ const SUB_MODELS = [
     eq(aggChunks[aggChunks.length - 1]?.payload.text, '新结果', 'UI 终态 = fallback 全文（UI 继续直播）')
     eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 结束')
     eq(evts[evts.length - 1]?.payload.success, true, 'roundDone.success = true（fallback 救回）')
+  }
+
+  console.log('\n[8] MoA 引擎失败（未开流）+ stream:true：仍返回 application/json 的 502（T4.1）')
+  {
+    moaConfig.setMoaConfig({
+      mode: 'aggregate',
+      subModels: [{ modelId: 'sub-dead', providerId: 'prov-1', order: 0 }],
+      aggregator: { primaryModelId: 'agg-dead', primaryProviderId: 'prov-1' }
+    })
+    mock.scripts.set('sub-dead', { httpStatus: 500 })
+    mock.scripts.set('agg-dead', { frames: ['不应到达'] })
+
+    const mark = uiMark()
+    const aggBefore = mock.count('agg-dead')
+    const client = await gatewayRequest(GW_PORT, { model: 'sub-dead', stream: true, messages: [{ role: 'user', content: 'hi' }] })
+    const evts = uiSince(mark)
+
+    eq(client.status, 502, 'HTTP 502')
+    ok(String(client.headers['content-type'] || '').includes('application/json'),
+      'content-type = application/json（SSE 头未泄漏到失败路径）', client.headers['content-type'])
+    ok(!client.raw.includes('data: ') && !client.raw.includes('[DONE]'), '响应体为 JSON（非 SSE 帧）')
+    const body = JSON.parse(client.raw)
+    ok(typeof body.error?.message === 'string' && body.error.message.length > 0, 'JSON 错误体含 error.message', body)
+    eq(mock.count('agg-dead') - aggBefore, 0, '全子模型失败：聚合未发起')
+    eq(chanCount(evts, 'gateway:aggStart'), 0, '无 aggStart 事件')
+    eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 结束')
+    eq(evts[evts.length - 1]?.payload.success, false, 'roundDone.success = false')
   }
 
   console.log('\n──────────────────────────────')
