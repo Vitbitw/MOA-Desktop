@@ -61,6 +61,9 @@ export function buildImportPlan(existing: SubModelConfig[], pool: ModelOption[],
 
   const subModels: SubModelConfig[] = valid.map((d, i) => {
     const { providerId, modelId } = splitModelKey(d.modelKey)
+    // 专家名写入前 trim（用户手编可能带首尾空白；显示层以 trim 后判定/展示，避免三处口径不一）
+    // trim 后为空 → undefined（JSON 序列化省略键，等价于「无专家名」）
+    const expertName = d.name.trim()
     return {
       id: crypto.randomUUID(),
       providerId,
@@ -68,7 +71,7 @@ export function buildImportPlan(existing: SubModelConfig[], pool: ModelOption[],
       order: i,
       role: '' as SubModelRole,
       systemPrompt: d.prompt,
-      expertName: d.name
+      expertName: expertName || undefined
     }
   })
 

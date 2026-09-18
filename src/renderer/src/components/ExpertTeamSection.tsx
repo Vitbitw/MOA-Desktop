@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react'
 import { Sparkles, Loader2, ChevronDown, Check, RefreshCw } from 'lucide-react'
 import { useConfigStore } from '../store/configStore'
 import { buildImportPlan, initialDrafts, type ExpertDraft, type ModelOption } from '../utils/expertTeam'
+import { splitModelKey } from '../../../shared/modelKey'
 import type { SubModelConfig, ExpertTeamPlan } from '../../../shared/types'
 
 interface ExpertTeamSectionProps {
@@ -47,14 +48,28 @@ export default function ExpertTeamSection({ subModels, setSubModels, notifySaveR
   )
   const skippedCount = drafts.length - validCount
 
-  // 席位变化摘要（导入后将发生的席位增减）
+  // 模型名短显（摘要行内联展示，过长截断）
+  const shortModelId = (id: string): string => (id.length > 24 ? id.slice(0, 21) + '…' : id)
+
+  // 席位变化摘要（导入后将发生的席位增减；含受影响模型明细，对齐设计文档 §5.6 示例）
   const seatSummary = useMemo(() => {
     const existingCount = subModels.length
     const finalCount = validCount
     if (finalCount === existingCount) return `席位保持 ${existingCount} 个`
-    if (finalCount > existingCount) return `席位 ${existingCount} → ${finalCount}：自动新增 ${finalCount - existingCount} 个席位`
-    return `席位 ${existingCount} → ${finalCount}：移除 ${existingCount - finalCount} 个席位（其原有角色/提示词将一并移除）`
-  }, [validCount, subModels.length])
+    if (finalCount > existingCount) {
+      // 新增席位 = 合法草案中超出现有席位数的尾段，展示其分配模型（最多 3 个）
+      const added = drafts
+        .filter((d) => d.modelKey !== '' && poolValues.has(d.modelKey))
+        .slice(existingCount)
+        .map((d) => splitModelKey(d.modelKey).modelId)
+      const shown = added.slice(0, 3).map(shortModelId).join('、') + (added.length > 3 ? ` 等 ${added.length} 个` : '')
+      return `席位 ${existingCount} → ${finalCount}：自动新增 ${finalCount - existingCount} 个席位（${shown}）`
+    }
+    // 被移除席位 = 现有席位中超出合法草案数的尾段
+    const removed = subModels.slice(validCount).map((s) => s.modelId)
+    const shown = removed.slice(0, 3).map(shortModelId).join('、') + (removed.length > 3 ? ` 等 ${removed.length} 个` : '')
+    return `席位 ${existingCount} → ${finalCount}：移除 ${existingCount - finalCount} 个席位（${shown}；其原有角色/提示词将一并移除）`
+  }, [validCount, subModels, drafts, poolValues])
 
   /** 编辑任一草案（专家名/提示词/模型）→ 清除「已导入」标记 */
   const updateDraft = (idx: number, patch: Partial<ExpertDraft>) => {

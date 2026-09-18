@@ -573,7 +573,16 @@ let shared = null
     eq(plan.subModels[0].modelId, 'llama3.1:8b', '[30] 席位 modelId 保留完整冒号后缀')
   }
 
-  eq(caseCount, 30, '用例数 = 30（T4 的 28 + T5 补强 2）')
+  caseHeader(31, 'buildImportPlan：专家名写入前 trim（空名 → 字段省略）')
+  {
+    const plan = renderer.buildImportPlan([], [opt('p1:m1')], [{ name: '  安全工程师  ', prompt: 'p-甲', modelKey: 'p1:m1' }])
+    eq(plan.subModels[0].expertName, '安全工程师', '[31] 首尾空白已 trim')
+    const empty = renderer.buildImportPlan([], [opt('p2:m2')], [{ name: '   ', prompt: 'p-乙', modelKey: 'p2:m2' }])
+    ok(empty.subModels[0].expertName === undefined, '[31] 全空白专家名 → undefined')
+    ok(!('expertName' in JSON.parse(JSON.stringify(empty.subModels[0]))), '[31] 序列化后无 expertName 键（落库干净）')
+  }
+
+  eq(caseCount, 31, '用例数 = 31（T4 的 28 + T5 补强 2 + 主审 trim 1）')
 
   console.log('\n──────────────────────────────')
   console.log(`通过 ${pass} / 失败 ${fail}`)
