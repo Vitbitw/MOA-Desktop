@@ -361,9 +361,10 @@ const TOOLS_REQUEST = {
   console.log('\n[1] 文本对话（非流式）：Anthropic message JSON + UI 事件全序列')
   {
     moaConfig.setMoaConfig({ mode: 'aggregate', subModels: SUB_MODELS, aggregator: { primaryModelId: 'agg-1', primaryProviderId: 'prov-1' } })
-    mock.scripts.set('sub-a', { frames: ['甲1', '甲2'], gapMs: 20, usage: { prompt_tokens: 3, completion_tokens: 6 } })
-    mock.scripts.set('sub-b', { frames: ['乙1'], gapMs: 20, usage: { prompt_tokens: 1, completion_tokens: 2 } })
-    mock.scripts.set('agg-1', { frames: ['聚合', '结果'], gapMs: 40, usage: { prompt_tokens: 11, completion_tokens: 22 } })
+    // gapMs ≥ 节流窗口（50ms，STREAM_PUSH_INTERVAL_MS）且帧数 ≥2：否则 running 累计更新会被终态 flush 覆盖（窗口内合并是设计行为）
+    mock.scripts.set('sub-a', { frames: ['甲1', '甲2', '甲3'], gapMs: 70, usage: { prompt_tokens: 3, completion_tokens: 6 } })
+    mock.scripts.set('sub-b', { frames: ['乙1', '乙2'], gapMs: 70, usage: { prompt_tokens: 1, completion_tokens: 2 } })
+    mock.scripts.set('agg-1', { frames: ['聚合', '结果'], gapMs: 80, usage: { prompt_tokens: 11, completion_tokens: 22 } })
 
     const mark = uiMark()
     const client = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 1024, system: '你是助手', stream: false, messages: [{ role: 'user', content: '你好' }] })
@@ -552,7 +553,7 @@ const TOOLS_REQUEST = {
   console.log('\n[6] direct 模式：单模型透传 + Anthropic 事件转换 + extraBody（tools）透传')
   {
     moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
-    mock.scripts.set('direct-1', { frames: ['直', '通'], gapMs: 40, usage: { prompt_tokens: 5, completion_tokens: 7 }, content: '非流式直通' })
+    mock.scripts.set('direct-1', { frames: ['直', '通'], gapMs: 70, usage: { prompt_tokens: 5, completion_tokens: 7 }, content: '非流式直通' })
 
     const mark = uiMark()
     const before = mock.count('direct-1')
