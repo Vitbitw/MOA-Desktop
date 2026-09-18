@@ -4,7 +4,8 @@ const fs = require('fs')
 const path = require('path')
 
 const file = process.argv[2] || path.resolve(__dirname, '../src/main/monitoring/commandCode.ts')
-const src = fs.readFileSync(file, 'utf8')
+// 归一化换行：Windows 新检出（core.autocrlf=true）得到 CRLF，而下面的抽取正则按 LF 形状匹配（\n}）
+const src = fs.readFileSync(file, 'utf8').split(String.fromCharCode(13)).join('')
 
 function grab(name, re) {
   const m = src.match(re)
