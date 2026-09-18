@@ -496,10 +496,11 @@ function toFiniteNum(v: unknown): number | undefined {
 }
 
 /** 包裹对象中可能承载数组的字段名 */
-const WRAPPER_ARRAY_KEYS = ['data', 'pricing', 'prices', 'items', 'models', 'result', 'entries'] as const
+const WRAPPER_ARRAY_KEYS = ['data', 'pricing', 'prices', 'items', 'models', 'result', 'entries', 'experts'] as const
 
-/** 从 LLM 输出中提取原始条目数组：支持数组 / { data|pricing|...: [...] } 包裹 / 单个对象 */
-function extractJsonArray(content: string): RawProbeEntry[] | null {
+/** 从 LLM 输出中提取条目数组：支持数组 / { data|pricing|...: [...] } 包裹 / 单个对象。
+ *  泛型 T 供复用方（如专家团生成器）指定条目形状；缺省 RawProbeEntry，既有调用推断不变 */
+export function extractJsonArray<T = RawProbeEntry>(content: string): T[] | null {
   let s = content.replace(/```[a-zA-Z]*/g, '').trim()
   // 截掉前置说明文字（定位到首个 [ 或 {）
   const firstJson = s.search(/[[{]/)
@@ -511,12 +512,12 @@ function extractJsonArray(content: string): RawProbeEntry[] | null {
   if (arrStart !== -1 && arrEnd > arrStart) {
     try {
       const parsed = JSON.parse(s.slice(arrStart, arrEnd + 1))
-      if (Array.isArray(parsed)) return parsed as RawProbeEntry[]
+      if (Array.isArray(parsed)) return parsed as T[]
       if (parsed && typeof parsed === 'object') {
         const obj = parsed as Record<string, unknown>
         for (const key of WRAPPER_ARRAY_KEYS) {
           const v = obj[key]
-          if (Array.isArray(v)) return v as RawProbeEntry[]
+          if (Array.isArray(v)) return v as T[]
         }
       }
     } catch {
@@ -544,9 +545,9 @@ function extractJsonArray(content: string): RawProbeEntry[] | null {
           const o = obj as Record<string, unknown>
           for (const key of WRAPPER_ARRAY_KEYS) {
             const v = o[key]
-            if (Array.isArray(v)) return v as RawProbeEntry[]
+            if (Array.isArray(v)) return v as T[]
           }
-          return [o as RawProbeEntry]
+          return [o as unknown as T]
         }
       } catch {
         /* ignore */
@@ -554,6 +555,35 @@ function extractJsonArray(content: string): RawProbeEntry[] | null {
     }
   }
   return null
+}
+
+/** 从 LLM 输出中提取第一个平衡花括号 JSON 对象（剥 markdown 代码块、容错前置说明与拖尾文字）。失败返回 null */
+export function extractJsonObject(content: string): Record<string, unknown> | null {
+  let s = content.replace(/```[a-zA-Z]*/g, '').trim()
+  // 截掉前置说明文字（定位到首个 [ 或 {）
+  const firstJson = s.search(/[[{]/)
+  if (firstJson > 0) s = s.slice(firstJson)
+
+  const braceStart = s.indexOf('{')
+  if (braceStart === -1) return null
+  let depth = 0
+  let braceEnd = -1
+  for (let i = braceStart; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) { braceEnd = i; break }
+    }
+  }
+  if (braceEnd === -1) return null
+
+  try {
+    const obj = JSON.parse(s.slice(braceStart, braceEnd + 1))
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? (obj as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
 }
 
 const WEEKDAY_ABBR: Record<string, number> = {

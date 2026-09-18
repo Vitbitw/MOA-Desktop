@@ -23,6 +23,10 @@ contextBridge.exposeInMainWorld('moaAPI', {
   getMoaConfig: () => ipcRenderer.invoke('moa:getConfig'),
   setMoaConfig: (config: unknown) => ipcRenderer.invoke('moa:setConfig', config),
 
+  // 主席团专家团生成（AI 规划专家）
+  generateExperts: (req: { requirement: string; seats: string[] }) =>
+    ipcRenderer.invoke(IPC.MOA_GENERATE_EXPERTS, req),
+
   // MoA Send
   sendMessage: (msg: { conversationId?: string; title?: string; content: string; mode: string }) =>
     ipcRenderer.invoke('moa:sendMessage', msg),

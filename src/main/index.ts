@@ -13,6 +13,7 @@ import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seed
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
 import type { MoaResponse } from './moa/moaEngine'
+import { generateExpertTeam } from './moa/expertTeamGenerator'
 import { createThrottledEmitter, STREAM_PUSH_INTERVAL_MS } from './moa/streamThrottle'
 import type { ThrottledEmitter } from './moa/streamThrottle'
 import { generateTitle } from './title/titleGenerator'
@@ -352,6 +353,9 @@ function registerIpcHandlers() {
   })
 
   handleIpc(IPC.MOA_SET_CONFIG, (_e, config) => setMoaConfig(config))
+
+  // ── 主席团专家团生成（AI 规划专家角色）──
+  handleIpc(IPC.MOA_GENERATE_EXPERTS, (_e, req: { requirement: string; seats: string[] }) => generateExpertTeam(req))
 
   // ── MoA Send Message ──
   handleIpcRaw(IPC.MOA_SEND_MESSAGE, async (_e, msg: {

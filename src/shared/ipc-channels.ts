@@ -19,6 +19,8 @@ export const IPC = {
   // MoA Config
   MOA_GET_CONFIG: 'moa:getConfig',
   MOA_SET_CONFIG: 'moa:setConfig',
+  // 主席团专家团生成（AI 规划专家）
+  MOA_GENERATE_EXPERTS: 'moa:generateExperts',
 
   // MoA Execution
   MOA_SEND_MESSAGE: 'moa:sendMessage',
