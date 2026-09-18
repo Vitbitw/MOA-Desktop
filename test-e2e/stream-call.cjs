@@ -1,5 +1,5 @@
 // 冒烟测试：src/main/moa/streamChat.ts + src/main/moa/subModelCaller.ts 的流式调用层
-// （SSE 收流 / 回退链 / 三档超时 / abort 组合；永不 throw 的返回约定）
+// （SSE 收流 / 回退链 / 三档超时 / abort 组合 / 200 直回 JSON 本地抢救；永不 throw 的返回约定）
 // 用法：node test-e2e/stream-call.cjs
 // 加载方式：esbuild bundle 两个 TS 入口（同 sse-parser.cjs 思路），'../local/fetchProxy' 用 esbuild plugin
 //          替换为 stub（直接走全局 fetch）——fetchProxy 真实实现依赖 Electron/DB（读代理设置），测试不依赖它。
@@ -57,9 +57,18 @@ const DONE_FRAME = 'data: [DONE]\n\n'
 /** 延迟回调（unref：不阻塞脚本退出） */
 const hold = (fn, ms) => setTimeout(fn, ms).unref()
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+/** 轮询等待条件成立（超时返回最终值） */
+const waitFor = async (fn, ms) => {
+  const t0 = Date.now()
+  while (!fn() && Date.now() - t0 < ms) await sleep(5)
+  return fn()
+}
 
 /** 请求日志：{ scenario, body }（按调用区间切片断言） */
 const requestLog = []
+
+/** 修复 A 探针：回退请求是否到达 / 是否在 socket 层被客户端真实中止 */
+const serverProbe = { fallbackReached: false, fallbackAborted: false }
 
 function sendJson(res, status, obj) {
   res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -95,6 +104,53 @@ async function handle(scenario, body, res) {
       choices: [{ message: { role: 'assistant', content: 'JSON 直回内容' } }],
       usage: { prompt_tokens: 8, completion_tokens: 2 }
     })
+  }
+  // 同上但无 usage：抢救成功时同样不写假 0
+  if (scenario === 'json-200-no-usage') {
+    return sendJson(res, 200, {
+      choices: [{ message: { role: 'assistant', content: '无 usage 直回' } }]
+    })
+  }
+  // 200 直回非 JSON 垃圾（流式）；非流式请求正常返回 JSON（验证抢救失败 → 重发回退）
+  if (scenario === 'garbage-200') {
+    if (body.stream) {
+      res.writeHead(200, { 'Content-Type': 'text/plain' })
+      return res.end('<html>502 bad gateway page</html>')
+    }
+    return sendJson(res, 200, {
+      choices: [{ message: { role: 'assistant', content: '重发救回内容' } }],
+      usage: { prompt_tokens: 4, completion_tokens: 9 }
+    })
+  }
+  // 200 直回超过 2MB 的非 JSON 垃圾：超过抢救上限 → 放弃抢救走重发回退
+  if (scenario === 'huge-200') {
+    if (body.stream) {
+      res.writeHead(200, { 'Content-Type': 'text/plain' })
+      return res.end('x'.repeat(2 * 1024 * 1024 + 64 * 1024))
+    }
+    return sendJson(res, 200, {
+      choices: [{ message: { role: 'assistant', content: '超限后重发救回' } }]
+    })
+  }
+  // 修复 A：流式被 400 拒绝，非流式回退慢响应（1500ms）；客户端在回退请求到达后 abort
+  if (scenario === 'slow-fallback') {
+    if (body.stream) return sendJson(res, 400, { error: { message: 'stream is not supported' } })
+    serverProbe.fallbackReached = true
+    const timer = hold(() => {
+      try {
+        sendJson(res, 200, {
+          choices: [{ message: { role: 'assistant', content: '回退慢响应' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 }
+        })
+      } catch {
+        /* 客户端已中止 */
+      }
+    }, 1500)
+    res.on('close', () => {
+      clearTimeout(timer)
+      if (!res.writableEnded) serverProbe.fallbackAborted = true
+    })
+    return
   }
   // 200 但 0 字节：自然结束
   if (scenario === 'empty') {
@@ -251,6 +307,18 @@ function ok(cond, label, extra) {
 function eq(actual, expected, label) {
   ok(JSON.stringify(actual) === JSON.stringify(expected), label, { actual, expected })
 }
+/** 捕获 console.warn 运行 fn（抢救失败日志断言 + 防测试输出噪声） */
+async function captureWarns(fn) {
+  const warns = []
+  const orig = console.warn
+  console.warn = (...args) => warns.push(args.join(' '))
+  try {
+    const value = await fn()
+    return { value, warns }
+  } finally {
+    console.warn = orig
+  }
+}
 
 let PORT = 0
 const baseUrl = (scenario) => `http://127.0.0.1:${PORT}/${scenario}`
@@ -348,21 +416,58 @@ const chatOpts = (scenario, extra) =>
     eq(used.length, 3, '同样三级链（无 nonStreamFallback 钩子时走内置 JSON 请求）')
   }
 
-  console.log('\n[3c] 200 但不是 SSE（中转忽略 stream:true 直回 JSON）→ 非流式回退取回内容')
+  console.log('\n[3c] 200 但不是 SSE（中转忽略 stream:true 直回 JSON）→ 本地抢救：零额外请求保住内容与 usage')
   {
     const before = requestLog.length
     const out = await callSubModelStream(subOpts('json-200'))
     const used = requestLog.slice(before)
-    eq(out.status, 'success', '回退成功（不再静默返回空文本）')
-    eq(out.content, 'JSON 直回内容', 'content 来自 JSON 响应体')
-    eq(out.tokenUsage, { prompt: 8, completion: 2 }, 'usage 提取')
-    eq(used.length, 2, '流式尝试未产出 SSE → 非流式重试（2 次请求）')
-    eq(used[1].body.stream, false, '第二次为非流式')
+    eq(out.status, 'success', '抢救成功（不再静默返回空文本）')
+    eq(out.content, 'JSON 直回内容', 'content 取自直回 JSON 体')
+    eq(out.tokenUsage, { prompt: 8, completion: 2 }, '第一次请求的 usage 直接保住')
+    eq('error' in out, false, '成功时无 error 字段')
+    eq(used.length, 1, '只发 1 次请求（直回 JSON 即完整响应，零重发）')
 
     const before2 = requestLog.length
     const r = await streamChat(chatOpts('json-200'))
-    eq(r, { content: 'JSON 直回内容', usage: { prompt: 8, completion: 2 } }, 'streamChat 内置回退同样取回内容')
+    eq(r, { content: 'JSON 直回内容', usage: { prompt: 8, completion: 2 } }, 'streamChat 内置路径同样本地抢救')
+    eq(requestLog.length - before2, 1, '内置路径同样只 1 次请求')
+
+    const before3 = requestLog.length
+    const out3 = await callSubModelStream(subOpts('json-200-no-usage'))
+    eq(out3.content, '无 usage 直回', '无 usage 的直回 JSON 同样抢救成功')
+    eq('tokenUsage' in out3, false, '无 usage 时不写假 0（字段省略）')
+    eq(requestLog.length - before3, 1, '仍只 1 次请求')
+  }
+
+  console.log('\n[3d] 200 直回非 JSON 垃圾 → 抢救失败：重发非流式 + warn 日志')
+  {
+    const before = requestLog.length
+    const { value: out, warns } = await captureWarns(() => callSubModelStream(subOpts('garbage-200')))
+    const used = requestLog.slice(before)
+    eq(out.status, 'success', '重发回退成功')
+    eq(out.content, '重发救回内容', 'content 来自非流式重发响应')
+    eq(out.tokenUsage, { prompt: 4, completion: 9 }, 'usage 来自重发响应')
+    eq(used.length, 2, '抢救失败 → 重发一次（2 次请求）')
+    eq(used[1].body.stream, false, '第二次为非流式请求')
+    eq(warns.length, 1, '恰好 1 条抢救失败 warn')
+    ok(warns[0] && warns[0].includes('抢救失败'), 'warn 标注抢救失败原因（' + (warns[0] || '') + '）')
+
+    const before2 = requestLog.length
+    const { value: r, warns: warns2 } = await captureWarns(() => streamChat(chatOpts('garbage-200')))
+    eq(r, { content: '重发救回内容', usage: { prompt: 4, completion: 9 } }, 'streamChat 内置路径同样重发取回')
     eq(requestLog.length - before2, 2, '内置路径同样 2 次请求')
+    eq(warns2.length, 1, '内置路径同样 1 条 warn')
+  }
+
+  console.log('\n[3e] 200 直回超过 2MB 上限 → 放弃抢救：重发非流式')
+  {
+    const before = requestLog.length
+    const { value: out, warns } = await captureWarns(() => callSubModelStream(subOpts('huge-200')))
+    const used = requestLog.slice(before)
+    eq(out.status, 'success', '重发回退成功')
+    eq(out.content, '超限后重发救回', 'content 来自重发响应')
+    eq(used.length, 2, '超限不抢救 → 重发一次（2 次请求）')
+    ok(warns.length === 1 && warns[0].includes('上限'), 'warn 标注超上限原因（' + (warns[0] || '') + '）')
   }
 
   console.log('\n[4] HTTP 200 后流中途断开 → 不重试，保留已收文本 + error')
@@ -485,6 +590,72 @@ const chatOpts = (scenario, extra) =>
       )
       eq(r2.error, '已中止', 'fallback 组合下外部中止同样生效')
       eq(r2.content, '甲', 'fallback 组合下保留已收文本')
+    } finally {
+      AbortSignal.any = originalAny
+    }
+  }
+
+  console.log('\n[13] 修复 A：非流式回退链路透传外部 signal（回退中 abort → 快速返回「已中止」）')
+  {
+    // 钩子路径（callSubModelStream → callSubModel）：回退请求到达服务端后立即 abort
+    serverProbe.fallbackReached = false
+    serverProbe.fallbackAborted = false
+    const before = requestLog.length
+    const ctrl = new AbortController()
+    const aborter = (async () => {
+      await waitFor(() => serverProbe.fallbackReached, 3000)
+      ctrl.abort()
+    })()
+    const t0 = Date.now()
+    const out = await callSubModelStream(subOpts('slow-fallback', { signal: ctrl.signal }))
+    const elapsed = Date.now() - t0
+    await aborter
+    const used = requestLog.slice(before)
+    eq(used.length, 3, '三级链：回退非流式请求已发出（3 次请求）')
+    eq(used[2].body.stream, false, '第 3 次为非流式请求')
+    eq(out.status, 'error', 'status = error')
+    eq(out.error, '已中止', 'error = 已中止（abort 透传到回退请求）')
+    eq(out.content, '', 'content 保持为空（回退未产出文本）')
+    eq('tokenUsage' in out, false, '中止时不写 usage')
+    ok(elapsed < 800, '远早于服务端 1500ms 慢响应（实测 ' + elapsed + 'ms）')
+    ok(await waitFor(() => serverProbe.fallbackAborted, 500), '回退请求在 socket 层被真实中止（未等慢响应写完）')
+
+    // 内置路径（streamChat 无钩子 → requestNonStream）
+    serverProbe.fallbackReached = false
+    serverProbe.fallbackAborted = false
+    const ctrl2 = new AbortController()
+    const aborter2 = (async () => {
+      await waitFor(() => serverProbe.fallbackReached, 3000)
+      ctrl2.abort()
+    })()
+    const t1 = Date.now()
+    const r = await streamChat(chatOpts('slow-fallback', { signal: ctrl2.signal }))
+    const elapsed2 = Date.now() - t1
+    await aborter2
+    eq(r.error, '已中止', '内置非流式路径同样快速中止')
+    ok(elapsed2 < 800, '内置路径远早于慢响应（实测 ' + elapsed2 + 'ms）')
+    ok(await waitFor(() => serverProbe.fallbackAborted, 500), '内置路径回退请求同样被真实中止')
+  }
+
+  console.log('\n[14] 修复 A：AbortSignal.any 不可用 → 回退 abort 走手写转发同样生效')
+  {
+    const originalAny = AbortSignal.any
+    AbortSignal.any = undefined
+    try {
+      serverProbe.fallbackReached = false
+      serverProbe.fallbackAborted = false
+      const ctrl = new AbortController()
+      const aborter = (async () => {
+        await waitFor(() => serverProbe.fallbackReached, 3000)
+        ctrl.abort()
+      })()
+      const t0 = Date.now()
+      const out = await callSubModelStream(subOpts('slow-fallback', { signal: ctrl.signal }))
+      const elapsed = Date.now() - t0
+      await aborter
+      eq(out.error, '已中止', 'any 不可用时外部中止仍生效（手写事件转发）')
+      ok(elapsed < 800, '快速返回（实测 ' + elapsed + 'ms）')
+      ok(await waitFor(() => serverProbe.fallbackAborted, 500), '回退请求被真实中止')
     } finally {
       AbortSignal.any = originalAny
     }

@@ -62,11 +62,11 @@ function buildHeaders(apiKey?: string): Record<string, string> {
 }
 
 /**
- * 组合外部信号与内部（超时/主动取消）信号。
+ * 组合外部信号与内部（超时/主动取消）信号。streamChat 与 callSubModel（非流式回退）共用。
  * 优先 AbortSignal.any（Node 20.3+ / Electron 33 可用）；不可用时手写事件转发（兼容旧 Node）。
  * 返回 dispose 用于清理由本函数注册的监听（AbortSignal.any 路径无需清理）。
  */
-function combineSignals(external: AbortSignal | undefined, internal: AbortSignal): { signal: AbortSignal; dispose: () => void } {
+export function combineSignals(external: AbortSignal | undefined, internal: AbortSignal): { signal: AbortSignal; dispose: () => void } {
   if (!external) return { signal: internal, dispose: () => {} }
 
   const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any
@@ -94,10 +94,10 @@ function combineSignals(external: AbortSignal | undefined, internal: AbortSignal
 
 /**
  * 响应体观察层（字节原样透传，不改变内容）：
- * - 每个原始 chunk 通知 onChunk（TTFT 达成判定 / idle 计时重置；注释心跳行也算 chunk）
+ * - 每个原始 chunk 通知 onChunk（TTFT 达成判定 / idle 计时重置 / 直回 JSON 抢救累计；注释心跳行也算 chunk）
  * - stop()：主动取消底层流。收到 [DONE] 后调用，避免服务端保持连接时干等 idle 超时
  */
-function observeBody(body: ReadableStream<Uint8Array>, onChunk: () => void): { stream: ReadableStream<Uint8Array>; stop: () => void } {
+function observeBody(body: ReadableStream<Uint8Array>, onChunk: (chunk: Uint8Array) => void): { stream: ReadableStream<Uint8Array>; stop: () => void } {
   const reader = body.getReader()
   let stopped = false
   const stream = new ReadableStream<Uint8Array>({
@@ -108,7 +108,7 @@ function observeBody(body: ReadableStream<Uint8Array>, onChunk: () => void): { s
           controller.close()
           return
         }
-        onChunk()
+        onChunk(value)
         controller.enqueue(value)
       } catch (err) {
         // 网络中断/中止原样传给下游（readSseStream 会抛出，已收文本由调用方保留）
@@ -159,6 +159,46 @@ async function safeText(resp: Response): Promise<string> {
   }
 }
 
+/** 200 直回 JSON 本地抢救的原始体累计上限（字节）：超限即放弃抢救走原回退（防异常大响应占用内存） */
+const RAW_JSON_SALVAGE_MAX = 2 * 1024 * 1024
+
+/** 本地抢救结果：ok = 直回 JSON 即完整 chat/completions 响应（按成功返回）；fail = 不可抢救（走原非流式回退） */
+type SalvageResult =
+  | { kind: 'ok'; content: string; usage?: StreamUsage }
+  | { kind: 'fail'; reason: string }
+
+/** 拼接原始响应体分块（抢救专用） */
+function mergeChunks(parts: Uint8Array[]): Uint8Array {
+  const merged = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
+  let offset = 0
+  for (const part of parts) {
+    merged.set(part, offset)
+    offset += part.length
+  }
+  return merged
+}
+
+/**
+ * 本地抢救（级 3 扩展分支首选路径）：把 200 直回的响应体解析为 chat/completions 结果。
+ * 命中时零额外请求直接按成功返回，保住第一次请求的 usage（避免重发双倍计费）；
+ * 未命中返回原因，调用方维持原非流式回退（重发一次）。
+ */
+function salvageJsonBody(parts: Uint8Array[] | null): SalvageResult {
+  if (!parts) return { kind: 'fail', reason: `响应体超过 ${RAW_JSON_SALVAGE_MAX} 字节抢救上限` }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(mergeChunks(parts)))
+  } catch (err) {
+    return { kind: 'fail', reason: `JSON 解析失败：${err instanceof Error ? err.message : String(err)}` }
+  }
+  if (typeof parsed !== 'object' || parsed === null) return { kind: 'fail', reason: '响应体不是 JSON 对象' }
+  const data = parsed as { choices?: Array<{ message?: { content?: unknown } }>; usage?: unknown }
+  const content = data.choices?.[0]?.message?.content
+  if (typeof content !== 'string') return { kind: 'fail', reason: '缺少 choices[0].message.content' }
+  const usage = toUsage(data.usage)
+  return usage ? { kind: 'ok', content, usage } : { kind: 'ok', content }
+}
+
 /**
  * 单次流式尝试（stream:true[+stream_options]）。
  * includeStreamOptions=false 用于回退链级 2（去掉 stream_options 重发）。
@@ -206,6 +246,8 @@ async function streamOnce(opts: StreamChatOptions, includeStreamOptions: boolean
   let sawDone = false
   let sawBytes = false // 收到过响应体字节（区分 0 字节空流）
   let sawDataEvent = false // 派发过 SSE data 事件（区分「200 但不是 SSE」的 JSON 响应体）
+  let rawChunks: Uint8Array[] | null = [] // 直回 JSON 抢救用原始体（仅在出现 data 事件前累计；出现即释放）
+  let rawBytes = 0
   let tapped: { stream: ReadableStream<Uint8Array>; stop: () => void } | null = null
 
   try {
@@ -230,10 +272,16 @@ async function streamOnce(opts: StreamChatOptions, includeStreamOptions: boolean
 
     if (!resp.body) return { kind: 'ok', content: '' }
 
-    tapped = observeBody(resp.body, () => {
+    tapped = observeBody(resp.body, (chunk) => {
       sawBytes = true
       clearTimeout(ttftTimer) // 首个 chunk 到达：TTFT 达成（此后只剩 idle / 总上限）
       armIdle()
+      // 直回 JSON 抢救：仅在尚未出现 data 事件时累计原始体；超上限即放弃（防异常大响应）
+      if (rawChunks) {
+        rawBytes += chunk.length
+        if (rawBytes > RAW_JSON_SALVAGE_MAX) rawChunks = null
+        else rawChunks.push(chunk)
+      }
     })
 
     try {
@@ -241,10 +289,12 @@ async function streamOnce(opts: StreamChatOptions, includeStreamOptions: boolean
         if (data === '[DONE]') {
           sawDone = true
           sawDataEvent = true // [DONE] 本身就是 SSE 帧
+          rawChunks = null // 已是 SSE：释放抢救用原始体
           tapped?.stop() // 立即停止读取，不等服务端关闭连接
           return
         }
         sawDataEvent = true
+        rawChunks = null // 已是 SSE：释放抢救用原始体
         const chunk = parseOpenAIChunk(data)
         if (!chunk) return
         if (typeof chunk.content === 'string' && chunk.content !== '') {
@@ -268,8 +318,15 @@ async function streamOnce(opts: StreamChatOptions, includeStreamOptions: boolean
       return { kind: 'interrupted', content: acc, usage, error: message }
     }
     // HTTP 200 但响应体不是 SSE（有字节却无任何 data 事件，如中转忽略 stream:true 直接回 JSON）：
-    // 视为请求未产出流，交回退链走非流式（无损）。0 字节空流不算（按自然结束成功处理）。
-    if (sawBytes && !sawDataEvent) return { kind: 'no-sse' }
+    // 先本地抢救：能解析出 choices[0].message.content 即直接按成功返回——零额外请求、保住第一次
+    // 请求的 usage（重发非流式即第二次上游请求，可能双倍计费）；抢救失败才交回退链走非流式并打 warn。
+    // 0 字节空流不算（按自然结束成功处理）。
+    if (sawBytes && !sawDataEvent) {
+      const salvaged = salvageJsonBody(rawChunks)
+      if (salvaged.kind === 'ok') return { kind: 'ok', content: salvaged.content, usage: salvaged.usage }
+      console.warn(`[streamChat] 200 直回响应体本地抢救失败（${salvaged.reason}），改走非流式回退（重发一次）`)
+      return { kind: 'no-sse' }
+    }
     return { kind: 'ok', content: acc, usage }
   } finally {
     clearTimers()
@@ -326,7 +383,8 @@ async function requestNonStream(opts: StreamChatOptions): Promise<StreamChatResu
 /**
  * 通用流式调用（永不 throw）：
  * ① stream:true + stream_options.include_usage → ② 被 400 拒绝则去掉 stream_options 重发
- * → ③ 再被 400 拒绝（中转不支持流式），或 200 但响应体根本不是 SSE → 非流式单次请求（优先 opts.nonStreamFallback）。
+ * → ③ 再被 400 拒绝（中转不支持流式），或 200 但响应体根本不是 SSE →
+ *    先本地抢救直回 JSON 体（零额外请求）；抢救失败才非流式单次请求（优先 opts.nonStreamFallback）。
  * 200 之后的流中断/超时/中止不重试（可能已计费），保留已收文本返回 error。
  */
 export async function streamChat(opts: StreamChatOptions): Promise<StreamChatResult> {

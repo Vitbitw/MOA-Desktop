@@ -1,6 +1,6 @@
 import type { SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
-import { streamChat } from './streamChat'
+import { combineSignals, streamChat } from './streamChat'
 
 export interface SubModelCallOptions {
   providerBaseUrl: string
@@ -11,6 +11,8 @@ export interface SubModelCallOptions {
   messages: Array<{ role: string; content: string }>
   systemPrompt?: string
   timeoutMs: number
+  /** 外部中止信号（网关客户端断开等）；与内部 AbortSignal.timeout 组合，触发即中断请求 */
+  signal?: AbortSignal
 }
 
 /**
@@ -19,7 +21,7 @@ export interface SubModelCallOptions {
  */
 export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelOutput> {
   const startTime = Date.now()
-  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs } = opts
+  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal } = opts
 
   // Build payload
   const body: Record<string, unknown> = {
@@ -30,6 +32,9 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
     stream: false
   }
 
+  // 外部 signal 与自身超时组合（同 streamChat 式）：客户端断开立即中断，不再跑满 timeoutMs
+  const combined = combineSignals(signal, AbortSignal.timeout(timeoutMs))
+
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`
@@ -38,7 +43,7 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: combined.signal
     })
 
     const durationMs = Date.now() - startTime
@@ -72,7 +77,8 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
     }
   } catch (err: unknown) {
     const durationMs = Date.now() - startTime
-    const msg = err instanceof Error ? err.message : String(err)
+    // 外部中止（客户端断开）优先标注「已中止」；其余（含自身超时）保留原始错误信息
+    const msg = signal?.aborted ? '已中止' : err instanceof Error ? err.message : String(err)
     return {
       modelId,
       providerId: providerId || providerBaseUrl,
@@ -81,6 +87,8 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
       error: msg,
       durationMs
     }
+  } finally {
+    combined.dispose()
   }
 }
 
@@ -91,15 +99,14 @@ export function countSuccessfulSubModels(results: SubModelOutput[]): number {
 
 /** callSubModelStream 的选项：非流式选项 + 外部中止信号 + 增量回调 */
 export type SubModelStreamOptions = SubModelCallOptions & {
-  /** 外部中止信号（网关客户端断开等）；触发即中断，保留已收文本 */
-  signal?: AbortSignal
   /** 增量回调：每收到一段文本增量回调累计全文 */
   onDelta?: (accumulatedText: string) => void
 }
 
 /**
  * 流式调用单个子模型（经 streamChat 通用流式层实现，永不 throw）。
- * 回退链：stream_options 400 → 去掉重发；stream:true 400 → 复用 callSubModel 非流式；
+ * 回退链：stream_options 400 → 去掉重发；stream:true 400 → 复用 callSubModel 非流式（外部 signal
+ * 透传，回退中中止同样立即生效）；
  * HTTP 200 后流中断/超时/中止 → 不重试，保留已收文本，status:'error'。
  * usage 缺失时 tokenUsage 省略（不写假 0）。
  */
