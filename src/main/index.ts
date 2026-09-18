@@ -484,7 +484,8 @@ function registerIpcHandlers() {
               error: output.error,
               durationMs: output.durationMs,
               tokenUsage: output.tokenUsage,
-              role: output.role
+              role: output.role,
+              expertName: output.expertName
             } satisfies SubOutputUpdate
             const emitter = subEmitterOf(index)
             if (output.status === 'running') {

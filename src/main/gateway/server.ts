@@ -387,7 +387,8 @@ async function executeMoaRound(opts: {
   const roundSubs = resolveSubModels(config.subModels).map((sm, index) => ({
     index,
     modelId: sm.modelId,
-    role: sm.role
+    role: sm.role,
+    expertName: sm.expertName
   }))
   broadcastToUi(GATEWAY_ROUND_START, {
     roundId,
@@ -440,6 +441,7 @@ async function executeMoaRound(opts: {
       if (output.durationMs !== undefined) update.durationMs = output.durationMs
       if (output.tokenUsage !== undefined) update.tokenUsage = output.tokenUsage
       if (output.role !== undefined) update.role = output.role
+      if (output.expertName !== undefined) update.expertName = output.expertName
       const emitter = subEmitterOf(index)
       if (output.status === 'running') {
         emitter.push(update)

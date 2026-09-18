@@ -172,6 +172,10 @@ function unwrapMoaConfig(res: any): any {
   return res && typeof res === 'object' && 'success' in res ? res.data : res
 }
 
+/** 加载时内存补全缺失的席位 id（旧配置缺省；不改原对象，保存时随 subModels 自然落库） */
+const withIds = (list: SubModelConfig[]): SubModelConfig[] =>
+  list.map((s) => (s.id ? s : { ...s, id: crypto.randomUUID() }))
+
 function MoASection() {
   const providers = useConfigStore((s) => s.providers)
   const notifySaveResult = useSettingsStore((s) => s.notifySaveResult)
@@ -195,7 +199,7 @@ function MoASection() {
     window.moaAPI.getMoaConfig().then((res: any) => {
       const config = unwrapMoaConfig(res)
       if (config) {
-        setSubModels(config.subModels || [])
+        setSubModels(withIds(config.subModels || []))
         setAggModelId(config.aggregator?.primaryModelId || '')
         setAggProviderId(config.aggregator?.primaryProviderId || '')
         setFallbackProviderId(config.aggregator?.fallbackProviderId || '')
@@ -214,7 +218,7 @@ function MoASection() {
       window.moaAPI.getMoaConfig().then((res: any) => {
         const config = unwrapMoaConfig(res)
         if (config) {
-          setSubModels(config.subModels || [])
+          setSubModels(withIds(config.subModels || []))
           setAggModelId(config.aggregator?.primaryModelId || '')
           setAggProviderId(config.aggregator?.primaryProviderId || '')
           setFallbackProviderId(config.aggregator?.fallbackProviderId || '')
@@ -238,10 +242,10 @@ function MoASection() {
   const addSubModel = (value: string) => {
     const [providerId, modelId] = value.split(':')
     if (!providerId || !modelId) return
-    if (subModels.some((s) => s.providerId === providerId && s.modelId === modelId)) return
+    // 不拦截重复模型：同一模型可占多个席位（各配不同专家提示词），由席位 id 区分
     setSubModels((prev) => [
       ...prev,
-      { providerId, modelId, order: prev.length }
+      { id: crypto.randomUUID(), providerId, modelId, order: prev.length }
     ])
   }
 
@@ -334,12 +338,17 @@ function MoASection() {
 
         {subModels.map((sm, i) => {
           const p = providers.find((pr) => pr.id === sm.providerId)
-          // 稳定 key（providerId:modelId）：删除中间项后索引前移不会让展开态/key 窜到别的子模型
-          const k = `${sm.providerId}:${sm.modelId}`
+          // 稳定 key：优先席位 id（同模型可占多个席位）；旧配置未补全时回退 providerId:modelId
+          const k = sm.id ?? `${sm.providerId}:${sm.modelId}`
           return (
             <div key={k} className="rounded-md border border-border bg-muted/30 p-2 mb-1 text-sm">
               <div className="flex items-center justify-between">
-                <span className="text-foreground">{p?.name || sm.providerId} · {sm.modelId}</span>
+                <span className="flex items-center gap-1.5 min-w-0 text-foreground">
+                  <span className="truncate">{p?.name || sm.providerId} · {sm.modelId}</span>
+                  {sm.expertName && (
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary shrink-0">{sm.expertName}</span>
+                  )}
+                </span>
                 <button onClick={() => removeSubModel(i)} className="text-muted-foreground hover:text-destructive">✕</button>
               </div>
               {architecture === 'committee' && (

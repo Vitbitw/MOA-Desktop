@@ -66,7 +66,8 @@ function mergeSubUpdate(output: LiveSubOutput, p: GatewaySubUpdatePayload): Live
     providerId: p.providerId,
     content: p.content,
     status: p.status,
-    role: p.role !== undefined ? p.role : output.role
+    role: p.role !== undefined ? p.role : output.role,
+    expertName: p.expertName !== undefined ? p.expertName : output.expertName
   }
   if (p.error !== undefined) next.error = p.error
   if (p.durationMs !== undefined) next.durationMs = p.durationMs
@@ -82,7 +83,8 @@ function subOutputOf(p: GatewaySubUpdatePayload): LiveSubOutput {
     providerId: p.providerId,
     content: p.content,
     status: p.status,
-    role: p.role
+    role: p.role,
+    expertName: p.expertName
   }
   if (p.error !== undefined) out.error = p.error
   if (p.durationMs !== undefined) out.durationMs = p.durationMs
@@ -109,7 +111,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             providerId: '',
             content: '',
             status: 'pending' as const,
-            role: m.role
+            role: m.role,
+            expertName: m.expertName
           }))
           .sort((a, b) => a.index - b.index),
         aggText: '',

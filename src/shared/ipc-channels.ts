@@ -90,6 +90,8 @@ export interface GatewaySubModelRef {
   index: number
   modelId: string
   role: SubModelRole
+  /** 专家名（AI 生成专家团；旧配置缺省） */
+  expertName?: string
 }
 
 export interface GatewayRoundStartPayload {
@@ -113,6 +115,8 @@ export interface GatewaySubUpdatePayload {
   durationMs?: number
   tokenUsage?: { prompt: number; completion: number }
   role?: SubModelRole
+  /** 专家名（AI 生成专家团；旧配置缺省） */
+  expertName?: string
 }
 
 export interface GatewayAggStartPayload {

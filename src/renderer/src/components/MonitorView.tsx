@@ -185,7 +185,8 @@ function SessionRoundsView({ showProxyBadge }: { showProxyBadge: boolean }) {
           error: o.error,
           durationMs: o.durationMs,
           tokenUsage: o.tokenUsage,
-          role: o.role
+          role: o.role,
+          expertName: o.expertName
         }))
       : []
 

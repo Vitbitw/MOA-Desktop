@@ -86,12 +86,12 @@ export function buildAggregationMessages(
  */
 export function buildCommitteeMessages(
   transcript: ChatMessage[],
-  expertOutputs: Array<{ modelId: string; role: SubModelRole; content: string }>,
+  expertOutputs: Array<{ modelId: string; role: SubModelRole; content: string; expertName?: string }>,
   chairSystemPrompt: string
 ): ChatMessage[] {
   const refs = expertOutputs
     .map((o, i) => {
-      const title = o.role ? MOA_ROLE_LABELS[o.role] : '通用专家'
+      const title = o.expertName?.trim() || (o.role ? MOA_ROLE_LABELS[o.role] : '通用专家')
       return `[专家 ${i + 1} · ${title} · ${o.modelId}]:\n${o.content}`
     })
     .join('\n\n')

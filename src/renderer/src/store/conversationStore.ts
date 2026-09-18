@@ -24,6 +24,7 @@ export interface LiveSubOutput {
   durationMs?: number
   tokenUsage?: { prompt: number; completion: number }
   role?: string
+  expertName?: string
 }
 
 /** DB conversations 表行结构 */
@@ -225,7 +226,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           error: data.error,
           durationMs: data.durationMs,
           tokenUsage: data.tokenUsage,
-          role: data.role
+          role: data.role,
+          expertName: data.expertName
         }
         if (existing) {
           get().updateLiveSubOutput(data.index, patch)
@@ -241,7 +243,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               error: data.error,
               durationMs: data.durationMs,
               tokenUsage: data.tokenUsage,
-              role: data.role
+              role: data.role,
+              expertName: data.expertName
             }].sort((a, b) => a.index - b.index)
           }))
         }

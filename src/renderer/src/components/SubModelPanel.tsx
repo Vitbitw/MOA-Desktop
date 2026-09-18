@@ -32,7 +32,7 @@ function SubModelPanel({ output }: { output: LiveSubOutput }) {
   const shortModelName = output.modelId.length > 30
     ? output.modelId.slice(0, 27) + '…'
     : output.modelId
-  const roleLabel = output.role ? MOA_ROLE_LABELS[output.role as SubModelRole] : ''
+  const roleLabel = output.expertName?.trim() || (output.role ? MOA_ROLE_LABELS[output.role as SubModelRole] : '')
 
   return (
     <div className={`

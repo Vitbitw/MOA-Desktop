@@ -30,6 +30,8 @@ export interface ModelInfo {
 
 // ─── Sub Model Selection ───
 export interface SubModelConfig {
+  /** 席位稳定 id（uuid）：同模型可占多个席位，卡片 key / 编辑态定位用。旧配置缺省，加载时内存补全 */
+  id?: string
   modelId: string
   providerId: string
   order: number
@@ -37,6 +39,8 @@ export interface SubModelConfig {
   role?: SubModelRole
   /** 自定义 system prompt；非空时覆盖 role 模板 */
   systemPrompt?: string
+  /** AI 生成的专家名（如「安全工程师」）。显示优先级：expertName > role 模板标签 > 无。旧配置缺省 */
+  expertName?: string
 }
 
 // ─── Aggregator Config ───
@@ -69,6 +73,8 @@ export interface SubModelOutput {
   tokenUsage?: { prompt: number; completion: number }
   /** 子模型的预设角色（渲染端展示角色标签用；旧数据无此字段） */
   role?: SubModelRole
+  /** 专家名（主席团 AI 生成专家团用；旧数据无此字段） */
+  expertName?: string
 }
 
 export interface Conversation {
@@ -157,6 +163,26 @@ export interface SubOutputUpdate {
   durationMs?: number
   tokenUsage?: { prompt: number; completion: number }
   role?: SubModelRole
+  expertName?: string
+}
+
+// ─── AI 专家团生成（主席团模式）───
+
+/** AI 生成的单个专家 */
+export interface GeneratedExpert {
+  name: string
+  prompt: string
+}
+
+/** AI 专家团生成结果（moa:generateExperts 返回 data） */
+export interface ExpertTeamPlan {
+  /** AI 推荐理由（一句话，可空） */
+  reason?: string
+  /** 推荐的专家列表（长度 = 推荐数量） */
+  experts: GeneratedExpert[]
+  /** 实际使用的生成模型身份（UI 显示「由 X 生成」） */
+  modelId: string
+  providerId: string
 }
 
 export interface AggregationChunk {

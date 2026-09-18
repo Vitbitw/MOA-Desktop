@@ -65,6 +65,7 @@ export interface ResolvedSubModel {
   enabled: boolean
   role: SubModelRole
   systemPrompt: string | undefined
+  expertName?: string
 }
 
 export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPrompt?: string): ResolvedSubModel[] {
@@ -85,7 +86,8 @@ export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPromp
       modelId: sm.modelId,
       enabled: p?.enabled !== false,
       role: (sm.role || '') as SubModelRole,
-      systemPrompt: effectiveSystemPrompt || defaultSystemPrompt
+      systemPrompt: effectiveSystemPrompt || defaultSystemPrompt,
+      expertName: sm.expertName
     }
   }).filter((sm) => sm.providerBaseUrl && sm.enabled && sm.apiKey)
 }
@@ -185,13 +187,13 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
       onDelta: (acc) => {
         try {
           events?.emitSubOutput(
-            { modelId: sm.modelId, providerId: sm.providerId || sm.providerBaseUrl, content: acc, status: 'running', role: sm.role },
+            { modelId: sm.modelId, providerId: sm.providerId || sm.providerBaseUrl, content: acc, status: 'running', role: sm.role, expertName: sm.expertName },
             index
           )
         } catch { /* 事件失败不影响业务结果 */ }
       }
     }).then((result) => {
-      subOutputs[index] = { ...result, role: sm.role }
+      subOutputs[index] = { ...result, role: sm.role, expertName: sm.expertName }
       // 事件发射隔离：emit 抛错不得落入下方 .catch 被当作子模型失败处理（否则会用
       // errorOutput 覆盖已成功的真实输出，聚合模式误报「所有子模型均失败」且用量漏记）
       try { events?.emitSubOutput(subOutputs[index], index) } catch { /* 事件失败不影响业务结果 */ }
@@ -205,7 +207,8 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
         status: 'error',
         error: errMsg,
         durationMs: 0,
-        role: sm.role
+        role: sm.role,
+        expertName: sm.expertName
       }
       subOutputs[index] = errorOutput
       try { events?.emitSubOutput(errorOutput, index) } catch { /* 事件失败不影响业务结果 */ }
@@ -291,7 +294,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
   const aggMessages = isCommittee
     ? buildCommitteeMessages(
         req.messages,
-        successfulOutputs.map((o) => ({ modelId: o.modelId, role: o.role || '', content: o.content })),
+        successfulOutputs.map((o) => ({ modelId: o.modelId, role: o.role || '', content: o.content, expertName: o.expertName })),
         aggPrompt
       )
     : buildAggregationMessages(
