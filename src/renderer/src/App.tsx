@@ -15,6 +15,7 @@ import UsageBar from './components/UsageBar'
 import CloudMonitorView from './components/CloudMonitorView'
 import ToastCenter from './components/ToastCenter'
 import { useNotificationStore } from './store/notificationStore'
+import { BarChart3, Globe } from 'lucide-react'
 
 function App() {
   const setProviders = useConfigStore((s) => s.setProviders)
@@ -111,48 +112,55 @@ function App() {
       <div className="flex h-screen overflow-hidden bg-background">
         <Sidebar onOpenUsage={() => setViewMode('usage')} onOpenCloud={() => setViewMode('cloud')} />
         <main className="flex flex-col flex-1 min-w-0">
-          {/* View mode toolbar — only when chat is showing */}
+          {/* 视图切换栏：两组视觉语言 —— 工作区组（标准/监控）用分段容器，
+              数据面板组（用量/云监控）用带图标幽灵按钮 */}
           {!showSettings && (
-            <div className="flex items-center gap-1 px-4 py-2 border-b border-border bg-card/50 flex-shrink-0">
-              <button
-                onClick={() => setViewMode('standard')}
-                className={`px-3 py-1 text-xs rounded-md border transition-colors ${
-                  viewMode === 'standard'
-                    ? 'bg-primary text-primary-foreground border-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent'
-                }`}
-              >
-                标准
-              </button>
-              <button
-                onClick={() => setViewMode('monitor')}
-                className={`px-3 py-1 text-xs rounded-md border transition-colors ${
-                  viewMode === 'monitor'
-                    ? 'bg-primary text-primary-foreground border-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent'
-                }`}
-              >
-                监控
-              </button>
+            <div className="flex items-center gap-1.5 px-4 py-2 border-b border-border bg-card/50 flex-shrink-0">
+              {/* 工作区组：分段控件 */}
+              <div className="inline-flex gap-0.5 p-[3px] rounded-[10px] bg-accent">
+                <button
+                  onClick={() => setViewMode('standard')}
+                  className={`px-4 py-1 text-xs rounded-[7px] transition-colors ${
+                    viewMode === 'standard'
+                      ? 'bg-primary text-primary-foreground font-semibold'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  标准
+                </button>
+                <button
+                  onClick={() => setViewMode('monitor')}
+                  className={`px-4 py-1 text-xs rounded-[7px] transition-colors ${
+                    viewMode === 'monitor'
+                      ? 'bg-primary text-primary-foreground font-semibold'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  监控
+                </button>
+              </div>
+              {/* 组间分隔线 */}
+              <div className="w-px h-6 mx-2.5 rounded-full bg-foreground/25" />
+              {/* 数据面板组：带图标幽灵按钮 */}
               <button
                 onClick={() => setViewMode('usage')}
-                className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border transition-colors ${
                   viewMode === 'usage'
-                    ? 'bg-primary text-primary-foreground border-primary'
+                    ? 'border-foreground/20 bg-foreground/10 text-foreground font-semibold'
                     : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent'
                 }`}
               >
-                用量
+                <BarChart3 className="w-3.5 h-3.5" /> 用量
               </button>
               <button
                 onClick={() => setViewMode('cloud')}
-                className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border transition-colors ${
                   viewMode === 'cloud'
-                    ? 'bg-primary text-primary-foreground border-primary'
+                    ? 'border-foreground/20 bg-foreground/10 text-foreground font-semibold'
                     : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent'
                 }`}
               >
-                云监控
+                <Globe className="w-3.5 h-3.5" /> 云监控
               </button>
             </div>
           )}
