@@ -7,6 +7,7 @@ import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, Chev
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, SubModelRole } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { MOA_ROLE_TEMPLATES } from '../../../shared/moaRoles'
+import ExpertTeamSection from './ExpertTeamSection'
 
 type SettingsSection = 'moa' | 'providers' | 'network' | 'display' | 'pricing' | 'title'
 
@@ -335,6 +336,15 @@ function MoASection() {
           <label className="text-sm font-medium text-foreground">子模型{architecture === 'committee' ? '（专家）' : ''}</label>
           <span className="text-xs text-muted-foreground">已选 {subModels.length} 个</span>
         </div>
+
+        {/* AI 生成专家团（主席团模式）：折叠面板，生成 → 预览可编辑 → 一键导入（席位自动扩充/缩减） */}
+        {architecture === 'committee' && (
+          <ExpertTeamSection
+            subModels={subModels}
+            setSubModels={setSubModels}
+            notifySaveResult={notifySaveResult}
+          />
+        )}
 
         {subModels.map((sm, i) => {
           const p = providers.find((pr) => pr.id === sm.providerId)
