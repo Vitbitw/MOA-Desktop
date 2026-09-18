@@ -151,7 +151,8 @@ export interface SubOutputUpdate {
   modelId: string
   providerId: string
   content: string
-  status: 'success' | 'error'
+  /** running = 流式过程中的累计文本增量（host 层节流合并推送）；success/error = 终态（一次） */
+  status: 'running' | 'success' | 'error'
   error?: string
   durationMs?: number
   tokenUsage?: { prompt: number; completion: number }

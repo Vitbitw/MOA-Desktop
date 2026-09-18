@@ -12,6 +12,8 @@ import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seed
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
 import type { MoaResponse } from './moa/moaEngine'
+import { createThrottledEmitter, STREAM_PUSH_INTERVAL_MS } from './moa/streamThrottle'
+import type { ThrottledEmitter } from './moa/streamThrottle'
 import { generateTitle } from './title/titleGenerator'
 import { buildUsageEntries, sumUsage } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
@@ -439,6 +441,25 @@ function registerIpcHandlers() {
         [asstMsgId, convId, msg.mode, Date.now()]
       )
 
+      // 每轮发送新建节流发射器（STREAM_PUSH_INTERVAL_MS）：每个子模型 index 一个 + 聚合一个。
+      // running 增量与聚合 chunk(done=false) 走 push（窗口内只保留最新累计文本）；
+      // 终态（success/error、done=true）走 flush(终值) + dispose()：立即发出、丢弃 pending，
+      // 此后 push/flush 均为无操作（绝不把 UI 打回旧文本）。一轮结束后统一 dispose 防泄漏。
+      const subEmitters = new Map<number, ThrottledEmitter<SubOutputUpdate>>()
+      const subEmitterOf = (index: number): ThrottledEmitter<SubOutputUpdate> => {
+        let emitter = subEmitters.get(index)
+        if (!emitter) {
+          emitter = createThrottledEmitter<SubOutputUpdate>(STREAM_PUSH_INTERVAL_MS, (update) => {
+            safeSendMain(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE, update)
+          })
+          subEmitters.set(index, emitter)
+        }
+        return emitter
+      }
+      const aggEmitter = createThrottledEmitter<AggregationChunk>(STREAM_PUSH_INTERVAL_MS, (chunk) => {
+        safeSendMain(IPC_EVENT.MOA_AGGREGATION_CHUNK, chunk)
+      })
+
       // Execute MoA with event emission：事件经 safeSendMain 隔离，窗口销毁不得打断执行与落库
       let moaResult: MoaResponse
       try {
@@ -452,7 +473,7 @@ function registerIpcHandlers() {
           customAggregationPrompt: config.customAggregationPrompt,
           architecture: config.architecture,
           emitSubOutput: (output, index) => {
-            safeSendMain(IPC_EVENT.MOA_SUB_OUTPUT_UPDATE, {
+            const update = {
               index,
               modelId: output.modelId,
               providerId: output.providerId,
@@ -462,13 +483,28 @@ function registerIpcHandlers() {
               durationMs: output.durationMs,
               tokenUsage: output.tokenUsage,
               role: output.role
-            } satisfies SubOutputUpdate)
+            } satisfies SubOutputUpdate
+            const emitter = subEmitterOf(index)
+            if (output.status === 'running') {
+              emitter.push(update)
+            } else {
+              // 终态：立即发终值（丢弃 pending）+ dispose，此后不得再补发旧文本
+              emitter.flush(update)
+              emitter.dispose()
+            }
           },
           emitAggregationStart: () => {
             safeSendMain(IPC_EVENT.MOA_AGGREGATION_START)
           },
           emitAggregationChunk: (text, done) => {
-            safeSendMain(IPC_EVENT.MOA_AGGREGATION_CHUNK, { text, done } satisfies AggregationChunk)
+            const chunk = { text, done } satisfies AggregationChunk
+            if (!done) {
+              aggEmitter.push(chunk)
+            } else {
+              // 终态：立即发终值（丢弃 pending）+ dispose
+              aggEmitter.flush(chunk)
+              aggEmitter.dispose()
+            }
           }
         })
       } catch (err) {
@@ -480,6 +516,10 @@ function registerIpcHandlers() {
           success: false,
           error: `执行异常: ${err instanceof Error ? err.message : String(err)}`
         }
+      } finally {
+        // 一轮结束：清空全部发射器（防泄漏）；已 dispose 的重复调用为无操作
+        for (const emitter of subEmitters.values()) emitter.dispose()
+        aggEmitter.dispose()
       }
 
       // 回填 assistant 占位行（成功/失败均落内容，sub_outputs 记明细）

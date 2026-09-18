@@ -1,5 +1,5 @@
 import { getAllProviders } from '../providers/providerManager'
-import { callSubModel, countSuccessfulSubModels } from './subModelCaller'
+import { callSubModelStream, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, buildCommitteeMessages, getAggregationPrompt, CHAIR_PROMPT_ZH } from './aggregationPrompt'
 import { getRoleTemplate } from '../../shared/moaRoles'
 import { DEFAULT_SUB_MODEL_TIMEOUT, DEFAULT_AGGREGATOR_TIMEOUT } from '../../shared/defaults'
@@ -18,6 +18,8 @@ export interface MoaRequest {
   aggTimeoutMs?: number
   /** 协作架构：缺省 'election'（子模型并行出完整答案，聚合模型拼接提炼） */
   architecture?: MoaArchitecture
+  /** 外部中止信号（网关客户端断开等）：中止后不再发起聚合、进行中调用随之中断（app 内路径不传） */
+  signal?: AbortSignal
 }
 
 export interface MoaResponse {
@@ -35,15 +37,20 @@ export interface MoaResponse {
   error?: string
 }
 
+/** 子模型事件载荷：status 'running' = 流式过程中的累计文本增量（多次发射，仅事件语义、不落库）；success/error = 终态（一次） */
+export interface SubOutputEventPayload extends Omit<SubModelOutput, 'status'> {
+  status: 'running' | 'success' | 'error'
+}
+
 /** 可选的事件回调：事件版入口会注入，纯调用版（executeMoA）不注入 */
 interface MoaEvents {
-  emitSubOutput: (output: SubModelOutput, index: number) => void
+  emitSubOutput: (output: SubOutputEventPayload, index: number) => void
   emitAggregationStart: () => void
   emitAggregationChunk: (text: string, done: boolean) => void
 }
 
 /** Resolve sub-model configs to actual provider URLs, keys, and effective per-sub system prompt. */
-interface ResolvedSubModel {
+export interface ResolvedSubModel {
   providerId: string
   providerBaseUrl: string
   apiKey: string
@@ -53,7 +60,7 @@ interface ResolvedSubModel {
   systemPrompt: string | undefined
 }
 
-function resolveSubModels(subModels: SubModelConfig[], defaultSystemPrompt?: string): ResolvedSubModel[] {
+export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPrompt?: string): ResolvedSubModel[] {
   const providers = getAllProviders()
   return subModels.map((sm) => {
     const p = providers.find((prov) => prov.id === sm.providerId)
@@ -150,14 +157,24 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
   const subsToCall = req.mode === 'direct' ? resolvedSubs.slice(0, 1) : resolvedSubs
 
   const promises = subsToCall.map((sm, index) =>
-    callSubModel({
+    callSubModelStream({
       providerBaseUrl: sm.providerBaseUrl,
       providerId: sm.providerId,
       apiKey: sm.apiKey,
       modelId: sm.modelId,
       messages: req.messages,
       systemPrompt: sm.systemPrompt,
-      timeoutMs
+      timeoutMs,
+      signal: req.signal,
+      // 流式增量 → running 累计事件（引擎不做节流：节流由 host 层 index.ts / 网关广播负责）
+      onDelta: (acc) => {
+        try {
+          events?.emitSubOutput(
+            { modelId: sm.modelId, providerId: sm.providerId || sm.providerBaseUrl, content: acc, status: 'running', role: sm.role },
+            index
+          )
+        } catch { /* 事件失败不影响业务结果 */ }
+      }
     }).then((result) => {
       subOutputs[index] = { ...result, role: sm.role }
       // 事件发射隔离：emit 抛错不得落入下方 .catch 被当作子模型失败处理（否则会用
@@ -182,6 +199,18 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
   )
 
   await Promise.allSettled(promises)
+
+  // ── Abort short-circuit：子模型阶段结束时 signal 已中止（客户端断开）→ 不再发起聚合，直接返回失败。
+  // 与「全部子模型失败」路径区分：error 文案为「已中止」；进行中的调用已随 signal 中断，部分 subOutputs 保留已收文本。
+  if (req.signal?.aborted) {
+    return {
+      type: req.mode,
+      content: '',
+      subOutputs,
+      success: false,
+      error: '已中止'
+    }
+  }
 
   const successfulCount = countSuccessfulSubModels(subOutputs)
 
@@ -256,18 +285,36 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
         aggPrompt
       )
 
-  // Call aggregator
-  const aggResult = await callAggregator(aggInfo, aggMessages, req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT)
+  // Call aggregator：onDelta → 累计文本分块事件（done=false），signal 透传（中止随流中断）
+  const onAggDelta = (acc: string): void => {
+    try { events?.emitAggregationChunk(acc, false) } catch { /* 忽略事件失败 */ }
+  }
+  const aggResult = await callAggregator(
+    aggInfo,
+    aggMessages,
+    req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT,
+    onAggDelta,
+    req.signal
+  )
 
   if (!aggResult.success) {
     // Try fallback aggregator if configured
-    if (req.aggregator?.fallbackProviderId && req.aggregator?.fallbackModelId) {
+    // abort 后不得再发起聚合（含 fallback）：跳过 fallback 直接进入降级返回
+    if (req.aggregator?.fallbackProviderId && req.aggregator?.fallbackModelId && !req.signal?.aborted) {
       const fallbackAgg = resolveAggregator({
         primaryModelId: req.aggregator.fallbackModelId,
         primaryProviderId: req.aggregator.fallbackProviderId
       })
       if (fallbackAgg) {
-        const fallbackResult = await callAggregator(fallbackAgg, aggMessages, req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT)
+        // fallback 聚合重置：primary 失败后先清空已展示的部分文本（节流窗口内被合并覆盖则视觉等价）
+        try { events?.emitAggregationChunk('', false) } catch { /* 忽略事件失败 */ }
+        const fallbackResult = await callAggregator(
+          fallbackAgg,
+          aggMessages,
+          req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT,
+          onAggDelta,
+          req.signal
+        )
         if (fallbackResult.success) {
           try { events?.emitAggregationChunk(fallbackResult.content, true) } catch { /* 忽略事件失败 */ }
           return {
@@ -319,7 +366,7 @@ export function executeMoA(req: MoaRequest): Promise<MoaResponse> {
 }
 
 export interface MoaRequestWithEvents extends MoaRequest {
-  emitSubOutput: (output: SubModelOutput, index: number) => void
+  emitSubOutput: (output: SubOutputEventPayload, index: number) => void
   emitAggregationStart: () => void
   emitAggregationChunk: (text: string, done: boolean) => void
 }
