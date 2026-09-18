@@ -32,6 +32,8 @@ export interface MoaResponse {
   aggregatorContent?: string
   /** 实际使用的聚合模型 usage（主聚合或 fallback 聚合） */
   aggregatorUsage?: { prompt: number; completion: number }
+  /** 聚合模型末帧 finish_reason（'length' = 上游截断；Anthropic 端点映射 stop_reason=max_tokens 用） */
+  aggregatorFinishReason?: string
   /** 实际使用的聚合模型身份（fallback 生效时不是 primary） */
   aggregatorModelId?: string
   aggregatorProviderId?: string
@@ -109,7 +111,8 @@ function resolveAggregator(aggregator: AggregatorConfig): {
 /**
  * Call the aggregator model with built aggregation messages. Return content string.
  * 流式实现（T2）：经 streamChat 收流，onDelta 逐段回调累计文本；signal 透传外部中止。
- * T7：extraBody 透传（tools/tool_choice 等）；返回值带 toolCalls（聚合模型工具调用，转 tool_use 用）。
+ * T7：extraBody 透传（tools/tool_choice 等）；返回值带 toolCalls（聚合模型工具调用，转 tool_use 用）
+ * 与 finishReason（上游截断 'length' 透出，Anthropic 端点映射 max_tokens 用）。
  */
 async function callAggregator(
   aggInfo: { providerBaseUrl: string; apiKey: string; modelId: string },
@@ -118,7 +121,7 @@ async function callAggregator(
   onDelta?: (accumulatedText: string) => void,
   signal?: AbortSignal,
   extraBody?: Record<string, unknown>
-): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[] }> {
+): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[]; finishReason?: string }> {
   const result = await streamChat({
     providerBaseUrl: aggInfo.providerBaseUrl,
     apiKey: aggInfo.apiKey,
@@ -130,13 +133,14 @@ async function callAggregator(
     extraBody
   })
 
-  const output: { content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[] } = {
+  const output: { content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[]; finishReason?: string } = {
     content: result.content,
     success: result.error === undefined
   }
   if (result.error !== undefined) output.error = result.error
   if (result.usage !== undefined) output.usage = result.usage
   if (result.toolCalls !== undefined) output.toolCalls = result.toolCalls
+  if (result.finishReason !== undefined) output.finishReason = result.finishReason
   return output
 }
 
@@ -343,6 +347,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
           }
           // 聚合模型 tool_calls 透出（Anthropic 端点转 tool_use；无则不设字段，向后兼容）
           if (fallbackResult.toolCalls) fallbackResponse.aggregatorToolCalls = fallbackResult.toolCalls
+          if (fallbackResult.finishReason) fallbackResponse.aggregatorFinishReason = fallbackResult.finishReason
           return fallbackResponse
         }
       }
@@ -376,6 +381,8 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
   }
   // 聚合模型 tool_calls 透出（Anthropic 端点转 tool_use；无则不设字段，向后兼容）
   if (aggResult.toolCalls) aggregateResponse.aggregatorToolCalls = aggResult.toolCalls
+  // 聚合末帧 finish_reason 透出（'length' 截断 → Anthropic stop_reason max_tokens；无则不设字段）
+  if (aggResult.finishReason) aggregateResponse.aggregatorFinishReason = aggResult.finishReason
   return aggregateResponse
 }
 

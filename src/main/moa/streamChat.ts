@@ -75,17 +75,19 @@ export interface StreamChatResult {
   usage?: StreamUsage
   /** 工具调用增量累积结果（按 index 归并；无工具调用时省略——向后兼容） */
   toolCalls?: ToolCallResult[]
+  /** 上游末帧 finish_reason（如 'length' 表示被截断）；上游未给时省略——向后兼容 */
+  finishReason?: string
   /** 失败/中止/超时原因；成功时为 undefined */
   error?: string
 }
 
 /** 单次流式尝试的结果：http-400 与 no-sse 是可降级的失败（请求未开始产出） */
 type StreamAttemptResult =
-  | { kind: 'ok'; content: string; usage?: StreamUsage; toolCalls?: ToolCallResult[] }
+  | { kind: 'ok'; content: string; usage?: StreamUsage; toolCalls?: ToolCallResult[]; finishReason?: string }
   | { kind: 'http-400'; error: string }
   | { kind: 'no-sse' }
   | { kind: 'fatal'; error: string }
-  | { kind: 'interrupted'; content: string; usage?: StreamUsage; toolCalls?: ToolCallResult[]; error: string }
+  | { kind: 'interrupted'; content: string; usage?: StreamUsage; toolCalls?: ToolCallResult[]; finishReason?: string; error: string }
 
 /** chat/completions 端点 URL（baseUrl 去尾斜杠后拼接） */
 function chatCompletionsUrl(providerBaseUrl: string): string {
@@ -262,7 +264,7 @@ const RAW_JSON_SALVAGE_MAX = 2 * 1024 * 1024
 
 /** 本地抢救结果：ok = 直回 JSON 即完整 chat/completions 响应（按成功返回）；fail = 不可抢救（走原非流式回退） */
 type SalvageResult =
-  | { kind: 'ok'; content: string; usage?: StreamUsage; toolCalls?: ToolCallResult[] }
+  | { kind: 'ok'; content: string; usage?: StreamUsage; toolCalls?: ToolCallResult[]; finishReason?: string }
   | { kind: 'fail'; reason: string }
 
 /** 拼接原始响应体分块（抢救专用） */
@@ -290,16 +292,18 @@ function salvageJsonBody(parts: Uint8Array[] | null): SalvageResult {
     return { kind: 'fail', reason: `JSON 解析失败：${err instanceof Error ? err.message : String(err)}` }
   }
   if (typeof parsed !== 'object' || parsed === null) return { kind: 'fail', reason: '响应体不是 JSON 对象' }
-  const data = parsed as { choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>; usage?: unknown }
+  const data = parsed as { choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>; usage?: unknown }
   const message = data.choices?.[0]?.message
   const content = message?.content
   const toolCalls = toolCallsFromMessage(message)
   // 纯文本直回要求 content 字符串；仅工具调用（content null/缺省，工具型上游常见）同样可抢救
   if (typeof content !== 'string' && !toolCalls) return { kind: 'fail', reason: '缺少 choices[0].message.content' }
   const usage = toUsage(data.usage)
+  const finishReason = data.choices?.[0]?.finish_reason
   const salvaged: SalvageResult = { kind: 'ok', content: typeof content === 'string' ? content : '' }
   if (usage) salvaged.usage = usage
   if (toolCalls) salvaged.toolCalls = toolCalls
+  if (typeof finishReason === 'string') salvaged.finishReason = finishReason
   return salvaged
 }
 
@@ -350,6 +354,7 @@ async function streamOnce(opts: StreamChatOptions, includeStreamOptions: boolean
   let acc = ''
   let usage: StreamUsage | undefined
   const toolCallAcc = new Map<number, ToolCallResult>()
+  let finishReason: string | undefined // 末帧 finish_reason（'length' 截断等；上游未给则省略）
   let sawDone = false
   let sawBytes = false // 收到过响应体字节（区分 0 字节空流）
   let sawDataEvent = false // 派发过 SSE data 事件（区分「200 但不是 SSE」的 JSON 响应体）
@@ -415,15 +420,16 @@ async function streamOnce(opts: StreamChatOptions, includeStreamOptions: boolean
           }
         }
         if (chunk.usage) usage = chunk.usage
+        if (chunk.finishReason) finishReason = chunk.finishReason
         if (chunk.toolCallsDelta) accumulateToolCalls(toolCallAcc, chunk.toolCallsDelta)
       })
     } catch (err) {
       // [DONE] 已收到后的读取错误（stop() 主动取消 / 服务端 RST）视为正常结束
-      if (sawDone) return { kind: 'ok', content: acc, usage, toolCalls: toolCallsOrUndefined(toolCallAcc) }
+      if (sawDone) return { kind: 'ok', content: acc, usage, toolCalls: toolCallsOrUndefined(toolCallAcc), finishReason }
       const message = opts.signal?.aborted
         ? '已中止'
         : (timeoutNote ?? `流中断：${err instanceof Error ? err.message : String(err)}`)
-      return { kind: 'interrupted', content: acc, usage, toolCalls: toolCallsOrUndefined(toolCallAcc), error: message }
+      return { kind: 'interrupted', content: acc, usage, toolCalls: toolCallsOrUndefined(toolCallAcc), finishReason, error: message }
     }
     // HTTP 200 但响应体不是 SSE（有字节却无任何 data 事件，如中转忽略 stream:true 直接回 JSON）：
     // 先本地抢救：能解析出 choices[0].message.content 即直接按成功返回——零额外请求、保住第一次
@@ -431,11 +437,11 @@ async function streamOnce(opts: StreamChatOptions, includeStreamOptions: boolean
     // 0 字节空流不算（按自然结束成功处理）。
     if (sawBytes && !sawDataEvent) {
       const salvaged = salvageJsonBody(rawChunks)
-      if (salvaged.kind === 'ok') return { kind: 'ok', content: salvaged.content, usage: salvaged.usage, toolCalls: salvaged.toolCalls }
+      if (salvaged.kind === 'ok') return { kind: 'ok', content: salvaged.content, usage: salvaged.usage, toolCalls: salvaged.toolCalls, finishReason: salvaged.finishReason }
       console.warn(`[streamChat] 200 直回响应体本地抢救失败（${salvaged.reason}），改走非流式回退（重发一次）`)
       return { kind: 'no-sse' }
     }
-    return { kind: 'ok', content: acc, usage, toolCalls: toolCallsOrUndefined(toolCallAcc) }
+    return { kind: 'ok', content: acc, usage, toolCalls: toolCallsOrUndefined(toolCallAcc), finishReason }
   } finally {
     clearTimers()
     tapped?.stop() // 失败/超时/中止路径同样断开底层流
@@ -467,7 +473,7 @@ async function requestNonStream(opts: StreamChatOptions): Promise<StreamChatResu
     }
 
     const data = (await resp.json()) as {
-      choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>
+      choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>
       usage?: unknown
     }
     const first = data.choices?.[0]
@@ -477,6 +483,7 @@ async function requestNonStream(opts: StreamChatOptions): Promise<StreamChatResu
     const result: StreamChatResult = { content }
     if (usage) result.usage = usage
     if (toolCalls) result.toolCalls = toolCalls
+    if (typeof first?.finish_reason === 'string') result.finishReason = first.finish_reason
     return result
   } catch (err) {
     const message = opts.signal?.aborted
@@ -523,12 +530,14 @@ export async function streamChat(opts: StreamChatOptions): Promise<StreamChatRes
     const result: StreamChatResult = { content: attempt.content }
     if (attempt.usage) result.usage = attempt.usage
     if (attempt.toolCalls) result.toolCalls = attempt.toolCalls
+    if (attempt.finishReason !== undefined) result.finishReason = attempt.finishReason
     return result
   }
   if (attempt.kind === 'interrupted') {
     const result: StreamChatResult = { content: attempt.content, error: attempt.error }
     if (attempt.usage) result.usage = attempt.usage
     if (attempt.toolCalls) result.toolCalls = attempt.toolCalls
+    if (attempt.finishReason !== undefined) result.finishReason = attempt.finishReason
     return result
   }
   return { content: '', error: attempt.error }

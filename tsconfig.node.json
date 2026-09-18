@@ -10,5 +10,5 @@
     "composite": true,
     "declaration": true
   },
-  "include": ["src/main/**/*", "src/shared/**/*", "electron.vite.config.ts"]
+  "include": ["src/main/**/*", "src/shared/**/*", "src/preload/**/*", "electron.vite.config.ts"]
 }

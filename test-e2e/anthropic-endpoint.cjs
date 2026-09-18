@@ -3,6 +3,8 @@
 // （message_start … message_stop，文本增量真流）+ ③ tools 转换透传（子/聚合请求体断言）
 // ④ 聚合模型 tool_calls → tool_use 块 + stop_reason:'tool_use' ⑤ UI 广播事件照常
 // ⑥ 客户端断开 → abort 链路 ⑦ direct 模式（无聚合）透传 + 事件转换 ⑧ 失败未开流 → Anthropic 错误 JSON
+// ⑨ 聚合截断 finish_reason=length → stop_reason max_tokens（T7-SF1）⑩ 多 index 交织工具帧 /
+//   direct 非流式工具型上游 / compare 模式 / direct 断开与上游失败（T7-SF2：覆盖缺口固化）
 // 用法：node test-e2e/anthropic-endpoint.cjs
 // 加载方式：esbuild bundle（stdin 聚合入口：server / uiBridge / moaConfig 共享同一模块实例）+
 //   plugin stub：electron、../db/database、../config/appSettings、../providers/providerManager、
@@ -133,6 +135,7 @@ async function loadGateway() {
 const mock = {
   requests: [], // { model, stream, body, path, headers }
   scripts: new Map(), // model → { frames, toolFrames, gapMs, usage, finishReason, httpStatus, content }
+  closed: [], // 中途断开（socket 关闭且响应未正常结束）的上游模型：abort 链路断言用
   of(model) { return this.requests.filter((r) => r.model === model) },
   lastBody(model) { const hit = this.of(model).pop(); return hit ? hit.body : null },
   count(model) { return this.of(model).length }
@@ -165,6 +168,8 @@ const sseUsage = (usage) =>
 async function mockHandle(body, res, meta) {
   const model = String(body.model || '')
   mock.requests.push({ model, stream: body.stream === true, body, path: meta.path, headers: meta.headers })
+  // 网关中途断开：socket 关闭且响应未正常结束 → 记为「上游连接被取消」（direct abort 用例断言用）
+  res.on('close', () => { if (!res.writableEnded) mock.closed.push(model) })
   const script = mock.scripts.get(model)
   if (!script) {
     res.writeHead(404, { 'Content-Type': 'application/json' })
@@ -353,7 +358,7 @@ const TOOLS_REQUEST = {
       name: 'Mock',
       baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
       apiKey: 'gw-test-key',
-      models: ['sub-a', 'sub-b', 'sub-slow-a', 'sub-slow-b', 'sub-f', 'agg-1', 'agg-tools', 'agg-dead', 'direct-1'].map((id) => ({ id, name: id, providerId: 'prov-1' })),
+      models: ['sub-a', 'sub-b', 'sub-slow-a', 'sub-slow-b', 'sub-f', 'agg-1', 'agg-tools', 'agg-dead', 'agg-cut', 'agg-cut-tools', 'agg-inter', 'direct-1', 'direct-tc', 'direct-slow', 'direct-fail'].map((id) => ({ id, name: id, providerId: 'prov-1' })),
       enabled: true
     }
   ]
@@ -618,6 +623,150 @@ const TOOLS_REQUEST = {
     ok(typeof body.error.message === 'string' && body.error.message.length > 0, 'error.message 非空', body.error)
     eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 结束')
     eq(evts[evts.length - 1]?.payload.success, false, 'roundDone.success = false')
+  }
+
+  console.log('\n[8] 聚合截断：聚合末帧 finish_reason=length → stop_reason max_tokens（T7-SF1）')
+  {
+    moaConfig.setMoaConfig({ mode: 'aggregate', subModels: SUB_MODELS, aggregator: { primaryModelId: 'agg-cut', primaryProviderId: 'prov-1' } })
+    // content 供非流式 mock 直回；frames 供流式路径（同一 finishReason='length'）
+    mock.scripts.set('agg-cut', { frames: ['截断稿'], content: '截断稿', finishReason: 'length', gapMs: 70, usage: { prompt_tokens: 4, completion_tokens: 5 } })
+
+    const client = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client.status, 200, 'HTTP 200')
+    eq(textOf(client.raw), '截断稿', '截断文本照常送达（真流）')
+    eq(messageDelta(client.raw)?.delta?.stop_reason, 'max_tokens', "流式：聚合 finish_reason=length → message_delta.stop_reason = 'max_tokens'")
+    eq(messageDelta(client.raw)?.usage, { input_tokens: 4, output_tokens: 5 }, 'message_delta.usage = 聚合模型用量')
+
+    const client2 = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 100, stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    const body2 = JSON.parse(client2.raw)
+    eq(body2.content, [{ type: 'text', text: '截断稿' }], '非流式 content = 聚合全文 text 块')
+    eq(body2.stop_reason, 'max_tokens', "非流式：同样映射 'max_tokens'（此前恒 end_turn）")
+
+    // toolCalls 优先于 length：有工具调用时仍为 tool_use
+    moaConfig.setMoaConfig({ mode: 'aggregate', subModels: SUB_MODELS, aggregator: { primaryModelId: 'agg-cut-tools', primaryProviderId: 'prov-1' } })
+    mock.scripts.set('agg-cut-tools', {
+      toolFrames: [{ index: 0, id: 'cut_1', name: 'Read', arguments: '{\"p\":\"a\"}' }],
+      finishReason: 'length',
+      gapMs: 30,
+      usage: { prompt_tokens: 1, completion_tokens: 1 }
+    })
+    const client3 = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] })
+    eq(messageDelta(client3.raw)?.delta?.stop_reason, 'tool_use', '有 toolCalls 时 tool_use 优先于 length')
+  }
+
+  console.log('\n[9] 聚合工具帧多 index 交织：分片按 index 归并、后到 name 不覆盖（T7-SF2①）')
+  {
+    moaConfig.setMoaConfig({ mode: 'aggregate', subModels: SUB_MODELS, aggregator: { primaryModelId: 'agg-inter', primaryProviderId: 'prov-1' } })
+    // 交织：idx0 首片 → idx1 整条 → idx0 尾片 → idx0 补发 name（应被忽略）
+    mock.scripts.set('agg-inter', {
+      toolFrames: [
+        { index: 0, id: 'tu_0', name: 'Write', arguments: '{\"file\":\"a' },
+        { index: 1, id: 'tu_1', name: 'Bash', arguments: '{\"cmd\":\"ls\"}' },
+        { index: 0, arguments: '.txt\",\"body\":\"hi\"}' },
+        { index: 0, name: 'IGNORED', arguments: '' }
+      ],
+      gapMs: 40,
+      usage: { prompt_tokens: 8, completion_tokens: 9 }
+    })
+
+    const client = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client.status, 200, 'HTTP 200')
+    eq(textOf(client.raw), '', '聚合无文本 → 无 text_delta')
+    eq(blockStarts(client.raw), [
+      { type: 'text', text: '' },
+      { type: 'tool_use', id: 'tu_0', name: 'Write', input: {} },
+      { type: 'tool_use', id: 'tu_1', name: 'Bash', input: {} }
+    ], 'tool_use 块顺序 + id/name（后到 name 未覆盖）')
+    const jsonDeltas = parseAnthropicSse(client.raw)
+      .filter((e) => e.event === 'content_block_delta' && e.data?.delta?.type === 'input_json_delta')
+    eq(jsonDeltas.map((e) => e.data.delta.partial_json), ['{\"file\":\"a.txt\",\"body\":\"hi\"}', '{\"cmd\":\"ls\"}'],
+      'input_json_delta = 交织分片拼接后的完整 JSON')
+    eq(jsonDeltas.map((e) => e.data.index), [1, 2], 'input_json_delta 指向各自块 index')
+    eq(eventNames(client.raw), [
+      'message_start',
+      'content_block_start', 'content_block_stop',
+      'content_block_start', 'content_block_delta', 'content_block_stop',
+      'content_block_start', 'content_block_delta', 'content_block_stop',
+      'message_delta', 'message_stop'
+    ], '事件序列严格顺序（块 start/stop 配对，start/stop 各恰一次）')
+    eq(messageDelta(client.raw)?.delta?.stop_reason, 'tool_use', "stop_reason = 'tool_use'")
+    eq(messageDelta(client.raw)?.usage, { input_tokens: 8, output_tokens: 9 }, 'usage = 聚合用量')
+    ok(!client.raw.includes('[DONE]'), '无 OpenAI [DONE] 帧')
+  }
+
+  console.log('\n[10] direct 非流式工具型上游：content:null + tool_calls → tool_use 块（T7-SF2②）')
+  {
+    moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
+    mock.scripts.set('direct-tc', {
+      toolFrames: [{ index: 0, id: 'c1', name: 'Read', arguments: '{\"path\":\"x.ts\"}' }],
+      usage: { prompt_tokens: 2, completion_tokens: 3 }
+    })
+
+    const client = await messagesRequest(GW_PORT, { model: 'direct-tc', max_tokens: 100, stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client.status, 200, 'HTTP 200')
+    const body = JSON.parse(client.raw)
+    eq(body.type, 'message', "type = 'message'")
+    eq(body.content, [{ type: 'tool_use', id: 'c1', name: 'Read', input: { path: 'x.ts' } }],
+      'content:null + tool_calls → 仅 tool_use 块（无空文本块）')
+    eq(body.stop_reason, 'tool_use', "stop_reason = 'tool_use'")
+    eq(body.usage, { input_tokens: 2, output_tokens: 3 }, 'usage 来自上游 JSON')
+  }
+
+  console.log('\n[11] compare 模式：子模型对照汇总（流式 + 非流式）（T7-SF2③）')
+  {
+    moaConfig.setMoaConfig({ mode: 'compare', subModels: SUB_MODELS, aggregator: null })
+
+    const mark = uiMark()
+    const client = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] })
+    const evts = uiSince(mark)
+    eq(client.status, 200, 'HTTP 200')
+    eq(eventNames(client.raw), [
+      'message_start', 'content_block_start', 'content_block_delta', 'content_block_stop', 'message_delta', 'message_stop'
+    ], 'compare 流式事件序列（单文本块）')
+    ok(textOf(client.raw).includes('sub-a') && textOf(client.raw).includes('sub-b'),
+      'compare 流式内容 = 子模型对照汇总（两子模型均在）', textOf(client.raw).slice(0, 120))
+    eq(messageDelta(client.raw)?.delta?.stop_reason, 'end_turn', 'compare stop_reason = end_turn')
+    eq(chanCount(evts, 'gateway:aggStart'), 0, 'compare 无聚合：无 aggStart')
+    eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 收尾')
+
+    const client2 = await messagesRequest(GW_PORT, { model: 'sub-a', max_tokens: 100, stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    const body2 = JSON.parse(client2.raw)
+    eq(body2.content?.[0]?.type, 'text', 'compare 非流式 = 单 text 块')
+    ok(String(body2.content?.[0]?.text).includes('sub-a') && String(body2.content?.[0]?.text).includes('sub-b'),
+      'compare 非流式内容含两子模型')
+    eq(body2.stop_reason, 'end_turn', '非流式 stop_reason = end_turn')
+  }
+
+  console.log('\n[12] direct 断开与上游失败：上游恰一次 + 连接被取消 + 错误体（T7-SF2④）')
+  {
+    moaConfig.setMoaConfig({ mode: 'direct', subModels: [], aggregator: null })
+
+    // 上游失败：502 Anthropic 错误 JSON + roundDone error（非 SSE）
+    mock.scripts.set('direct-fail', { httpStatus: 503 })
+    const markFail = uiMark()
+    const clientFail = await messagesRequest(GW_PORT, { model: 'direct-fail', max_tokens: 50, stream: false, messages: [{ role: 'user', content: 'h' }] })
+    eq(clientFail.status, 502, '上游 503 → 网关 502')
+    const bodyFail = JSON.parse(clientFail.raw)
+    eq(bodyFail.type, 'error', "错误体 type = 'error'")
+    ok(String(bodyFail.error?.message).includes('503'), '错误信息含上游状态', bodyFail.error)
+    const evtsFail = uiSince(markFail)
+    eq(evtsFail[evtsFail.length - 1]?.channel, 'gateway:roundDone', 'roundDone 收尾')
+    eq(evtsFail[evtsFail.length - 1]?.payload.success, false, 'roundDone.success = false')
+
+    // 客户端中途断开：上游恰一次调用 + 上游连接被取消（socket 关闭）+ roundDone success:false
+    mock.scripts.set('direct-slow', { frames: ['慢1', '慢2', '慢3'], gapMs: 400 })
+    const markAbort = uiMark()
+    const beforeAbort = mock.count('direct-slow')
+    const clientPromise = messagesRequest(GW_PORT, { model: 'direct-slow', max_tokens: 50, stream: true, messages: [{ role: 'user', content: 'h' }] }, { destroyAfterMs: 150 })
+    await waitFor(() => mock.count('direct-slow') > beforeAbort, 2000)
+    const clientAbort = await clientPromise
+    ok(Boolean(clientAbort.error) || Boolean(clientAbort.closed), '客户端已断开（连接销毁）')
+    const doneEvt = await waitFor(() => gw.broadcasts.slice(markAbort).find((e) => e.channel === 'gateway:roundDone'), 3000)
+    ok(Boolean(doneEvt), 'roundDone 已广播')
+    eq(doneEvt?.payload.success, false, '提前断开 → roundDone.success = false')
+    eq(mock.count('direct-slow') - beforeAbort, 1, '上游恰一次调用（未重发）')
+    await waitFor(() => mock.closed.includes('direct-slow'), 1500)
+    ok(mock.closed.includes('direct-slow'), '上游连接被取消（socket 关闭）', mock.closed)
   }
 
   console.log('\n──────────────────────────────')

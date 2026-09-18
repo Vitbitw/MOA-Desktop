@@ -2,7 +2,7 @@
 // 覆盖：① roundStart 替换旧轮 + pending 占位生成（按 index 排序）
 //      ② subUpdate 累计覆盖 + 乱序 index 排序插入 + 占位角色保留
 //      ③ aggStart / aggChunk（累计覆盖 + done 终态收口）
-//      ④ roundDone（正常完成 / aborted 中止）
+//      ④ roundDone（正常完成 / aborted 中止——含聚合进行中中止的 aggRunning 收口）
 //      ⑤ 迟到 roundId 忽略（含无当前轮时）
 //      ⑥ dismiss / restore
 //      ⑦ 完整一轮状态终值
@@ -212,6 +212,18 @@ function roundSnap(store) {
     eq(r5.error, '已中止', 'error 保留引擎文案')
     eq(r5.subOutputs[0].content, '半段文本', '直播停在中断处：已收文本保留')
     eq(r5.subOutputs[1].status, 'pending', '未开始的子模型保持 pending')
+
+    // 聚合进行中中止（done 终态帧可能缺席）：roundDone 必须一并收口 aggRunning（防「生成中」永挂）
+    S().handleRoundStart({ roundId: 'r5b', mode: 'aggregate', subModels: [{ index: 0, modelId: 'm-a', role: '' }] })
+    S().handleSubUpdate({ roundId: 'r5b', index: 0, modelId: 'm-a', providerId: 'p1', content: '已流出半段', status: 'running' })
+    S().handleAggStart({ roundId: 'r5b' })
+    S().handleAggChunk({ roundId: 'r5b', text: '聚合半段', done: false })
+    eq(S().round.aggRunning, true, '前置：聚合进行中（aggRunning=true）')
+    S().handleRoundDone({ roundId: 'r5b', success: false, error: '已中止', aborted: true, durationMs: 20 })
+    const r5b = S().round
+    eq([r5b.running, r5b.aggRunning], [false, false], '聚合中途中止 → roundDone 收口 [running=false, aggRunning=false]')
+    eq([r5b.aborted, r5b.success], [true, false], '中止状态：[aborted=true, success=false]')
+    eq([r5b.aggText, r5b.subOutputs[0].content], ['聚合半段', '已流出半段'], '中止后已流出内容保留（直播停在中断处）')
   }
 
   console.log('\n[5] 迟到事件：roundId 不匹配当前轮一律忽略')

@@ -1151,9 +1151,10 @@ export function createGatewayServer(): Express {
       error: ok ? null : aborted ? '客户端断开中止' : (result.error || 'MoA execution failed')
     })
 
-    // 聚合模型 tool_calls → Anthropic tool_use 块；stop_reason 由转换层映射（有工具 → tool_use）
+    // 聚合模型 tool_calls → Anthropic tool_use 块；stop_reason 由转换层映射：
+    // 有工具 → tool_use 优先；无工具时透出聚合末帧 finish_reason（'length'/'max_tokens' → max_tokens；'stop'/无 → end_turn）
     const aggToolCalls = result.aggregatorToolCalls
-    const finishReason: string = aggToolCalls && aggToolCalls.length > 0 ? 'tool_calls' : 'stop'
+    const finishReason: string | undefined = result.aggregatorFinishReason
 
     // ── 对外响应收尾 ──
     if (aborted) {
