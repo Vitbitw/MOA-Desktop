@@ -3,7 +3,7 @@ import { callSubModel, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, buildCommitteeMessages, getAggregationPrompt, CHAIR_PROMPT_ZH } from './aggregationPrompt'
 import { getRoleTemplate } from '../../shared/moaRoles'
 import { DEFAULT_SUB_MODEL_TIMEOUT, DEFAULT_AGGREGATOR_TIMEOUT } from '../../shared/defaults'
-import { fetchProxy } from '../local/fetchProxy'
+import { streamChat } from './streamChat'
 import type { SubModelConfig, AggregatorConfig, SubModelOutput, MoaArchitecture, SubModelRole } from '../../shared/types'
 
 export interface MoaRequest {
@@ -94,46 +94,34 @@ function resolveAggregator(aggregator: AggregatorConfig): {
   }
 }
 
-/** Call the aggregator model with built aggregation messages. Return content string. */
+/**
+ * Call the aggregator model with built aggregation messages. Return content string.
+ * 流式实现（T2）：经 streamChat 收流，onDelta 逐段回调累计文本；signal 透传外部中止。
+ */
 async function callAggregator(
   aggInfo: { providerBaseUrl: string; apiKey: string; modelId: string },
   messages: Array<{ role: string; content: string }>,
-  timeoutMs: number
+  timeoutMs: number,
+  onDelta?: (accumulatedText: string) => void,
+  signal?: AbortSignal
 ): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number } }> {
-  try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (aggInfo.apiKey) headers.Authorization = `Bearer ${aggInfo.apiKey}`
-    const resp = await fetchProxy(`${aggInfo.providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: aggInfo.modelId,
-        messages,
-        stream: false
-      }),
-      signal: AbortSignal.timeout(timeoutMs)
-    })
+  const result = await streamChat({
+    providerBaseUrl: aggInfo.providerBaseUrl,
+    apiKey: aggInfo.apiKey,
+    modelId: aggInfo.modelId,
+    messages,
+    timeoutMs,
+    signal,
+    onDelta
+  })
 
-    if (!resp.ok) {
-      const errText = await resp.text()
-      return { content: '', success: false, error: `HTTP ${resp.status}: ${errText.slice(0, 300)}` }
-    }
-
-    const data = await resp.json()
-    // 解析 usage 用量（prompt/completion tokens），供用量监控使用
-    const usage = data.usage || {}
-    return {
-      content: data.choices?.[0]?.message?.content || '',
-      success: true,
-      usage: {
-        prompt: usage.prompt_tokens || 0,
-        completion: usage.completion_tokens || 0
-      }
-    }
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { content: '', success: false, error: msg }
+  const output: { content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number } } = {
+    content: result.content,
+    success: result.error === undefined
   }
+  if (result.error !== undefined) output.error = result.error
+  if (result.usage !== undefined) output.usage = result.usage
+  return output
 }
 
 /**
