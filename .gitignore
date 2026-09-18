@@ -49,6 +49,11 @@ test-e2e/stub.js
 test-e2e/stub-transcript.txt
 test-e2e/probe-migration.js
 test-e2e/probe-wasm.js
+# test-e2e 内的 Command Code 额度对照诊断脚本（排查“App 与官网数字不一致”用的一次性工具，不参与版本控制）
+test-e2e/probe-cc-credits.cjs
+test-e2e/probe-cc-app-refresh.cjs
+test-e2e/probe-cc-usage-requests.cjs
+test-e2e/cc-app-bundle.cjs
 
 # Hermes / AI辅助开发
 .hermes/
