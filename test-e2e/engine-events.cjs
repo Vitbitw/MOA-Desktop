@@ -382,6 +382,79 @@ const AGG_CONFIG = { primaryProviderId: 'p1', primaryModelId: 'agg-primary', fal
     eq(resolved[0].role, '', '未配角色 → 空角色')
   }
 
+  console.log('\n[6] 聚合进行中 abort：primary 流中途中止 → 不发起 fallback（守卫）+ 无重置帧')
+  {
+    reset()
+    ctl.subScripts.set('sub-a', { deltas: ['甲'] })
+    ctl.aggScripts.set('agg-primary', { deltas: ['主1', '主2', '主3'], stepDelayMs: 5 })
+    ctl.aggScripts.set('agg-fallback', { deltas: ['不该出现'], error: '不该发起 fallback' })
+    const { events, opts } = collector()
+    const ctrl = new AbortController()
+    // 真实时序：聚合流逐帧回调，收到第 2 帧（'主2'）后同步 abort（模拟客户端断开）；
+    // stub 在该帧回调后的中断检查处观察到已中止 → 中断聚合流（保留已收文本 + error 已中止）
+    opts.emitAggregationChunk = (text, done) => {
+      events.push({ type: 'aggChunk', text, done })
+      if (text === '主2') ctrl.abort()
+    }
+    const res = await engine.executeMoAWithEvents(
+      Object.assign(
+        {
+          messages: [{ role: 'user', content: '问题' }],
+          subModels: [subOf('sub-a', 'p1')],
+          aggregator: AGG_CONFIG,
+          mode: 'aggregate',
+          signal: ctrl.signal
+        },
+        opts
+      )
+    )
+
+    ok(events.some((e) => e.type === 'aggStart'), '中止前已进入聚合阶段（aggStart 已在流中发出）')
+    eq(aggChunksOf(events), ['主1/false', '主2/false', '/true'], '事件序列：已收聚合帧 ×2 → 空终态帧（无 fallback 分块）')
+    eq(events.filter((e) => e.type === 'aggChunk' && e.text === '' && e.done === false).length, 0, '无 fallback 重置帧（emitAggregationChunk("", false) 零次）')
+    eq(ctl.aggCalls.map((c) => c.modelId), ['agg-primary'], '聚合调用仅 primary（abort 后不发起 fallback，零额外费用）')
+    eq(res.success, false, '中止 → success:false')
+    eq(res.error, '聚合失败：已中止。子模型输出可在对比视图中查看。', 'error 走聚合降级文案（原因 = 已中止）')
+    eq(res.content, '', 'content 为空（聚合未产出可用终态）')
+    eq(res.subOutputs.map((o) => o.status + ':' + o.content), ['success:甲'], '子模型输出保留（已收文本不丢）')
+  }
+
+  console.log('\n[7] fallback 进行中 abort：fallback 流中途中止 → 降级返回 success:false')
+  {
+    reset()
+    ctl.subScripts.set('sub-a', { deltas: ['甲'] })
+    ctl.aggScripts.set('agg-primary', { deltas: ['主1'], error: '主聚合失败' })
+    ctl.aggScripts.set('agg-fallback', { deltas: ['替1', '替2', '替3'], stepDelayMs: 5 })
+    const { events, opts } = collector()
+    const ctrl = new AbortController()
+    // fallback 流第 2 帧（'替2'）后同步 abort：中止点在守卫检查（primary 失败时）之后，故 fallback 已合法发起
+    opts.emitAggregationChunk = (text, done) => {
+      events.push({ type: 'aggChunk', text, done })
+      if (text === '替2') ctrl.abort()
+    }
+    const res = await engine.executeMoAWithEvents(
+      Object.assign(
+        {
+          messages: [{ role: 'user', content: '问题' }],
+          subModels: [subOf('sub-a', 'p1')],
+          aggregator: AGG_CONFIG,
+          mode: 'aggregate',
+          signal: ctrl.signal
+        },
+        opts
+      )
+    )
+
+    eq(aggChunksOf(events), ['主1/false', '/false', '替1/false', '替2/false', '/true'], '事件序列：primary 部分文本 → 重置帧 → fallback 已收帧 → 空终态帧（第三帧不再到达）')
+    eq(ctl.aggCalls.map((c) => c.modelId), ['agg-primary', 'agg-fallback'], 'primary 失败时尚未中止 → fallback 正常发起（守卫不误伤）')
+    eq(res.success, false, 'fallback 中途中止 → success:false')
+    // 注：降级文案沿用 aggResult（primary）的失败原因，fallback 的中止原因不透传——现行实现行为，据此写死
+    eq(res.error, '聚合失败：主聚合失败。子模型输出可在对比视图中查看。', 'error 走聚合降级文案（当前实现取 primary 失败原因）')
+    eq(res.content, '', 'content 为空（不返回被中止的 fallback 半成品）')
+    eq(res.aggregatorModelId, undefined, 'fallback 未成功 → 不标注聚合模型身份')
+    eq(res.subOutputs.map((o) => o.status + ':' + o.content), ['success:甲'], '子模型输出保留（已收文本不丢）')
+  }
+
   console.log('\n──────────────────────────────')
   console.log(`通过 ${pass} / 失败 ${fail}`)
   process.exit(fail === 0 ? 0 : 1)
