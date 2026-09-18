@@ -37,6 +37,8 @@ const parts = [
   fn('parseUsageCharts'),
   fn('aggregateChartRows'),
   fn('parseSummary'),
+  grab('CC_PLAN_TIERS', /const CC_PLAN_TIERS[\s\S]*?\n}/),
+  fn('computeMonthlyWindow'),
   fn('classifyTotalFailure'),
   fn('aggregateRecords')
 ]
@@ -50,7 +52,7 @@ function makeFactory(ccGet) {
   const f = new Function(
     'ccGet',
     cache.js +
-      '\n; return { fetchUsageRecords, fetchUsagePages, aggregateRecords, parseUsageRecord, parseUsagePage, parseSummary, parseUsageCharts, aggregateChartRows, recordTimeRange, classifyTotalFailure, USAGE_MAX_PAGES, USAGE_PAGE_SIZE, USAGE_PROBE_PAGE_SIZE }'
+      '\n; return { fetchUsageRecords, fetchUsagePages, aggregateRecords, parseUsageRecord, parseUsagePage, parseSummary, computeMonthlyWindow, parseUsageCharts, aggregateChartRows, recordTimeRange, classifyTotalFailure, USAGE_MAX_PAGES, USAGE_PAGE_SIZE, USAGE_PROBE_PAGE_SIZE }'
   )
   return f(ccGet)
 }
@@ -346,6 +348,30 @@ console.log('\n[1] parseUsageRecord：模型名与成本口径')
     eq(f.parseUsageCharts({ data: [mk('x', 't', 1, 1)] }).rows.length, 1, 'data 数组兼容')
     ok(f.parseUsageCharts({ message: 'nope' }) === null, '无法识别 → null（区块级降级）')
     ok(f.parseUsageCharts({ 0: { provider: 'x' } }) === null, '行内无 model → null')
+  }
+
+  console.log('\n[11] computeMonthlyWindow：月度额度（官网口径 = 1 − 余额/套餐额度）')
+  {
+    const f = factory(() => {})
+    // GOAT：套餐额度 70，余额 48.418 → 已用 21.582 → 30.83%
+    const goat = f.computeMonthlyWindow({ planId: 'individual-goat', status: 'active', monthlyCredits: 48.418, currentPeriodEndTs: 1790000000 })
+    eq(goat.usedPercent.toFixed(2), '30.83', 'GOAT：已用% = 1 − 余额/70')
+    eq(goat.resetAt, 1790000000, 'resetAt = 账单周期结束时间')
+    eq(
+      f.computeMonthlyWindow({ planId: 'individual-go', monthlyCredits: 5, monthlyCreditsGranted: 45 }).usedPercent.toFixed(2),
+      '88.89',
+      'monthlyCreditsGranted > 套餐额度 → cap 取 granted'
+    )
+    eq(
+      f.computeMonthlyWindow({ planId: 'teams-pro', quantity: 3, monthlyCredits: 30 }).usedPercent.toFixed(2),
+      '75.00',
+      'org 套餐：cap = 基础额度 × 席位'
+    )
+    ok(f.computeMonthlyWindow({ planId: 'nope', monthlyCredits: 1 }) === undefined, '未知套餐 → undefined（不显示百分比）')
+    ok(f.computeMonthlyWindow({ planId: 'individual-goat', status: 'past_due', monthlyCredits: 1 }) === undefined, 'past_due → 隐藏计量（官网行为）')
+    ok(f.computeMonthlyWindow({ planId: 'individual-goat' }) === undefined, '无余额数据 → undefined')
+    eq(f.computeMonthlyWindow({ planId: 'individual-goat', monthlyCredits: 0 }).usedPercent, 100, '余额 0 → 已用 100% 封顶')
+    eq(f.computeMonthlyWindow({ planId: 'individual-goat', monthlyCredits: 80 }).usedPercent, 0, '余额 > cap（追加额度）→ 已用 0（官网同此夹取）')
   }
 
   console.log('\n──────────────────────────────')

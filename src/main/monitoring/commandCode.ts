@@ -237,6 +237,8 @@ interface WindowsParse {
   fiveHour?: UsageWindowInfo
   weekly?: UsageWindowInfo
   monthlyCredits?: number
+  /** 订阅赠送的月度额度（monthlyCreditsGranted；null/缺失 = undefined） */
+  monthlyCreditsGranted?: number
 }
 
 /** 解析 5h/7d 窗口响应。
@@ -271,10 +273,12 @@ function parseWindows(body: unknown): WindowsParse | null {
     parseWindow(root.secondary_window ?? root.secondary)
 
   const monthlyCredits = toNum(creditsObj?.monthlyCredits ?? creditsObj?.monthly_credits ?? root.monthlyCredits ?? root.monthly_credits)
+  // 订阅赠送额度（null/缺失 → undefined；计算侧仅在 > 0 时覆盖套餐基础额度）
+  const monthlyCreditsGranted = toNum(creditsObj?.monthlyCreditsGranted ?? creditsObj?.monthly_credits_granted)
 
   const hasWindow = fiveHour || weekly
   const hasCredits = monthlyCredits !== undefined
-  return hasWindow || hasCredits ? { ...(fiveHour ? { fiveHour } : {}), ...(weekly ? { weekly } : {}), ...(monthlyCredits !== undefined ? { monthlyCredits } : {}) } : null
+  return hasWindow || hasCredits ? { ...(fiveHour ? { fiveHour } : {}), ...(weekly ? { weekly } : {}), ...(monthlyCredits !== undefined ? { monthlyCredits } : {}), ...(monthlyCreditsGranted !== undefined ? { monthlyCreditsGranted } : {}) } : null
 }
 
 /** mode → 展示名（与 Studio 前端常量一致；不在表内的 mode 缺失模型名时原样兜底） */
@@ -865,6 +869,8 @@ function parseSubscription(body: unknown): SubscriptionParse | null {
   if (planId) sub.planId = planId
   const status = str(obj.status)
   if (status) sub.status = status
+  const quantity = toNum(obj.quantity)
+  if (quantity !== undefined) sub.quantity = quantity
 
   const periodEndRaw = obj.currentPeriodEnd ?? obj.current_period_end ?? obj.periodEnd ?? obj.period_end
   if (typeof periodEndRaw === 'string' && periodEndRaw.trim() !== '') sub.currentPeriodEnd = periodEndRaw
@@ -904,6 +910,55 @@ function parseSubscription(body: unknown): SubscriptionParse | null {
 
   if (Object.keys(sub).length === 0) return { none: true }
   return { none: false, subscription: sub }
+}
+
+// ─── 月度额度（账单月）：官网口径 = 已用% 由「余额 vs 套餐额度」推出 ───
+
+/**
+ * 套餐目录：planId → 月度额度上限（美元）与套餐类型。
+ * 与官网前端 plan-tiers 常量对齐（2026-09-18 从线上 chunk 实测提取；官网调价时需同步）。
+ * 未知 planId → 不显示月度百分比（官网同样在无套餐信息时不渲染计量条）。
+ */
+export const CC_PLAN_TIERS: Record<string, { credits: number; type: 'individual' | 'org' }> = {
+  'individual-provider': { credits: 15, type: 'individual' },
+  'individual-go': { credits: 10, type: 'individual' },
+  'individual-goat': { credits: 70, type: 'individual' },
+  'individual-pro': { credits: 30, type: 'individual' },
+  'individual-pro-v1': { credits: 80, type: 'individual' },
+  'individual-max': { credits: 150, type: 'individual' },
+  'individual-ultra': { credits: 300, type: 'individual' },
+  'teams-pro': { credits: 40, type: 'org' }
+}
+
+/**
+ * 计算月度额度窗口（官网公式，来源：官网 monthly-usage-meter 模块实测）：
+ *   cap = 套餐额度；monthlyCreditsGranted > 0 时 cap = max(granted, 套餐额度)；
+ *   org 套餐 cap × 席位（至少 1）。used = cap − 余额（夹在 [0, cap]），used% = used/cap。
+ * 官网在 past_due（扣款失败）或拿不到套餐信息时隐藏计量条 → 这里同样返回 undefined。
+ */
+export function computeMonthlyWindow(input: {
+  planId?: string
+  status?: string
+  quantity?: number
+  monthlyCredits?: number
+  monthlyCreditsGranted?: number
+  currentPeriodEndTs?: number
+}): UsageWindowInfo | undefined {
+  const tier = input.planId ? CC_PLAN_TIERS[input.planId] : undefined
+  if (!tier || input.status === 'past_due' || input.monthlyCredits === undefined) return undefined
+  let cap = tier.credits
+  if (input.monthlyCreditsGranted !== undefined && input.monthlyCreditsGranted > 0) {
+    cap = Math.max(input.monthlyCreditsGranted, cap)
+  }
+  if (tier.type === 'org') {
+    const seats = Math.floor(input.quantity ?? 1)
+    if (Number.isFinite(seats) && seats >= 1) cap *= seats
+  }
+  if (cap <= 0) return undefined
+  const used = Math.max(0, Math.min(cap, cap - Math.max(0, input.monthlyCredits)))
+  const info: UsageWindowInfo = { usedPercent: Math.min(100, (used / cap) * 100) }
+  if (input.currentPeriodEndTs !== undefined) info.resetAt = input.currentPeriodEndTs
+  return info
 }
 
 // ─── 主入口：拉取并归一化 ───
@@ -996,7 +1051,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   let credits: { monthlyCredits: number } | undefined
   let windows: CommandCodeUsage['windows'] | undefined
 
-  // 从某响应提取 { windows?, monthlyCredits? }（支持 windowLimits，如 /internal 与 /alpha 同构）
+  // 从某响应提取 { windows?, monthlyCredits?, monthlyCreditsGranted? }（支持 windowLimits，如 /internal 与 /alpha 同构）
   const extract = (res: CcResponse | null) => {
     if (!res || res.status !== 200) return null
     const parsed = parseWindows(res.body)
@@ -1004,7 +1059,11 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     const w: NonNullable<CommandCodeUsage['windows']> = {}
     if (parsed.fiveHour) w.fiveHour = parsed.fiveHour
     if (parsed.weekly) w.weekly = parsed.weekly
-    return { windows: Object.keys(w).length > 0 ? w : undefined, monthlyCredits: parsed.monthlyCredits }
+    return {
+      windows: Object.keys(w).length > 0 ? w : undefined,
+      monthlyCredits: parsed.monthlyCredits,
+      monthlyCreditsGranted: parsed.monthlyCreditsGranted
+    }
   }
 
   // ① /internal/billing/credits（纯登录 cookie）→ 月度余额 + 5h/7d 窗口
@@ -1015,6 +1074,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     windows = extInternal.windows
     sourcesAvailable.windows = true
   }
+  let monthlyCreditsGranted = extInternal?.monthlyCreditsGranted
 
   // ② /alpha/billing/credits（Provider API Key）仅作兜底：internal 缺窗口时再取
   if (!windows || !extInternal) {
@@ -1028,6 +1088,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
         credits = { monthlyCredits: extAlpha.monthlyCredits }
         sourcesAvailable.credits = true
       }
+      if (monthlyCreditsGranted === undefined) monthlyCreditsGranted = extAlpha.monthlyCreditsGranted
     }
   }
 
@@ -1042,6 +1103,17 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     sourcesAvailable.subscription = true
     if (!parsedSub.none && parsedSub.subscription) subscription = parsedSub.subscription
   }
+
+  // ④ 月度窗口（账单月）：官网口径已用% = 1 − 余额/套餐月度额度（目录见 CC_PLAN_TIERS；org 套餐 × 席位）
+  const monthlyWindow = computeMonthlyWindow({
+    ...(subscription?.planId ? { planId: subscription.planId } : {}),
+    ...(subscription?.status ? { status: subscription.status } : {}),
+    ...(subscription?.quantity !== undefined ? { quantity: subscription.quantity } : {}),
+    ...(monthlyCreditsGranted !== undefined ? { monthlyCreditsGranted } : {}),
+    ...(credits?.monthlyCredits !== undefined ? { monthlyCredits: credits.monthlyCredits } : {}),
+    ...(subscription?.currentPeriodEndTs !== undefined ? { currentPeriodEndTs: subscription.currentPeriodEndTs } : {})
+  })
+  if (monthlyWindow) windows = { ...(windows ?? {}), monthly: monthlyWindow }
 
   // ⑤ /internal/usage/charts：服务端「模型 × 时间桶」聚合 → 本月按模型明细（与汇总同口径）
   const chartsRes = get(5)

@@ -209,6 +209,8 @@ export interface CommandCodeSubscription {
   planId?: string
   /** 订阅状态（active / trialing / past_due / canceled / inactive，未知值原样保留） */
   status?: string
+  /** 席位数量（org 套餐月度额度 = 基础额度 × 席位；缺失视为 1） */
+  quantity?: number
   /** 当前计费周期结束时间：ISO 原样保留（若有）。续费开启时为「下次续费时间」，排定取消时为「服务到期时间」 */
   currentPeriodEnd?: string
   /** 当前周期结束时间归一化（epoch 秒；兼容 ISO / epoch 秒 / epoch 毫秒来源） */
@@ -252,7 +254,8 @@ export interface CommandCodeUsage {
     periodBasis?: string
   }
   credits?: { monthlyCredits: number }
-  windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo }
+  /** 额度窗口：5h/7d 滚动窗口；monthly = 账单月额度（已用% 按官网口径推算，见 computeMonthlyWindow） */
+  windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo; monthly?: UsageWindowInfo }
   /** 订阅套餐（含到期时间）；无订阅时 absent（sourcesAvailable.subscription 仍为 true） */
   subscription?: CommandCodeSubscription
   models?: Array<{

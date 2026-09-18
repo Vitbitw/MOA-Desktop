@@ -53,6 +53,7 @@ test-e2e/probe-wasm.js
 test-e2e/probe-cc-credits.cjs
 test-e2e/probe-cc-app-refresh.cjs
 test-e2e/probe-cc-usage-requests.cjs
+test-e2e/probe-cc-monthly-cap.cjs
 test-e2e/cc-app-bundle.cjs
 
 # Hermes / AI辅助开发

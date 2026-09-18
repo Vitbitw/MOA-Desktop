@@ -104,8 +104,8 @@ function WindowCard({
       ) : info && used !== undefined ? (
         <>
           <div className={`flex items-baseline justify-between mb-1.5 ${staleAfterReset ? 'opacity-40' : ''}`}>
-            <span className="text-lg font-semibold tabular-nums text-foreground">{Math.round(used)}% 已用</span>
-            <span className="text-xs text-muted-foreground">{100 - Math.round(used)}% 剩余</span>
+            <span className="text-lg font-semibold tabular-nums text-foreground">{used.toFixed(2)}% 已用</span>
+            <span className="text-xs text-muted-foreground">{(100 - used).toFixed(2)}% 剩余</span>
           </div>
           <div className={`h-1.5 rounded-full bg-muted overflow-hidden ${staleAfterReset ? 'opacity-40' : ''}`}>
             <div className={`h-full rounded-full ${barColor(used)}`} style={{ width: `${Math.min(100, used)}%` }} />
@@ -116,6 +116,51 @@ function WindowCard({
         </>
       ) : (
         <div className="text-sm text-muted-foreground">暂无数据</div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 月度额度卡（账单月）。已用% 与官网同口径：1 − 余额 ÷ 套餐月度额度（见主进程 computeMonthlyWindow）；
+ * 拿不到百分比（无套餐/未知套餐/扣款失败）时退回只显示余额。
+ */
+function MonthlyCard({
+  credits,
+  window: win,
+  resetAtTs,
+  currency
+}: {
+  credits?: number
+  window?: UsageWindowInfo
+  /** 账单周期结束时间（epoch 秒）——额度重置时刻 */
+  resetAtTs?: number
+  currency: 'USD' | 'CNY'
+}) {
+  const used = win?.usedPercent
+  return (
+    <div
+      className="rounded-lg border border-border bg-card px-4 py-3"
+      title="已用% = 1 − 余额 ÷ 套餐月度额度（与官网口径一致）；额度在账单周期结束时重置"
+    >
+      <div className="text-xs text-muted-foreground mb-2">月度额度</div>
+      {used !== undefined && credits !== undefined ? (
+        <>
+          <div className="flex items-baseline justify-between mb-1.5">
+            <span className="text-lg font-semibold tabular-nums text-foreground">{used.toFixed(2)}% 已用</span>
+            <span className="text-xs text-muted-foreground">余额 {formatCost(credits, currency)}</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+            <div className={`h-full rounded-full ${barColor(used)}`} style={{ width: `${Math.min(100, used)}%` }} />
+          </div>
+          {resetAtTs !== undefined && (
+            <div className="mt-1.5 text-xs text-muted-foreground">{fmtMonthDayUtc(resetAtTs)}重置</div>
+          )}
+        </>
+      ) : (
+        <div className="text-lg font-semibold tabular-nums text-foreground">
+          {credits !== undefined ? formatCost(credits, currency) : '暂无数据'}
+        </div>
       )}
     </div>
   )
@@ -161,6 +206,12 @@ function fmtDateUtc(sec: number): string {
     month: 'long',
     day: 'numeric'
   })
+}
+
+/** epoch 秒 → 「9月26日」短日期（UTC 口径，与 Studio 月度额度 resets 日期一致） */
+function fmtMonthDayUtc(sec: number): string {
+  const d = new Date(sec * 1000)
+  return `${d.getUTCMonth() + 1}月${d.getUTCDate()}日`
 }
 
 /** 订阅套餐区：套餐名 / 「状态与到期时间」合并卡（含剩余天数与排定取消提示） */
@@ -687,12 +738,12 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
                 fetchedAt={lastFetchedAt ?? undefined}
                 autoRefreshOn={refreshMinutes > 0}
               />
-              <div className="rounded-lg border border-border bg-card px-4 py-3">
-                <div className="text-xs text-muted-foreground mb-2">月度额度余额</div>
-                <div className="text-lg font-semibold tabular-nums text-foreground">
-                  {credits?.monthlyCredits !== undefined ? formatCost(credits.monthlyCredits, currency) : '暂无数据'}
-                </div>
-              </div>
+              <MonthlyCard
+                credits={credits?.monthlyCredits}
+                window={usage.windows?.monthly}
+                resetAtTs={usage.subscription?.currentPeriodEndTs}
+                currency={currency}
+              />
             </div>
 
             {/* API Key 提示条：拿不到窗口数据时引导配置 */}
