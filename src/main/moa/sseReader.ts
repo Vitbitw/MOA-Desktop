@@ -8,11 +8,11 @@
 export interface OpenAIStreamChunk {
   /** choices[0].delta.content：本帧文本增量 */
   content?: string
-  /** choices[0].delta.tool_calls[0]：工具调用增量（index 为分片下标；id/name 通常首帧给出，arguments 逐帧拼接；兼容 function 嵌套与平铺两种形态） */
-  toolCallDelta?: { index: number; id?: string; name?: string; arguments?: string }
+  /** choices[0].delta.tool_calls：本帧全部工具调用增量（index 为分片下标；id/name 通常首帧给出，arguments 逐帧拼接；兼容 function 嵌套与平铺两种形态；无有效条目时字段不出现） */
+  toolCallsDelta?: Array<{ index: number; id?: string; name?: string; arguments?: string }>
   /** choices[0].finish_reason：非 null 字符串才有效（stop / length / tool_calls 等） */
   finishReason?: string | null
-  /** 顶层 usage（choices 为空数组的终结块，stream_options.include_usage）：token 计数 */
+  /** 顶层 usage（stream_options.include_usage 终结块，或 OpenRouter 等挂在非空 choices 末帧）：token 计数 */
   usage?: { prompt: number; completion: number }
 }
 
@@ -65,9 +65,9 @@ export async function readSseStream(
  * 解析 OpenAI 兼容 /v1/chat/completions 流式响应的单条 SSE data。
  * - '[DONE]'、非法 JSON、解析后无有效字段 → null（绝不抛错）
  * - choices[0].delta.content → content
- * - choices[0].delta.tool_calls[0] → toolCallDelta（index/id/name/arguments 增量字段原样保留）
+ * - choices[0].delta.tool_calls 全部条目 → toolCallsDelta 数组（index/id/name/arguments 增量字段原样保留，本帧有几条就返回几条）
  * - choices[0].finish_reason（非 null 字符串）→ finishReason
- * - choices 为空数组时，顶层 usage（include_usage 终结块）→ usage
+ * - 顶层 usage（include_usage 终结块 / 末帧挂 usage 的中转）→ usage；choices 空数组或非空都解析
  */
 export function parseOpenAIChunk(data: string): OpenAIStreamChunk | null {
   if (data === '[DONE]') return null
@@ -91,14 +91,16 @@ export function parseOpenAIChunk(data: string): OpenAIStreamChunk | null {
       const delta = typeof choice.delta === 'object' && choice.delta !== null ? (choice.delta as Record<string, unknown>) : null
       if (delta) {
         if (typeof delta.content === 'string') chunk.content = delta.content
-        const toolCallDelta = pickToolCallDelta(delta.tool_calls)
-        if (toolCallDelta) chunk.toolCallDelta = toolCallDelta
+        const toolCallsDelta = pickToolCallsDelta(delta.tool_calls)
+        if (toolCallsDelta) chunk.toolCallsDelta = toolCallsDelta
       }
       // null 的 finish_reason 是过程帧（无信息量），只收非 null 字符串
       if (typeof choice.finish_reason === 'string') chunk.finishReason = choice.finish_reason
     }
-  } else if (typeof root.usage === 'object' && root.usage !== null) {
-    // 空 choices + usage：include_usage 的终结块
+  }
+
+  // 顶层 usage 与 choices 是否为空无关：include_usage 终结块（空 choices）与 OpenRouter 等挂在末帧（choices 非空）都收
+  if (typeof root.usage === 'object' && root.usage !== null) {
     const usage = root.usage as { prompt_tokens?: unknown; completion_tokens?: unknown }
     chunk.usage = { prompt: toTokenCount(usage.prompt_tokens), completion: toTokenCount(usage.completion_tokens) }
   }
@@ -106,25 +108,31 @@ export function parseOpenAIChunk(data: string): OpenAIStreamChunk | null {
   return Object.keys(chunk).length > 0 ? chunk : null
 }
 
-/** 取 choices[0].delta.tool_calls[0] 的增量字段；无有效条目返回 null（index 缺失按 0 兜底） */
-function pickToolCallDelta(value: unknown): OpenAIStreamChunk['toolCallDelta'] | null {
-  if (!Array.isArray(value) || value.length === 0) return null
-  const first: unknown = value[0]
-  if (typeof first !== 'object' || first === null) return null
+/** toolCallsDelta 的单条元素（从接口派生，避免类型重复） */
+type ToolCallDelta = NonNullable<OpenAIStreamChunk['toolCallsDelta']>[number]
 
-  const toolCall = first as { index?: unknown; id?: unknown; name?: unknown; arguments?: unknown; function?: unknown }
-  // 标准 OpenAI 把 name/arguments 放在 tool_calls[].function 内，部分兼容厂商平铺在顶层，两者都收
-  const fn = typeof toolCall.function === 'object' && toolCall.function !== null ? (toolCall.function as { name?: unknown; arguments?: unknown }) : null
+/** 取 choices[0].delta.tool_calls 的全部条目增量（数组顺序=原顺序）；无有效条目返回 null（index 缺失或非法按 0 兜底） */
+function pickToolCallsDelta(value: unknown): OpenAIStreamChunk['toolCallsDelta'] | null {
+  if (!Array.isArray(value)) return null
+  const deltas: ToolCallDelta[] = []
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) continue // 非对象条目无字段可取，跳过
 
-  const delta: NonNullable<OpenAIStreamChunk['toolCallDelta']> = {
-    index: typeof toolCall.index === 'number' && Number.isFinite(toolCall.index) ? toolCall.index : 0
+    const toolCall = item as { index?: unknown; id?: unknown; name?: unknown; arguments?: unknown; function?: unknown }
+    // 标准 OpenAI 把 name/arguments 放在 tool_calls[].function 内，部分兼容厂商平铺在顶层，两者都收
+    const fn = typeof toolCall.function === 'object' && toolCall.function !== null ? (toolCall.function as { name?: unknown; arguments?: unknown }) : null
+
+    const delta: ToolCallDelta = {
+      index: typeof toolCall.index === 'number' && Number.isFinite(toolCall.index) ? toolCall.index : 0
+    }
+    if (typeof toolCall.id === 'string') delta.id = toolCall.id
+    const name = pickString(fn ? fn.name : undefined, toolCall.name)
+    if (name !== undefined) delta.name = name
+    const args = pickString(fn ? fn.arguments : undefined, toolCall.arguments)
+    if (args !== undefined) delta.arguments = args
+    deltas.push(delta)
   }
-  if (typeof toolCall.id === 'string') delta.id = toolCall.id
-  const name = pickString(fn ? fn.name : undefined, toolCall.name)
-  if (name !== undefined) delta.name = name
-  const args = pickString(fn ? fn.arguments : undefined, toolCall.arguments)
-  if (args !== undefined) delta.arguments = args
-  return delta
+  return deltas.length > 0 ? deltas : null
 }
 
 /** 依次取第一个字符串候选（用于兼容 function 嵌套与平铺两种字段位置） */

@@ -251,31 +251,59 @@ const dataOf = (events) => events.map((e) => e.data)
     )
     eq(parseOpenAIChunk('{"choices":[{"delta":{},"finish_reason":null}]}'), null, '仅 finish_reason:null → 无有效字段 → null')
 
-    // tool_calls 增量（标准 OpenAI：name/arguments 嵌在 function 内）
+    // tool_calls 增量（标准 OpenAI：name/arguments 嵌在 function 内）→ toolCallsDelta 数组（逐帧全部条目）
     eq(
       parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}'),
-      { toolCallDelta: { index: 0, id: 'call_1', name: 'read_file', arguments: '' } },
-      'tool_calls 首帧：index/id/name/arguments 保留'
+      { toolCallsDelta: [{ index: 0, id: 'call_1', name: 'read_file', arguments: '' }] },
+      'tool_calls 首帧：index/id/name/arguments 保留（单条目→数组）'
     )
     eq(
       parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"p\\":1}"}}]}}]}'),
-      { toolCallDelta: { index: 0, arguments: '{"p":1}' } },
-      'tool_calls 参数增量帧（无 id/name）'
+      { toolCallsDelta: [{ index: 0, arguments: '{"p":1}' }] },
+      'tool_calls 参数增量帧（仅 arguments，数组含对应字段）'
     )
     eq(
       parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[{"index":1,"name":"flat","arguments":"{}"}]}}]}'),
-      { toolCallDelta: { index: 1, name: 'flat', arguments: '{}' } },
+      { toolCallsDelta: [{ index: 1, name: 'flat', arguments: '{}' }] },
       '平铺形态（部分兼容厂商）同样识别'
     )
     eq(
       parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[{"id":"c2"}]}}]}'),
-      { toolCallDelta: { index: 0, id: 'c2' } },
+      { toolCallsDelta: [{ index: 0, id: 'c2' }] },
       'index 缺失按 0 兜底'
     )
-    eq(parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[]}}]}'), null, '空 tool_calls → null')
-    eq(parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[{"index":0},{"index":1}]}}]}'), { toolCallDelta: { index: 0 } }, '多条目只取第一条')
+    eq(parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[]}}]}'), null, '空 tool_calls → 字段不出现 → null')
+    // 同帧 2 条（index 0/1）：全部条目字段完整保留，顺序不变
+    const multiFrame =
+      '{"choices":[{"delta":{"tool_calls":[' +
+      '{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}},' +
+      '{"index":1,"id":"call_b","type":"function","function":{"name":"write_file","arguments":"{}"}}' +
+      ']}}]}'
+    const multi = parseOpenAIChunk(multiFrame)
+    eq(
+      multi,
+      {
+        toolCallsDelta: [
+          { index: 0, id: 'call_a', name: 'read_file', arguments: '' },
+          { index: 1, id: 'call_b', name: 'write_file', arguments: '{}' }
+        ]
+      },
+      '同帧 2 条 tool_calls：全部条目字段完整保留'
+    )
+    ok(multi && multi.toolCallsDelta && multi.toolCallsDelta.length === 2, 'toolCallsDelta 数组长度 2（index 0/1）', multi)
+    ok(
+      multi && multi.toolCallsDelta && multi.toolCallsDelta[0].index === 0 && multi.toolCallsDelta[1].index === 1,
+      '数组成员顺序保持原顺序（0 在前、1 在后）',
+      multi
+    )
+    eq(
+      parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[7,{"index":2,"id":"c3"}]}}]}'),
+      { toolCallsDelta: [{ index: 2, id: 'c3' }] },
+      '非对象条目跳过，对象条目保留'
+    )
+    eq(parseOpenAIChunk('{"choices":[{"delta":{"tool_calls":[7]}}]}'), null, '全为非对象条目 → 无有效条目 → null')
 
-    // usage 终结块
+    // usage：空 choices 终结块 + choices 非空末帧（OpenRouter 等中转）都解析
     eq(
       parseOpenAIChunk('{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":34}}'),
       { usage: { prompt: 12, completion: 34 } },
@@ -291,6 +319,16 @@ const dataOf = (events) => events.map((e) => e.data)
       parseOpenAIChunk('{"choices":[],"usage":{"prompt_tokens":"9","completion_tokens":null}}'),
       { usage: { prompt: 0, completion: 0 } },
       '非数字 token 数 → 0'
+    )
+    eq(
+      parseOpenAIChunk('{"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":6}}'),
+      { content: 'x', finishReason: 'stop', usage: { prompt: 5, completion: 6 } },
+      'choices 非空 + 顶层 usage：content/finishReason/usage 共存于同一对象'
+    )
+    eq(
+      parseOpenAIChunk('{"choices":[{"delta":{}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}'),
+      { usage: { prompt: 1, completion: 2 } },
+      'choices 非空且无其它字段：仅 usage 也返回对象'
     )
 
     // 非 JSON 行 / 空对象 / [DONE]
@@ -328,16 +366,16 @@ const dataOf = (events) => events.map((e) => e.data)
       'data: {"choices":[{"delta":{"role":"assistant"}}]}',
       'data: {"choices":[{"delta":{"content":"索"}}]}',
       'data: {"choices":[{"delta":{"content":"引"}}]}',
-      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}},{"index":1,"id":"call_2","type":"function","function":{"name":"write_file","arguments":""}}]}}]}',
       'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"p\\":1}"}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\\"q\\":2}"}}]}}]}',
       'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
-      'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}',
+      'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":2}}',
       'data: [DONE]'
     ].join('\n\n')
     const events = await collectText(stream)
     let text = ''
-    let toolName = ''
-    let toolArgs = ''
+    const calls = new Map() // index → { name, args }：多工具调用各自成账
     let finish = null
     let usage = null
     let nullCount = 0
@@ -349,19 +387,24 @@ const dataOf = (events) => events.map((e) => e.data)
         continue
       }
       if (chunk.content) text += chunk.content
-      if (chunk.toolCallDelta) {
-        if (chunk.toolCallDelta.name) toolName += chunk.toolCallDelta.name
-        if (chunk.toolCallDelta.arguments) toolArgs += chunk.toolCallDelta.arguments
+      if (chunk.toolCallsDelta) {
+        for (const d of chunk.toolCallsDelta) {
+          const call = calls.get(d.index) || { name: '', args: '' }
+          if (d.name) call.name += d.name
+          if (d.arguments) call.args += d.arguments
+          calls.set(d.index, call)
+        }
       }
       if (chunk.finishReason) finish = chunk.finishReason
       if (chunk.usage) usage = chunk.usage
     }
-    eq(events.length, 8, '8 条事件全部交付（实际 ' + events.length + '）')
+    eq(events.length, 9, '9 条事件全部交付（实际 ' + events.length + '）')
     eq(text, '索引', 'delta 拼接出聚合全文')
-    eq(toolName, 'read_file', 'tool_calls 名称提取')
-    eq(toolArgs, '{"p":1}', 'tool_calls 参数增量拼接')
+    eq(calls.size, 2, '两条工具调用各自成账（index 0/1）')
+    eq(calls.get(0), { name: 'read_file', args: '{"p":1}' }, '工具调用 0：名称 + 参数增量拼接')
+    eq(calls.get(1), { name: 'write_file', args: '{"q":2}' }, '工具调用 1：名称 + 参数增量拼接')
     eq(finish, 'tool_calls', 'finish_reason 提取')
-    eq(usage, { prompt: 10, completion: 2 }, 'usage 终结块提取')
+    eq(usage, { prompt: 10, completion: 2 }, '末帧 usage（choices 非空）提取')
     eq(nullCount, 1, 'role 首帧（无有效字段）→ null 跳过')
     eq(events[events.length - 1].data, '[DONE]', '[DONE] 是最后一个事件')
   }
