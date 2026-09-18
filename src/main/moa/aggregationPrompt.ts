@@ -1,5 +1,6 @@
 import type { SubModelRole } from '../../shared/types'
 import { MOA_ROLE_LABELS } from '../../shared/moaRoles'
+import type { ChatMessage } from './streamChat'
 
 export const STANDARD_PROMPT_ZH = `你是一个多模型融合器（Mixture-of-Agents Synthesizer）。
 
@@ -57,10 +58,10 @@ export function getAggregationPrompt(variant: AggregationPromptVariant, customPr
  * Wraps sub-model outputs into references, appends the user's original query.
  */
 export function buildAggregationMessages(
-  userMessages: Array<{ role: string; content: string }>,
+  userMessages: ChatMessage[],
   subModelOutputs: Array<{ modelId: string; content: string }>,
   aggregationSystemPrompt: string
-): Array<{ role: string; content: string }> {
+): ChatMessage[] {
   // Build references block
   const refs = subModelOutputs
     .map((out, i) => `Reference ${i + 1} — ${out.modelId}:\n${out.content}`)
@@ -84,10 +85,10 @@ export function buildAggregationMessages(
  * 保留完整多轮历史（transcript 末条为当前 user 问句），并注入带角色名的专家意见块。
  */
 export function buildCommitteeMessages(
-  transcript: Array<{ role: string; content: string }>,
+  transcript: ChatMessage[],
   expertOutputs: Array<{ modelId: string; role: SubModelRole; content: string }>,
   chairSystemPrompt: string
-): Array<{ role: string; content: string }> {
+): ChatMessage[] {
   const refs = expertOutputs
     .map((o, i) => {
       const title = o.role ? MOA_ROLE_LABELS[o.role] : '通用专家'

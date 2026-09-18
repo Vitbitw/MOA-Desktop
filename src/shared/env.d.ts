@@ -1,4 +1,5 @@
 import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent, ToastData } from './types'
+import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from './ipc-channels'
 
 interface MoaAPI {
   // Config / Providers
@@ -70,6 +71,13 @@ interface MoaAPI {
   onAggregationStart: (callback: () => void) => () => void
   onAggregationChunk: (callback: (data: AggregationChunk) => void) => () => void
   onAllDone: (callback: (data: { conversationId: string; conversations: unknown[] }) => void) => () => void
+
+  // 网关代理请求直播事件（T5）
+  onGatewayRoundStart: (callback: (data: GatewayRoundStartPayload) => void) => () => void
+  onGatewaySubUpdate: (callback: (data: GatewaySubUpdatePayload) => void) => () => void
+  onGatewayAggStart: (callback: (data: GatewayAggStartPayload) => void) => () => void
+  onGatewayAggChunk: (callback: (data: GatewayAggChunkPayload) => void) => () => void
+  onGatewayRoundDone: (callback: (data: GatewayRoundDonePayload) => void) => () => void
 
   // Menu event listeners
   onMenuNewConversation: (callback: () => void) => () => void

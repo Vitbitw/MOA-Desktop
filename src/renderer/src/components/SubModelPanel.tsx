@@ -21,7 +21,13 @@ const STATUS_COLOR: Record<string, string> = {
   error: 'text-red-500'
 }
 
-export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
+/**
+ * 子模型输出面板（T5 流式化）：
+ * - memo：单面板内容更新不重渲染其余面板（store 只替换变化的 index 对象）
+ * - running 且 content 非空 → markdown + 闪烁光标（与 AggregatorPanel 光标样式一致）
+ * - error 且 content 非空 → 展示已流出内容 + 错误行（流中途断开时保留已收文本）
+ */
+function SubModelPanel({ output }: { output: LiveSubOutput }) {
   const isRunningOrPending = output.status === 'running' || (output.status === 'pending' && output.modelId === '...')
   const shortModelName = output.modelId.length > 30
     ? output.modelId.slice(0, 27) + '…'
@@ -62,14 +68,22 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
       </div>
 
       <div className="px-3 py-2 max-h-60 overflow-y-auto">
-        {output.status === 'error' ? (
+        {output.status === 'error' && !output.content ? (
           <div className="text-sm text-red-400 font-mono whitespace-pre-wrap">{output.error}</div>
         ) : output.content ? (
-          <div className="prose dark:prose-invert max-w-none text-sm">
-            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-              {output.content}
-            </ReactMarkdown>
-          </div>
+          <>
+            <div className="prose dark:prose-invert max-w-none text-sm">
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+                {output.content}
+              </ReactMarkdown>
+              {output.status === 'running' && (
+                <span className="inline-block w-2 h-4 bg-foreground/60 ml-0.5 animate-pulse" />
+              )}
+            </div>
+            {output.status === 'error' && output.error && (
+              <div className="mt-1.5 text-sm text-red-400 font-mono whitespace-pre-wrap">{output.error}</div>
+            )}
+          </>
         ) : (
           <div className="text-sm text-muted-foreground">
             {output.status === 'pending' ? '等待调度...' : output.status === 'running' ? '接收中...' : '无输出内容'}
@@ -85,3 +99,5 @@ export default function SubModelPanel({ output }: { output: LiveSubOutput }) {
     </div>
   )
 }
+
+export default React.memo(SubModelPanel)

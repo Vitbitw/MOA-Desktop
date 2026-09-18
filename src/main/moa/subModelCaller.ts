@@ -1,5 +1,7 @@
 import type { SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
+import { combineSignals, streamChat } from './streamChat'
+import type { ChatMessage } from './streamChat'
 
 export interface SubModelCallOptions {
   providerBaseUrl: string
@@ -7,9 +9,32 @@ export interface SubModelCallOptions {
   providerId?: string
   apiKey: string
   modelId: string
-  messages: Array<{ role: string; content: string }>
+  messages: ChatMessage[]
   systemPrompt?: string
   timeoutMs: number
+  /** 附加请求字段（tools / tool_choice / temperature / top_p / stop 等）：并入请求体透传（Anthropic 端点用） */
+  extraBody?: Record<string, unknown>
+  /** 外部中止信号（网关客户端断开等）；与内部 AbortSignal.timeout 组合，触发即中断请求 */
+  signal?: AbortSignal
+}
+
+/**
+ * 组装请求消息：MoA 角色/默认 systemPrompt + 调用方消息。
+ * 调用方消息已含 system（Anthropic 端点转换而来）时**合并进同一条**（角色提示词在前），
+ * 不新增第二条 system 消息——Claude Code 等客户端的 system 指令不得被角色模板挤掉。
+ */
+function buildRequestMessages(messages: ChatMessage[], systemPrompt?: string): ChatMessage[] {
+  if (!systemPrompt) return messages
+  const idx = messages.findIndex((m) => m.role === 'system')
+  if (idx === -1) return [{ role: 'system', content: systemPrompt }, ...messages]
+  const existing = messages[idx]
+  if (typeof existing.content === 'string') {
+    const merged = messages.slice()
+    merged[idx] = { ...existing, content: `${systemPrompt}\n\n${existing.content}` }
+    return merged
+  }
+  // 内容块数组等非常规 system 内容：角色提示词单独前置一条，原内容原样保留
+  return [...messages.slice(0, idx), { role: 'system', content: systemPrompt }, ...messages.slice(idx)]
 }
 
 /**
@@ -18,16 +43,18 @@ export interface SubModelCallOptions {
  */
 export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelOutput> {
   const startTime = Date.now()
-  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs } = opts
+  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, extraBody } = opts
 
   // Build payload
   const body: Record<string, unknown> = {
+    ...extraBody,
     model: modelId,
-    messages: systemPrompt
-      ? [{ role: 'system', content: systemPrompt }, ...messages]
-      : messages,
+    messages: buildRequestMessages(messages, systemPrompt),
     stream: false
   }
+
+  // 外部 signal 与自身超时组合（同 streamChat 式）：客户端断开立即中断，不再跑满 timeoutMs
+  const combined = combineSignals(signal, AbortSignal.timeout(timeoutMs))
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -37,7 +64,7 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: combined.signal
     })
 
     const durationMs = Date.now() - startTime
@@ -71,7 +98,8 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
     }
   } catch (err: unknown) {
     const durationMs = Date.now() - startTime
-    const msg = err instanceof Error ? err.message : String(err)
+    // 外部中止（客户端断开）优先标注「已中止」；其余（含自身超时）保留原始错误信息
+    const msg = signal?.aborted ? '已中止' : err instanceof Error ? err.message : String(err)
     return {
       modelId,
       providerId: providerId || providerBaseUrl,
@@ -80,10 +108,61 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
       error: msg,
       durationMs
     }
+  } finally {
+    combined.dispose()
   }
 }
 
 /** Count how many sub-models succeeded. */
 export function countSuccessfulSubModels(results: SubModelOutput[]): number {
   return results.filter((r) => r.status === 'success').length
+}
+
+/** callSubModelStream 的选项：非流式选项 + 外部中止信号 + 增量回调 */
+export type SubModelStreamOptions = SubModelCallOptions & {
+  /** 增量回调：每收到一段文本增量回调累计全文 */
+  onDelta?: (accumulatedText: string) => void
+}
+
+/**
+ * 流式调用单个子模型（经 streamChat 通用流式层实现，永不 throw）。
+ * 回退链：stream_options 400 → 去掉重发；stream:true 400 → 复用 callSubModel 非流式（外部 signal
+ * 透传，回退中中止同样立即生效）；
+ * HTTP 200 后流中断/超时/中止 → 不重试，保留已收文本，status:'error'。
+ * usage 缺失时 tokenUsage 省略（不写假 0）。
+ */
+export async function callSubModelStream(opts: SubModelStreamOptions): Promise<SubModelOutput> {
+  const startTime = Date.now()
+  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, onDelta, extraBody } = opts
+
+  const result = await streamChat({
+    providerBaseUrl,
+    apiKey,
+    modelId,
+    messages: buildRequestMessages(messages, systemPrompt),
+    timeoutMs,
+    signal,
+    onDelta,
+    // 附加字段（tools 等）透传给子模型：子模型可出 tool_calls 作为专家意见（不进最终响应）
+    extraBody,
+    // 回退链级 3：stream:true 被 400 拒绝（中转不支持）→ 复用现有非流式实现
+    nonStreamFallback: async () => {
+      const r = await callSubModel(opts)
+      if (r.status !== 'success') return { content: '', error: r.error ?? '非流式回退失败' }
+      // callSubModel 对缺失 usage 写 0 兜底；此处只在真实用量时透传，避免假 0
+      const usage = r.tokenUsage && (r.tokenUsage.prompt > 0 || r.tokenUsage.completion > 0) ? r.tokenUsage : undefined
+      return usage ? { content: r.content, usage } : { content: r.content }
+    }
+  })
+
+  const output: SubModelOutput = {
+    modelId,
+    providerId: providerId || providerBaseUrl,
+    content: result.content,
+    status: result.error !== undefined ? 'error' : 'success',
+    durationMs: Date.now() - startTime
+  }
+  if (result.error !== undefined) output.error = result.error
+  if (result.usage !== undefined) output.tokenUsage = result.usage
+  return output
 }

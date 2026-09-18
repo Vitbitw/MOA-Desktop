@@ -1,3 +1,5 @@
+import type { SubModelRole } from './types'
+
 export const IPC = {
   // Config / Providers
   CONFIG_GET_PROVIDERS: 'config:getProviders',
@@ -67,6 +69,65 @@ export const IPC_EVENT = {
 
   // 主进程 → 渲染进程悬浮通知
   RENDERER_TOAST: 'event:rendererToast',
+
+  // 网关代理请求直播（单一来源：main/uiBridge 广播 → preload/renderer 监控视图订阅；
+  // 两端均引用本常量，禁止再写字面量副本）
+  GATEWAY_ROUND_START: 'gateway:roundStart',
+  GATEWAY_SUB_UPDATE: 'gateway:subUpdate',
+  GATEWAY_AGG_START: 'gateway:aggStart',
+  GATEWAY_AGG_CHUNK: 'gateway:aggChunk',
+  GATEWAY_ROUND_DONE: 'gateway:roundDone',
 } as const
 
 export type IPCChannel = (typeof IPC)[keyof typeof IPC]
+
+// ─── 网关代理请求直播事件 payload（main ↔ renderer 共用） ───
+// 密钥/敏感字段不得进入这些 payload（只含模型身份与输出文本）
+
+/** 子模型清单项（index 与 GatewaySubUpdatePayload.index 对齐） */
+export interface GatewaySubModelRef {
+  index: number
+  modelId: string
+  role: SubModelRole
+}
+
+export interface GatewayRoundStartPayload {
+  roundId: string
+  mode: 'aggregate' | 'compare' | 'direct'
+  /** direct 轮次仅第 1 个（实际调用的单模型） */
+  subModels: GatewaySubModelRef[]
+  /** 聚合模型（compare / direct 无）；仅为身份标注，不含密钥 */
+  aggregator?: { modelId: string }
+}
+
+export interface GatewaySubUpdatePayload {
+  roundId: string
+  index: number
+  modelId: string
+  providerId: string
+  content: string
+  status: 'running' | 'success' | 'error'
+  error?: string
+  durationMs?: number
+  tokenUsage?: { prompt: number; completion: number }
+  role?: SubModelRole
+}
+
+export interface GatewayAggStartPayload {
+  roundId: string
+}
+
+export interface GatewayAggChunkPayload {
+  roundId: string
+  text: string
+  done: boolean
+}
+
+export interface GatewayRoundDonePayload {
+  roundId: string
+  success: boolean
+  error?: string
+  /** true = 客户端断开（abort 链路触发），success 恒为 false */
+  aborted?: boolean
+  durationMs: number
+}

@@ -5,6 +5,10 @@ export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_MAX_CONCURRENCY = 3
 export const DEFAULT_SUB_MODEL_TIMEOUT = 60_000
 export const DEFAULT_AGGREGATOR_TIMEOUT = 120_000
+/** 流式调用空闲超时（毫秒）：chunk 间隔超过该值即中断，每收到一个 chunk 重置 */
+export const DEFAULT_STREAM_IDLE_TIMEOUT = 30_000
+/** 流式调用总时长上限（毫秒）：绝对保护，超时即中断（不重置） */
+export const DEFAULT_STREAM_MAX_TIMEOUT = 300_000
 
 export const DEFAULT_TITLE_SETTINGS = {
   autoMode: 'first_and_manual' as const,

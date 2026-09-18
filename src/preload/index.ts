@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
+import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from '../shared/ipc-channels'
 import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
@@ -83,6 +84,37 @@ contextBridge.exposeInMainWorld('moaAPI', {
     const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; conversations: unknown[] }) => callback(data)
     ipcRenderer.on(IPC_EVENT.MOA_ALL_DONE, handler)
     return () => ipcRenderer.removeListener(IPC_EVENT.MOA_ALL_DONE, handler)
+  },
+
+  // 网关代理请求直播事件（T5；App 经 gatewayStore.initGatewaySubscriptions 订阅）
+  onGatewayRoundStart: (callback: (data: GatewayRoundStartPayload) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: GatewayRoundStartPayload) => callback(data)
+    ipcRenderer.on(IPC_EVENT.GATEWAY_ROUND_START, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.GATEWAY_ROUND_START, handler)
+  },
+
+  onGatewaySubUpdate: (callback: (data: GatewaySubUpdatePayload) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: GatewaySubUpdatePayload) => callback(data)
+    ipcRenderer.on(IPC_EVENT.GATEWAY_SUB_UPDATE, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.GATEWAY_SUB_UPDATE, handler)
+  },
+
+  onGatewayAggStart: (callback: (data: GatewayAggStartPayload) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: GatewayAggStartPayload) => callback(data)
+    ipcRenderer.on(IPC_EVENT.GATEWAY_AGG_START, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.GATEWAY_AGG_START, handler)
+  },
+
+  onGatewayAggChunk: (callback: (data: GatewayAggChunkPayload) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: GatewayAggChunkPayload) => callback(data)
+    ipcRenderer.on(IPC_EVENT.GATEWAY_AGG_CHUNK, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.GATEWAY_AGG_CHUNK, handler)
+  },
+
+  onGatewayRoundDone: (callback: (data: GatewayRoundDonePayload) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: GatewayRoundDonePayload) => callback(data)
+    ipcRenderer.on(IPC_EVENT.GATEWAY_ROUND_DONE, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.GATEWAY_ROUND_DONE, handler)
   },
 
   // Menu event listeners

@@ -1,13 +1,14 @@
 import { getAllProviders } from '../providers/providerManager'
-import { callSubModel, countSuccessfulSubModels } from './subModelCaller'
+import { callSubModelStream, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, buildCommitteeMessages, getAggregationPrompt, CHAIR_PROMPT_ZH } from './aggregationPrompt'
 import { getRoleTemplate } from '../../shared/moaRoles'
 import { DEFAULT_SUB_MODEL_TIMEOUT, DEFAULT_AGGREGATOR_TIMEOUT } from '../../shared/defaults'
-import { fetchProxy } from '../local/fetchProxy'
+import { streamChat } from './streamChat'
+import type { ChatMessage, ToolCallResult } from './streamChat'
 import type { SubModelConfig, AggregatorConfig, SubModelOutput, MoaArchitecture, SubModelRole } from '../../shared/types'
 
 export interface MoaRequest {
-  messages: Array<{ role: string; content: string }>
+  messages: ChatMessage[]
   subModels: SubModelConfig[]
   aggregator?: AggregatorConfig
   mode: 'aggregate' | 'compare' | 'direct'
@@ -18,6 +19,10 @@ export interface MoaRequest {
   aggTimeoutMs?: number
   /** 协作架构：缺省 'election'（子模型并行出完整答案，聚合模型拼接提炼） */
   architecture?: MoaArchitecture
+  /** 外部中止信号（网关客户端断开等）：中止后不再发起聚合、进行中调用随之中断（app 内路径不传） */
+  signal?: AbortSignal
+  /** 附加请求字段（tools / tool_choice / temperature 等）：逐路透传给子模型与聚合模型（Anthropic 端点用；缺省不传） */
+  extraBody?: Record<string, unknown>
 }
 
 export interface MoaResponse {
@@ -27,23 +32,32 @@ export interface MoaResponse {
   aggregatorContent?: string
   /** 实际使用的聚合模型 usage（主聚合或 fallback 聚合） */
   aggregatorUsage?: { prompt: number; completion: number }
+  /** 聚合模型末帧 finish_reason（'length' = 上游截断；Anthropic 端点映射 stop_reason=max_tokens 用） */
+  aggregatorFinishReason?: string
   /** 实际使用的聚合模型身份（fallback 生效时不是 primary） */
   aggregatorModelId?: string
   aggregatorProviderId?: string
+  /** 聚合模型输出的 tool_calls（聚合成功且有工具调用时透出；Anthropic 端点转 tool_use 用） */
+  aggregatorToolCalls?: ToolCallResult[]
   success: boolean
   partialFailure?: boolean
   error?: string
 }
 
+/** 子模型事件载荷：status 'running' = 流式过程中的累计文本增量（多次发射，仅事件语义、不落库）；success/error = 终态（一次） */
+export interface SubOutputEventPayload extends Omit<SubModelOutput, 'status'> {
+  status: 'running' | 'success' | 'error'
+}
+
 /** 可选的事件回调：事件版入口会注入，纯调用版（executeMoA）不注入 */
 interface MoaEvents {
-  emitSubOutput: (output: SubModelOutput, index: number) => void
+  emitSubOutput: (output: SubOutputEventPayload, index: number) => void
   emitAggregationStart: () => void
   emitAggregationChunk: (text: string, done: boolean) => void
 }
 
 /** Resolve sub-model configs to actual provider URLs, keys, and effective per-sub system prompt. */
-interface ResolvedSubModel {
+export interface ResolvedSubModel {
   providerId: string
   providerBaseUrl: string
   apiKey: string
@@ -53,7 +67,7 @@ interface ResolvedSubModel {
   systemPrompt: string | undefined
 }
 
-function resolveSubModels(subModels: SubModelConfig[], defaultSystemPrompt?: string): ResolvedSubModel[] {
+export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPrompt?: string): ResolvedSubModel[] {
   const providers = getAllProviders()
   return subModels.map((sm) => {
     const p = providers.find((prov) => prov.id === sm.providerId)
@@ -94,46 +108,40 @@ function resolveAggregator(aggregator: AggregatorConfig): {
   }
 }
 
-/** Call the aggregator model with built aggregation messages. Return content string. */
+/**
+ * Call the aggregator model with built aggregation messages. Return content string.
+ * 流式实现（T2）：经 streamChat 收流，onDelta 逐段回调累计文本；signal 透传外部中止。
+ * T7：extraBody 透传（tools/tool_choice 等）；返回值带 toolCalls（聚合模型工具调用，转 tool_use 用）
+ * 与 finishReason（上游截断 'length' 透出，Anthropic 端点映射 max_tokens 用）。
+ */
 async function callAggregator(
   aggInfo: { providerBaseUrl: string; apiKey: string; modelId: string },
-  messages: Array<{ role: string; content: string }>,
-  timeoutMs: number
-): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number } }> {
-  try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (aggInfo.apiKey) headers.Authorization = `Bearer ${aggInfo.apiKey}`
-    const resp = await fetchProxy(`${aggInfo.providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: aggInfo.modelId,
-        messages,
-        stream: false
-      }),
-      signal: AbortSignal.timeout(timeoutMs)
-    })
+  messages: ChatMessage[],
+  timeoutMs: number,
+  onDelta?: (accumulatedText: string) => void,
+  signal?: AbortSignal,
+  extraBody?: Record<string, unknown>
+): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[]; finishReason?: string }> {
+  const result = await streamChat({
+    providerBaseUrl: aggInfo.providerBaseUrl,
+    apiKey: aggInfo.apiKey,
+    modelId: aggInfo.modelId,
+    messages,
+    timeoutMs,
+    signal,
+    onDelta,
+    extraBody
+  })
 
-    if (!resp.ok) {
-      const errText = await resp.text()
-      return { content: '', success: false, error: `HTTP ${resp.status}: ${errText.slice(0, 300)}` }
-    }
-
-    const data = await resp.json()
-    // 解析 usage 用量（prompt/completion tokens），供用量监控使用
-    const usage = data.usage || {}
-    return {
-      content: data.choices?.[0]?.message?.content || '',
-      success: true,
-      usage: {
-        prompt: usage.prompt_tokens || 0,
-        completion: usage.completion_tokens || 0
-      }
-    }
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { content: '', success: false, error: msg }
+  const output: { content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[]; finishReason?: string } = {
+    content: result.content,
+    success: result.error === undefined
   }
+  if (result.error !== undefined) output.error = result.error
+  if (result.usage !== undefined) output.usage = result.usage
+  if (result.toolCalls !== undefined) output.toolCalls = result.toolCalls
+  if (result.finishReason !== undefined) output.finishReason = result.finishReason
+  return output
 }
 
 /**
@@ -162,14 +170,26 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
   const subsToCall = req.mode === 'direct' ? resolvedSubs.slice(0, 1) : resolvedSubs
 
   const promises = subsToCall.map((sm, index) =>
-    callSubModel({
+    callSubModelStream({
       providerBaseUrl: sm.providerBaseUrl,
       providerId: sm.providerId,
       apiKey: sm.apiKey,
       modelId: sm.modelId,
       messages: req.messages,
       systemPrompt: sm.systemPrompt,
-      timeoutMs
+      timeoutMs,
+      signal: req.signal,
+      // 附加字段（tools 等）透传：子模型可出 tool_calls 作为专家意见（不进最终响应）
+      extraBody: req.extraBody,
+      // 流式增量 → running 累计事件（引擎不做节流：节流由 host 层 index.ts / 网关广播负责）
+      onDelta: (acc) => {
+        try {
+          events?.emitSubOutput(
+            { modelId: sm.modelId, providerId: sm.providerId || sm.providerBaseUrl, content: acc, status: 'running', role: sm.role },
+            index
+          )
+        } catch { /* 事件失败不影响业务结果 */ }
+      }
     }).then((result) => {
       subOutputs[index] = { ...result, role: sm.role }
       // 事件发射隔离：emit 抛错不得落入下方 .catch 被当作子模型失败处理（否则会用
@@ -194,6 +214,18 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
   )
 
   await Promise.allSettled(promises)
+
+  // ── Abort short-circuit：子模型阶段结束时 signal 已中止（客户端断开）→ 不再发起聚合，直接返回失败。
+  // 与「全部子模型失败」路径区分：error 文案为「已中止」；进行中的调用已随 signal 中断，部分 subOutputs 保留已收文本。
+  if (req.signal?.aborted) {
+    return {
+      type: req.mode,
+      content: '',
+      subOutputs,
+      success: false,
+      error: '已中止'
+    }
+  }
 
   const successfulCount = countSuccessfulSubModels(subOutputs)
 
@@ -268,21 +300,41 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
         aggPrompt
       )
 
-  // Call aggregator
-  const aggResult = await callAggregator(aggInfo, aggMessages, req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT)
+  // Call aggregator：onDelta → 累计文本分块事件（done=false），signal 透传（中止随流中断）
+  const onAggDelta = (acc: string): void => {
+    try { events?.emitAggregationChunk(acc, false) } catch { /* 忽略事件失败 */ }
+  }
+  const aggResult = await callAggregator(
+    aggInfo,
+    aggMessages,
+    req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT,
+    onAggDelta,
+    req.signal,
+    req.extraBody
+  )
 
   if (!aggResult.success) {
     // Try fallback aggregator if configured
-    if (req.aggregator?.fallbackProviderId && req.aggregator?.fallbackModelId) {
+    // abort 后不得再发起聚合（含 fallback）：跳过 fallback 直接进入降级返回
+    if (req.aggregator?.fallbackProviderId && req.aggregator?.fallbackModelId && !req.signal?.aborted) {
       const fallbackAgg = resolveAggregator({
         primaryModelId: req.aggregator.fallbackModelId,
         primaryProviderId: req.aggregator.fallbackProviderId
       })
       if (fallbackAgg) {
-        const fallbackResult = await callAggregator(fallbackAgg, aggMessages, req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT)
+        // fallback 聚合重置：primary 失败后先清空已展示的部分文本（节流窗口内被合并覆盖则视觉等价）
+        try { events?.emitAggregationChunk('', false) } catch { /* 忽略事件失败 */ }
+        const fallbackResult = await callAggregator(
+          fallbackAgg,
+          aggMessages,
+          req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT,
+          onAggDelta,
+          req.signal,
+          req.extraBody
+        )
         if (fallbackResult.success) {
           try { events?.emitAggregationChunk(fallbackResult.content, true) } catch { /* 忽略事件失败 */ }
-          return {
+          const fallbackResponse: MoaResponse = {
             type: 'aggregate',
             content: fallbackResult.content,
             subOutputs,
@@ -293,6 +345,10 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
             success: true,
             partialFailure: successfulCount < subOutputs.length
           }
+          // 聚合模型 tool_calls 透出（Anthropic 端点转 tool_use；无则不设字段，向后兼容）
+          if (fallbackResult.toolCalls) fallbackResponse.aggregatorToolCalls = fallbackResult.toolCalls
+          if (fallbackResult.finishReason) fallbackResponse.aggregatorFinishReason = fallbackResult.finishReason
+          return fallbackResponse
         }
       }
     }
@@ -312,7 +368,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
 
   try { events?.emitAggregationChunk(aggResult.content, true) } catch { /* 忽略事件失败 */ }
 
-  return {
+  const aggregateResponse: MoaResponse = {
     type: 'aggregate',
     content: aggResult.content,
     subOutputs,
@@ -323,6 +379,11 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
     success: true,
     partialFailure: successfulCount < subOutputs.length
   }
+  // 聚合模型 tool_calls 透出（Anthropic 端点转 tool_use；无则不设字段，向后兼容）
+  if (aggResult.toolCalls) aggregateResponse.aggregatorToolCalls = aggResult.toolCalls
+  // 聚合末帧 finish_reason 透出（'length' 截断 → Anthropic stop_reason max_tokens；无则不设字段）
+  if (aggResult.finishReason) aggregateResponse.aggregatorFinishReason = aggResult.finishReason
+  return aggregateResponse
 }
 
 /** MoA engine entry point (pure call, no events). */
@@ -331,7 +392,7 @@ export function executeMoA(req: MoaRequest): Promise<MoaResponse> {
 }
 
 export interface MoaRequestWithEvents extends MoaRequest {
-  emitSubOutput: (output: SubModelOutput, index: number) => void
+  emitSubOutput: (output: SubOutputEventPayload, index: number) => void
   emitAggregationStart: () => void
   emitAggregationChunk: (text: string, done: boolean) => void
 }

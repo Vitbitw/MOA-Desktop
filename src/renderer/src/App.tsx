@@ -2,6 +2,7 @@ import React from 'react'
 import { useEffect, useState } from 'react'
 import { useConfigStore } from './store/configStore'
 import { useConversationStore, convFromRow } from './store/conversationStore'
+import { initGatewaySubscriptions } from './store/gatewayStore'
 import { useSettingsStore } from './store/settingsStore'
 import Sidebar from './components/Sidebar'
 import ChatArea from './components/ChatArea'
@@ -31,6 +32,12 @@ function App() {
   useEffect(() => {
     const unsub = window.moaAPI.onUsageOpen(() => setViewMode('usage'))
     return unsub
+  }, [])
+
+  // 网关代理请求直播（T5）：挂载时注册 5 个 gateway 事件订阅 → gatewayStore；
+  // roundStart 到达时自动切监控视图（不锁定：用户可手动切走，dismiss 也不影响轮次执行）
+  useEffect(() => {
+    return initGatewaySubscriptions(() => setViewMode('monitor'))
   }, [])
 
   // Task 7: cleanup live events when switching back to standard view
