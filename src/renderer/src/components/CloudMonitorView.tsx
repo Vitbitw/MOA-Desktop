@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
 import { formatCost } from '../lib/usageFormat'
 import { expiredWindows, fmtRemaining, isStaleAfterReset } from '../lib/usageWindow'
+import { clearCloudSnapshot, getCloudSnapshot, patchCloudSnapshot, shouldFetchOnMount } from '../lib/cloudMonitorCache'
+import type { CollectorStatusInfo } from '../lib/cloudMonitorCache'
 import { ExternalLink, KeyRound, Loader2, LogOut, RefreshCw } from 'lucide-react'
 import type {
   CommandCodeSubscription,
@@ -16,15 +18,6 @@ import type {
   RemoteUsageSource,
   UsageWindowInfo
 } from '../../../shared/types'
-
-/** 后台采集器状态（与主进程 getCollectorStatus 返回一致） */
-interface CollectorStatusInfo {
-  enabled: boolean
-  intervalMinutes: number
-  lastCollectedAt: number
-  lastError: string | null
-  running: boolean
-}
 
 // ─── 格式化辅助 ───
 
@@ -373,18 +366,27 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const sourceId = source.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(null)
-  const [usage, setUsage] = useState<CommandCodeUsage | null>(null)
+  const [usage, setUsage] = useState<CommandCodeUsage | null>(
+    () => (getCloudSnapshot(sourceId)?.usage as CommandCodeUsage | undefined) ?? null
+  )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
   const [loggingIn, setLoggingIn] = useState(false)
-  const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
   const [showApiKeyInput, setShowApiKeyInput] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   // 本地累计（云端列表对部分套餐只给最近 100 条，累计口径让数字只增不减）
-  const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(null)
-  const [collector, setCollector] = useState<CollectorStatusInfo | null>(null)
-  const [detailMode, setDetailMode] = useState<'monthly' | 'cumulative'>('monthly')
+  const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(
+    () => getCloudSnapshot(sourceId)?.cumulative ?? null
+  )
+  const [collector, setCollector] = useState<CollectorStatusInfo | null>(
+    () => getCloudSnapshot(sourceId)?.collector ?? null
+  )
+  const [detailMode, setDetailMode] = useState<'monthly' | 'cumulative'>(
+    () => getCloudSnapshot(sourceId)?.detailMode ?? 'monthly'
+  )
+  // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
+  const lastFetchedAt = usage?.fetchedAt ?? null
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数（拿到过期的 loading/status）
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -416,7 +418,8 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
       const res = await window.moaAPI.monitorRefresh(source)
       if (res.success && res.data) {
         setUsage(res.data as CommandCodeUsage)
-        setLastFetchedAt(res.data.fetchedAt)
+        // 写回快照：视图切走组件卸载后，重进直接恢复
+        patchCloudSnapshot(sourceId, { usage: res.data })
       } else {
         const code = res.code ?? 'unknown'
         setErrorCode(code)
@@ -448,14 +451,20 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
         window.moaAPI.monitorGetCumulative(sourceId),
         window.moaAPI.monitorCollectorStatus()
       ])
-      if (cumRes.success && cumRes.data) setCumulative(cumRes.data)
-      if (stRes.success && stRes.data) setCollector(stRes.data)
+      if (cumRes.success && cumRes.data) {
+        setCumulative(cumRes.data)
+        patchCloudSnapshot(sourceId, { cumulative: cumRes.data })
+      }
+      if (stRes.success && stRes.data) {
+        setCollector(stRes.data)
+        patchCloudSnapshot(sourceId, { collector: stRes.data })
+      }
     } catch {
       // 累计读取失败不阻塞页面（首次为空属正常）
     }
   }
 
-  // 挂载：读取状态；已登录则拉一次数据
+  // 挂载：读取状态（用量本体从快照恢复，见各 useState 的惰性初始化）
   useEffect(() => {
     if (!sourceId) return
     loadStatus()
@@ -479,12 +488,19 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId])
 
+  // 登录态就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
   useEffect(() => {
-    if (sourceId && status?.loggedIn && usage == null) {
+    if (sourceId && status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.loggedIn, usage == null])
+  }, [status?.loggedIn])
+
+  // 明细口径选择写回快照：切视图往返后保持用户选择
+  useEffect(() => {
+    if (sourceId) patchCloudSnapshot(sourceId, { detailMode })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId, detailMode])
 
   // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {
@@ -549,6 +565,8 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
 
   const handleLogout = async () => {
     if (!sourceId) return
+    // 快照随登出清空：换账号后不得残留旧账号数据
+    clearCloudSnapshot(sourceId)
     try {
       await window.moaAPI.monitorLogout(sourceId)
     } catch {
@@ -975,12 +993,15 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const sourceId = source.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(null)
-  const [usage, setUsage] = useState<MimoUsage | null>(null)
+  const [usage, setUsage] = useState<MimoUsage | null>(
+    () => (getCloudSnapshot(sourceId)?.usage as MimoUsage | undefined) ?? null
+  )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
   const [loggingIn, setLoggingIn] = useState(false)
-  const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
+  // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
+  const lastFetchedAt = usage?.fetchedAt ?? null
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -1012,7 +1033,8 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
       const res = await window.moaAPI.monitorRefresh(source)
       if (res.success && res.data) {
         setUsage(res.data as MimoUsage)
-        setLastFetchedAt(res.data.fetchedAt)
+        // 写回快照：视图切走组件卸载后，重进直接恢复
+        patchCloudSnapshot(sourceId, { usage: res.data })
       } else {
         const code = res.code ?? 'unknown'
         setErrorCode(code)
@@ -1036,18 +1058,19 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
     }
   }
 
-  // 挂载：读取状态；已登录则拉一次数据
+  // 挂载：读取状态（用量本体从快照恢复，见各 useState 的惰性初始化）
   useEffect(() => {
     loadStatus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId])
 
+  // 登录态就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
   useEffect(() => {
-    if (status?.loggedIn && usage == null) {
+    if (status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.loggedIn, usage == null])
+  }, [status?.loggedIn])
 
   // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {
@@ -1081,6 +1104,8 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   }
 
   const handleLogout = async () => {
+    // 快照随登出清空：换账号后不得残留旧账号数据
+    clearCloudSnapshot(sourceId)
     try {
       await window.moaAPI.monitorLogout(sourceId)
     } catch {
@@ -1266,12 +1291,15 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   const sourceId = source.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(null)
-  const [usage, setUsage] = useState<DeepSeekUsage | null>(null)
+  const [usage, setUsage] = useState<DeepSeekUsage | null>(
+    () => (getCloudSnapshot(sourceId)?.usage as DeepSeekUsage | undefined) ?? null
+  )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
   const [loggingIn, setLoggingIn] = useState(false)
-  const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
+  // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
+  const lastFetchedAt = usage?.fetchedAt ?? null
   const [showApiKeyInput, setShowApiKeyInput] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -1305,7 +1333,8 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
       const res = await window.moaAPI.monitorRefresh(source)
       if (res.success && res.data) {
         setUsage(res.data as DeepSeekUsage)
-        setLastFetchedAt(res.data.fetchedAt)
+        // 写回快照：视图切走组件卸载后，重进直接恢复
+        patchCloudSnapshot(sourceId, { usage: res.data })
       } else {
         const code = res.code ?? 'unknown'
         setErrorCode(code)
@@ -1329,18 +1358,19 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
     }
   }
 
-  // 挂载：读取状态；已登录则拉一次数据
+  // 挂载：读取状态（用量本体从快照恢复，见各 useState 的惰性初始化）
   useEffect(() => {
     loadStatus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId, source])
 
+  // 登录态就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
   useEffect(() => {
-    if (status?.loggedIn && usage == null) {
+    if (status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.loggedIn, usage == null])
+  }, [status?.loggedIn])
 
   // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {
@@ -1375,6 +1405,8 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   }
 
   const handleLogout = async () => {
+    // 快照随登出清空：换账号后不得残留旧账号数据
+    clearCloudSnapshot(sourceId)
     try {
       await window.moaAPI.monitorLogout(sourceId)
     } catch {
