@@ -365,7 +365,9 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const currency = settings.currency
   const sourceId = source.id
 
-  const [status, setStatus] = useState<MonitorStatus | null>(null)
+  const [status, setStatus] = useState<MonitorStatus | null>(
+    () => getCloudSnapshot(sourceId)?.status ?? null
+  )
   const [usage, setUsage] = useState<CommandCodeUsage | null>(
     () => (getCloudSnapshot(sourceId)?.usage as CommandCodeUsage | undefined) ?? null
   )
@@ -397,6 +399,8 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   })
 
   const loggedIn = status?.loggedIn ?? false
+  // 登录态是否已知：读取中（本地 IPC，瞬时）时按中性渲染，避免先闪「登录」按钮再切「退出登录」
+  const statusKnown = status != null
   // 统一自动刷新间隔（分钟；0 = 关闭）：页面刷新与 Command Code 后台明细采集共用
   const refreshMinutes = useAutoRefreshMinutes()
 
@@ -410,6 +414,12 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
       // 状态读取失败不阻塞页面
     }
   }
+
+  // 登录态变化即写回快照：切视图重进时首帧直接渲染正确外观（避免先闪「登录」按钮再切「退出登录」）
+  useEffect(() => {
+    if (sourceId && status) patchCloudSnapshot(sourceId, { status })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId, status])
 
   const refresh = async () => {
     if (!source || loading) return
@@ -689,7 +699,16 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
             {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             刷新
           </button>
-          {loggedIn ? (
+          {!statusKnown ? (
+            // 登录态读取中（本地 IPC，瞬时）：渲染不可见占位保持布局，避免先闪出黑底的「登录」按钮
+            <button
+              disabled
+              aria-hidden="true"
+              className="invisible flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground"
+            >
+              <LogOut className="w-3.5 h-3.5" /> 退出登录
+            </button>
+          ) : loggedIn ? (
             <button
               onClick={handleLogout}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/40 transition-colors"
@@ -726,8 +745,8 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
         </div>
       )}
 
-      {/* 未登录空态 */}
-      {!loggedIn && (
+      {/* 未登录空态：仅在登录态已知且未登录时显示（未知时不闪大卡片） */}
+      {statusKnown && !loggedIn && (
         <div className="rounded-lg border border-border bg-card px-6 py-14 flex flex-col items-center gap-3">
           <p className="text-sm text-muted-foreground">
             尚未登录 Command Code 云端。登录后将展示 5小时/7天额度、月度余额、用量汇总与模型明细。
@@ -1012,7 +1031,9 @@ function fmtYi(v: number): string {
 function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const sourceId = source.id
 
-  const [status, setStatus] = useState<MonitorStatus | null>(null)
+  const [status, setStatus] = useState<MonitorStatus | null>(
+    () => getCloudSnapshot(sourceId)?.status ?? null
+  )
   const [usage, setUsage] = useState<MimoUsage | null>(
     () => (getCloudSnapshot(sourceId)?.usage as MimoUsage | undefined) ?? null
   )
@@ -1032,6 +1053,8 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   })
 
   const loggedIn = status?.loggedIn ?? false
+  // 登录态是否已知：读取中（本地 IPC，瞬时）时按中性渲染，避免先闪「登录」按钮再切「退出登录」
+  const statusKnown = status != null
   // 统一自动刷新间隔（分钟；0 = 关闭）：页面刷新与 Command Code 后台明细采集共用
   const refreshMinutes = useAutoRefreshMinutes()
 
@@ -1045,6 +1068,12 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
       // 状态读取失败不阻塞页面
     }
   }
+
+  // 登录态变化即写回快照：切视图重进时首帧直接渲染正确外观（避免先闪「登录」按钮再切「退出登录」）
+  useEffect(() => {
+    if (sourceId && status) patchCloudSnapshot(sourceId, { status })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId, status])
 
   const refresh = async () => {
     if (!source || loading) return
@@ -1200,7 +1229,16 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
             {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             刷新
           </button>
-          {loggedIn ? (
+          {!statusKnown ? (
+            // 登录态读取中（本地 IPC，瞬时）：渲染不可见占位保持布局，避免先闪出黑底的「登录」按钮
+            <button
+              disabled
+              aria-hidden="true"
+              className="invisible flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground"
+            >
+              <LogOut className="w-3.5 h-3.5" /> 退出登录
+            </button>
+          ) : loggedIn ? (
             <button
               onClick={handleLogout}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/40 transition-colors"
@@ -1237,8 +1275,8 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
         </div>
       )}
 
-      {/* 未登录空态 */}
-      {!loggedIn && (
+      {/* 未登录空态：仅在登录态已知且未登录时显示（未知时不闪大卡片） */}
+      {statusKnown && !loggedIn && (
         <div className="rounded-lg border border-border bg-card px-6 py-14 flex flex-col items-center gap-3">
           <p className="text-sm text-muted-foreground">
             尚未登录 Xiaomi MiMo。登录后将展示账户余额与 Token Plan 套餐用量。
@@ -1329,7 +1367,9 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   const sourceId = source.id
 
-  const [status, setStatus] = useState<MonitorStatus | null>(null)
+  const [status, setStatus] = useState<MonitorStatus | null>(
+    () => getCloudSnapshot(sourceId)?.status ?? null
+  )
   const [usage, setUsage] = useState<DeepSeekUsage | null>(
     () => (getCloudSnapshot(sourceId)?.usage as DeepSeekUsage | undefined) ?? null
   )
@@ -1351,6 +1391,8 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   })
 
   const loggedIn = status?.loggedIn ?? false
+  // 登录态是否已知：读取中（本地 IPC，瞬时）时按中性渲染，避免先闪「登录」按钮再切「退出登录」
+  const statusKnown = status != null
   // 统一自动刷新间隔（分钟；0 = 关闭）：页面刷新与 Command Code 后台明细采集共用
   const refreshMinutes = useAutoRefreshMinutes()
 
@@ -1364,6 +1406,12 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
       // 状态读取失败不阻塞页面
     }
   }
+
+  // 登录态变化即写回快照：切视图重进时首帧直接渲染正确外观（避免先闪「登录」按钮再切「退出登录」）
+  useEffect(() => {
+    if (sourceId && status) patchCloudSnapshot(sourceId, { status })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId, status])
 
   const refresh = async () => {
     if (!source || loading) return
@@ -1538,7 +1586,16 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
             {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             刷新
           </button>
-          {loggedIn ? (
+          {!statusKnown ? (
+            // 登录态读取中（本地 IPC，瞬时）：渲染不可见占位保持布局，避免先闪出黑底的「登录」按钮
+            <button
+              disabled
+              aria-hidden="true"
+              className="invisible flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground"
+            >
+              <LogOut className="w-3.5 h-3.5" /> 退出登录
+            </button>
+          ) : loggedIn ? (
             <button
               onClick={handleLogout}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/40 transition-colors"
@@ -1575,8 +1632,8 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
         </div>
       )}
 
-      {/* 未登录空态 */}
-      {!loggedIn && (
+      {/* 未登录空态：仅在登录态已知且未登录时显示（未知时不闪大卡片） */}
+      {statusKnown && !loggedIn && (
         <div className="rounded-lg border border-border bg-card px-6 py-14 flex flex-col items-center gap-3">
           <p className="text-sm text-muted-foreground">
             尚未登录 DeepSeek 开放平台。登录后展示账户余额、今日/本月花费与 Token 用量、模型明细及近 7 日趋势。

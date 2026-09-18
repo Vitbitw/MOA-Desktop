@@ -7,7 +7,7 @@
 // 仅存内存：应用重启后首进仍会重新拉取。
 // 注意：登出时必须 clearCloudSnapshot，否则换账号后重进会残留上一账号的数据。
 
-import type { CumulativeModelUsage, MonitorUsage } from '../../../shared/types'
+import type { CumulativeModelUsage, MonitorStatus, MonitorUsage } from '../../../shared/types'
 
 /** 后台采集器状态（与主进程 getCollectorStatus 返回一致） */
 export interface CollectorStatusInfo {
@@ -22,6 +22,8 @@ export interface CollectorStatusInfo {
 export interface CloudSnapshot {
   /** 最近一次成功拉取的归一化用量（其 fetchedAt 即该数据的拉取时间，本地时钟） */
   usage: MonitorUsage | null
+  /** 登录态（loadStatus 结果；用于切视图重进时首帧直接渲染正确外观，避免先闪「登录」按钮） */
+  status: MonitorStatus | null
   /** 本地累计（Command Code） */
   cumulative: CumulativeModelUsage | null
   /** 采集器状态（Command Code） */
@@ -30,7 +32,7 @@ export interface CloudSnapshot {
   detailMode: 'monthly' | 'cumulative' | null
 }
 
-const EMPTY: CloudSnapshot = { usage: null, cumulative: null, collector: null, detailMode: null }
+const EMPTY: CloudSnapshot = { usage: null, status: null, cumulative: null, collector: null, detailMode: null }
 
 const snapshots = new Map<string, CloudSnapshot>()
 

@@ -63,6 +63,7 @@ async function main() {
   patchCloudSnapshot(SID, { usage })
   let snap = getCloudSnapshot(SID)
   eq(snap.usage, usage, '首次 patch 写入 usage')
+  eq(snap.status, null, '未提及字段补为 null（status）')
   eq(snap.cumulative, null, '未提及字段补为 null')
   eq(snap.detailMode, null, '未提及字段补为 null（detailMode）')
 
@@ -71,6 +72,14 @@ async function main() {
   snap = getCloudSnapshot(SID)
   eq(snap.cumulative, cum, '二次 patch 写入 cumulative')
   eq(snap.usage, usage, '二次 patch 保留既有 usage（局部更新）')
+
+  // status（登录态）与 usage 互不覆盖：首帧外观依赖它，切视图重进不能丢
+  const st = { loggedIn: true, hasApiKey: false }
+  patchCloudSnapshot(SID, { status: st })
+  snap = getCloudSnapshot(SID)
+  eq(snap.status, st, 'patch 写入 status')
+  eq(snap.usage, usage, 'patch status 保留既有 usage')
+  eq(snap.cumulative, cum, 'patch status 保留既有 cumulative')
 
   patchCloudSnapshot(SID, { detailMode: 'cumulative' })
   snap = getCloudSnapshot(SID)
@@ -85,6 +94,7 @@ async function main() {
   snap = getCloudSnapshot(SID)
   eq(snap.detailMode, 'monthly', 'clear 后重建：新字段就位')
   eq(snap.usage, null, 'clear 后重建：旧 usage 不残留')
+  eq(snap.status, null, 'clear 后重建：旧 status 不残留（登出后不显示已登录外观）')
   clearCloudSnapshot(SID)
 
   // ── [2] shouldFetchOnMount：重进页面是否打远端 ──
