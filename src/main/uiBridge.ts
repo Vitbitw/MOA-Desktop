@@ -3,7 +3,7 @@
 // UI 通知属非关键路径，窗口未创建或已销毁不得打断网关执行与记账。
 // 设计说明见 .hermes/plans/2026-09-18-moa-live-streaming.md §4.5
 
-import type { SubModelRole } from '../shared/types'
+import { IPC_EVENT } from '../shared/ipc-channels'
 
 /** 注入的发送器（index.ts 传 safeSendMain；测试可注入收集器） */
 let sender: ((channel: string, payload?: unknown) => void) | null = null
@@ -23,64 +23,26 @@ export function broadcastToUi(channel: string, payload?: unknown): void {
 }
 
 // ── 网关代理请求直播事件通道 ──
-// renderer 监控视图订阅同名通道（值即 IPC 通道名，两端改动需同步；T5 渲染端常量以此为准）
+// 通道字符串单一来源已上移到 ../shared/ipc-channels（IPC_EVENT.GATEWAY_*，与 preload/renderer 共用）；
+// 此处仅做别名导出，server.ts 等既有 `from '../uiBridge'` 引用无需改动。
 
 /** 轮次开始（UI 收到即切监控视图） */
-export const GATEWAY_ROUND_START = 'gateway:roundStart'
+export const GATEWAY_ROUND_START = IPC_EVENT.GATEWAY_ROUND_START
 /** 子模型更新（running=累计文本，节流） */
-export const GATEWAY_SUB_UPDATE = 'gateway:subUpdate'
+export const GATEWAY_SUB_UPDATE = IPC_EVENT.GATEWAY_SUB_UPDATE
 /** 聚合开始 */
-export const GATEWAY_AGG_START = 'gateway:aggStart'
+export const GATEWAY_AGG_START = IPC_EVENT.GATEWAY_AGG_START
 /** 聚合增量（text=累计全文，节流；done=true 终态） */
-export const GATEWAY_AGG_CHUNK = 'gateway:aggChunk'
+export const GATEWAY_AGG_CHUNK = IPC_EVENT.GATEWAY_AGG_CHUNK
 /** 轮次结束（aborted:true = 客户端断开中止） */
-export const GATEWAY_ROUND_DONE = 'gateway:roundDone'
+export const GATEWAY_ROUND_DONE = IPC_EVENT.GATEWAY_ROUND_DONE
 
-/** 子模型清单项（index 与 GATEWAY_SUB_UPDATE.index 对齐） */
-export interface GatewaySubModelRef {
-  index: number
-  modelId: string
-  role: SubModelRole
-}
-
-export interface GatewayRoundStartPayload {
-  roundId: string
-  mode: 'aggregate' | 'compare' | 'direct'
-  /** direct 轮次仅第 1 个（实际调用的单模型） */
-  subModels: GatewaySubModelRef[]
-  /** 聚合模型（compare / direct 无）；仅为身份标注，不含密钥 */
-  aggregator?: { modelId: string }
-}
-
-/** 密钥/敏感字段不得进入本 payload（网关广播只含模型身份与输出文本） */
-export interface GatewaySubUpdatePayload {
-  roundId: string
-  index: number
-  modelId: string
-  providerId: string
-  content: string
-  status: 'running' | 'success' | 'error'
-  error?: string
-  durationMs?: number
-  tokenUsage?: { prompt: number; completion: number }
-  role?: SubModelRole
-}
-
-export interface GatewayAggStartPayload {
-  roundId: string
-}
-
-export interface GatewayAggChunkPayload {
-  roundId: string
-  text: string
-  done: boolean
-}
-
-export interface GatewayRoundDonePayload {
-  roundId: string
-  success: boolean
-  error?: string
-  /** true = 客户端断开（abort 链路触发），success 恒为 false */
-  aborted?: boolean
-  durationMs: number
-}
+/** payload 类型同源再导出（server.ts 以 `import type ... from '../uiBridge'` 引用） */
+export type {
+  GatewaySubModelRef,
+  GatewayRoundStartPayload,
+  GatewaySubUpdatePayload,
+  GatewayAggStartPayload,
+  GatewayAggChunkPayload,
+  GatewayRoundDonePayload
+} from '../shared/ipc-channels'
