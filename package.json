@@ -23,6 +23,7 @@
     "test:cloud-cache": "node test-e2e/cloud-monitor-cache.cjs",
     "test:snapshot-store": "node test-e2e/monitor-snapshot-store.cjs",
     "test:expert-team": "node test-e2e/expert-team.cjs",
+    "test:arch-persist": "node test-e2e/architecture-persist.cjs",
     "db:inspect": "node test-e2e/db-inspect.cjs"
   },
   "dependencies": {

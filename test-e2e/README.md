@@ -18,6 +18,7 @@
 | `npm run test:cloud-cache` | `cloud-monitor-cache.cjs` | 云监控页面快照缓存：get/patch/clear 语义（局部更新不丢字段、登出清空）+ 挂载拉取判定（新鲜/过期/自动刷新关闭） |
 | `npm run test:snapshot-store` | `monitor-snapshot-store.cjs` | 云监控用量快照持久化：save/get 往返、同源覆盖与源间隔离、clear、损坏 JSON 与 DB 抛错降级 |
 | `npm run test:expert-team` | `expert-team.cjs` | 主席团专家团：LLM 输出宽容解析 / 生成模型解析与错误路径 / 席位映射与自动扩充缩减 |
+| `npm run test:arch-persist` | `architecture-persist.cjs` | MoA 协作架构持久化（**唯一启动完整应用的测试**：需图形会话，不纳入 `test:all`）：切换即改即存 / 重启保持 + UI 同步 / 生成专家团写入不清架构 |
 | `npm run db:inspect` | `db-inspect.cjs` | 只读诊断本地 SQLite：`cc_usage_records` 采集批次、按模型汇总、监控设置 |
 
 ## monitor-behavior.cjs
@@ -31,6 +32,13 @@
 
 - **只读**：先把 DB 复制到临时文件再打开，不会写回应用数据库
 - DB 路径顺序：命令行参数 > `MOA_DB` 环境变量 > Electron userData 默认位置（Windows `%APPDATA%\moa-desktop`、macOS `~/Library/Application Support/moa-desktop`、Linux `~/.config/moa-desktop`）
+
+## architecture-persist.cjs
+
+- **唯一会启动完整应用的测试**（其余脚本均为纯 Node 逻辑验证）：真实 Electron 主进程 + 渲染进程 + 隔离临时 userData（`os.tmpdir()` 下建目录，结束即删；`MOA_ARCH_E2E_KEEP=1` 保留现场排障），全程不触碰用户数据
+- 依赖 `out/` 构建产物（先 `npm run build`）；运行期间主窗口会短暂出现；网关端口被占用时自动顺延，不与正在运行的应用冲突
+- 覆盖：架构切换即改即存（点击 → 主进程落库，无需点「保存配置」）、重启保持 + 设置面板 UI 同步（按钮高亮 / 「AI 生成专家团」面板出现）、生成专家团写入链路（仅 subModels）不清掉 architecture
+- 返回码：全部通过 `0`，有失败 `1`（失败时打印实际值与步骤快照）
 
 ## 目录约定
 

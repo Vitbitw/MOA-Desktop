@@ -209,7 +209,7 @@ function MoASection() {
     })
   }, [])
 
-  // Reload when providers change
+  // Reload when providers change（只重载与模型池相关的字段：厂商增删后席位/聚合模型的可选项变化）
   useEffect(() => {
     if (loaded) {
       window.moaAPI.getMoaConfig().then((res: any) => {
@@ -220,7 +220,8 @@ function MoASection() {
           setAggProviderId(config.aggregator?.primaryProviderId || '')
           setFallbackProviderId(config.aggregator?.fallbackProviderId || '')
           setFallbackModelId(config.aggregator?.fallbackModelId || '')
-          if (config.architecture) setArchitecture(config.architecture)
+          // 不在此重载 architecture：它与模型池无关，且本面板即改即存（saveArchitecture）；
+          // 这里用 DB 旧值回写会与进行中的即存竞态，把用户刚切的架构静默回滚。
         }
       })
     }
@@ -254,6 +255,22 @@ function MoASection() {
 
   const updateSubModel = (idx: number, patch: Partial<SubModelConfig>) => {
     setSubModels((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)))
+  }
+
+  /**
+   * 协作架构：即改即存（与下方「MoA 网关」区的架构下拉一致）。
+   * 架构是二选一开关，若只改本地 state、要用户再点「保存配置」才落库，会静默丢失：
+   * 用户走「切架构 → AI 生成专家团（生成即写库）」路径时，架构从未落库，重启回退默认选举。
+   */
+  const saveArchitecture = async (arch: MoaArchitecture) => {
+    setArchitecture(arch)
+    try {
+      const res: any = await window.moaAPI.setMoaConfig({ architecture: arch })
+      if (res?.success === false) throw new Error(res?.error || '保存失败')
+      notifySaveResult(true)
+    } catch (err) {
+      notifySaveResult(false, String(err))
+    }
   }
 
   const handleSave = async () => {
@@ -298,12 +315,12 @@ function MoASection() {
     <div className="max-w-lg space-y-6">
       <p className="text-sm text-muted-foreground">配置子模型和聚合模型</p>
 
-      {/* MoA architecture toggle */}
+      {/* MoA architecture toggle（即改即存，见 saveArchitecture） */}
       <div>
         <label className="text-sm font-medium text-foreground block mb-2">协作架构</label>
         <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5 w-fit">
           <button
-            onClick={() => setArchitecture('election')}
+            onClick={() => saveArchitecture('election')}
             className={`px-3 py-1 text-xs rounded-md transition-colors ${
               architecture === 'election' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
             }`}
@@ -312,7 +329,7 @@ function MoASection() {
             🗳️ 选举模式
           </button>
           <button
-            onClick={() => setArchitecture('committee')}
+            onClick={() => saveArchitecture('committee')}
             className={`px-3 py-1 text-xs rounded-md transition-colors ${
               architecture === 'committee' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
             }`}
