@@ -1,5 +1,3 @@
-import type { SubModelRole } from '../../shared/types'
-import { MOA_ROLE_LABELS } from '../../shared/moaRoles'
 import type { ChatMessage } from './streamChat'
 
 export const STANDARD_PROMPT_ZH = `你是一个多模型融合器（Mixture-of-Agents Synthesizer）。
@@ -86,12 +84,13 @@ export function buildAggregationMessages(
  */
 export function buildCommitteeMessages(
   transcript: ChatMessage[],
-  expertOutputs: Array<{ modelId: string; role: SubModelRole; content: string; expertName?: string }>,
+  expertOutputs: Array<{ modelId: string; content: string; expertName?: string }>,
   chairSystemPrompt: string
 ): ChatMessage[] {
   const refs = expertOutputs
     .map((o, i) => {
-      const title = o.expertName?.trim() || (o.role ? MOA_ROLE_LABELS[o.role] : '通用专家')
+      // 专家署名：自定义角色名 > 通用专家（预设角色标签已退役，v9）
+      const title = o.expertName?.trim() || '通用专家'
       return `[专家 ${i + 1} · ${title} · ${o.modelId}]:\n${o.content}`
     })
     .join('\n\n')

@@ -6,7 +6,7 @@ export interface MoaRoleTemplate {
   systemPrompt: string
 }
 
-/** 预设角色模板库：主进程（提示词）与渲染端（UI 标签）共享，避免双份维护 */
+/** 预设角色模板库：**仅用于旧数据迁移**（v9 预设角色退役——迁移时转为等价自定义角色：名字=label、介绍=systemPrompt）。新代码不得引用 */
 export const MOA_ROLE_TEMPLATES: MoaRoleTemplate[] = [
   {
     key: 'critic',
@@ -45,16 +45,6 @@ export const MOA_ROLE_TEMPLATES: MoaRoleTemplate[] = [
       '你是一位精炼的总结者。请从整体层面归纳问题的要点、关键结论与行动项，力求简洁准确、便于决策。参考本轮上下文，只输出你的总结意见。'
   }
 ]
-
-export const MOA_ROLE_LABELS: Record<SubModelRole, string> = {
-  critic: '批判者',
-  advisor: '技术顾问',
-  creative: '创意官',
-  pragmatist: '务实派',
-  analyst: '分析师',
-  summarizer: '总结者',
-  '': ''
-}
 
 export function getRoleTemplate(role: SubModelRole): MoaRoleTemplate | undefined {
   return MOA_ROLE_TEMPLATES.find((t) => t.key === role)

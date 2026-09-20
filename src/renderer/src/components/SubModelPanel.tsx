@@ -4,8 +4,6 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import type { LiveSubOutput } from '../store/conversationStore'
-import { MOA_ROLE_LABELS } from '../../../shared/moaRoles'
-import type { SubModelRole } from '../../../shared/types'
 
 const STATUS_ICON: Record<string, string> = {
   pending: '○',
@@ -33,9 +31,8 @@ function SubModelPanel({ output, showIdentity = true }: { output: LiveSubOutput;
   const shortModelName = output.modelId.length > 30
     ? output.modelId.slice(0, 27) + '…'
     : output.modelId
-  const roleLabel = showIdentity
-    ? output.expertName?.trim() || (output.role ? MOA_ROLE_LABELS[output.role as SubModelRole] : '')
-    : ''
+  // 身份标签：自定义角色名 > 无（预设角色标签已退役，v9）；showIdentity=false（选举模式）时不显示
+  const roleLabel = showIdentity ? (output.expertName?.trim() || '') : ''
 
   return (
     <div className={`

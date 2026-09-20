@@ -293,8 +293,15 @@ const uiSince = (mark) => gw.broadcasts.slice(mark)
 const chanCount = (evts, channel) => evts.filter((e) => e.channel === channel).length
 const roundIdOf = (evts) => evts[0]?.payload?.roundId
 
+// v9：预设角色已退役——夹具采用「迁移后形态」（role 空 + 自定义介绍），旧预设数据由 app 启动迁移自动转换
 const SUB_MODELS = [
-  { modelId: 'sub-a', providerId: 'prov-1', order: 0, role: 'critic' },
+  {
+    modelId: 'sub-a',
+    providerId: 'prov-1',
+    order: 0,
+    role: '',
+    systemPrompt: '你是一位严格的批判者。请从逻辑、事实可靠性、潜在风险和缺陷角度审视该问题，并给出建设性改进点。参考本轮上下文，只输出你的批判性意见。'
+  },
   { modelId: 'sub-b', providerId: 'prov-1', order: 1 }
 ]
 const TOOLS_REQUEST = {
@@ -391,9 +398,9 @@ const TOOLS_REQUEST = {
     eq(evts[0]?.channel, 'gateway:roundStart', '序列以 roundStart 开始')
     eq(evts[0]?.payload.mode, 'aggregate', 'roundStart.mode = aggregate')
     eq(evts[0]?.payload.subModels, [
-      { index: 0, modelId: 'sub-a', role: 'critic' },
+      { index: 0, modelId: 'sub-a', role: '' },
       { index: 1, modelId: 'sub-b', role: '' }
-    ], 'roundStart 子模型清单（index/modelId/role）')
+    ], 'roundStart 子模型清单（index/modelId/role；role 已退役恒空）')
     const roundId = roundIdOf(evts)
     const subEvts = evts.filter((e) => e.channel === 'gateway:subUpdate' && e.payload.roundId === roundId)
     ok(subEvts.some((e) => e.payload.status === 'running'), '含 running 累计更新')

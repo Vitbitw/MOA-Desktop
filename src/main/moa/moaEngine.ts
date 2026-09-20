@@ -1,7 +1,6 @@
 import { getAllProviders } from '../providers/providerManager'
 import { callSubModelStream, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, buildCommitteeMessages, getAggregationPrompt, CHAIR_PROMPT_ZH } from './aggregationPrompt'
-import { getRoleTemplate } from '../../shared/moaRoles'
 import { DEFAULT_SUB_MODEL_TIMEOUT, DEFAULT_AGGREGATOR_TIMEOUT } from '../../shared/defaults'
 import { streamChat } from './streamChat'
 import type { ChatMessage, ToolCallResult } from './streamChat'
@@ -72,16 +71,8 @@ export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPromp
   const providers = getAllProviders()
   return subModels.map((sm) => {
     const p = providers.find((prov) => prov.id === sm.providerId)
-    // 生效的子模型 systemPrompt：自定义 > 角色模板 > 全局默认
-    const effectiveSystemPrompt =
-      sm.systemPrompt && sm.systemPrompt.trim().length > 0
-        ? sm.systemPrompt
-        : sm.role
-          ? getRoleTemplate(sm.role)?.systemPrompt
-          : undefined
-    // 生效专家名（主席团署名）：仅「自定义角色」模式使用——从自定义切到预设/无角色后
-    // expertName 仍保留在配置里（供切回），但不得参与署名与展示
-    const isCustomRole = sm.customRole ?? (sm.expertName !== undefined)
+    // 生效的子模型 systemPrompt：自定义介绍 > 全局默认（预设角色模板已退役，v9——旧数据迁移在 moaConfig 层完成）
+    const effectiveSystemPrompt = sm.systemPrompt && sm.systemPrompt.trim().length > 0 ? sm.systemPrompt : undefined
     return {
       providerId: sm.providerId,
       providerBaseUrl: p?.baseUrl || '',
@@ -90,7 +81,7 @@ export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPromp
       enabled: p?.enabled !== false,
       role: (sm.role || '') as SubModelRole,
       systemPrompt: effectiveSystemPrompt || defaultSystemPrompt,
-      expertName: isCustomRole ? sm.expertName : undefined
+      expertName: sm.expertName
     }
   }).filter((sm) => sm.providerBaseUrl && sm.enabled && sm.apiKey)
 }
@@ -297,7 +288,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
   const aggMessages = isCommittee
     ? buildCommitteeMessages(
         req.messages,
-        successfulOutputs.map((o) => ({ modelId: o.modelId, role: o.role || '', content: o.content, expertName: o.expertName })),
+        successfulOutputs.map((o) => ({ modelId: o.modelId, content: o.content, expertName: o.expertName })),
         aggPrompt
       )
     : buildAggregationMessages(

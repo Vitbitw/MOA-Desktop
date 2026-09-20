@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import type { SubModelConfig, AggregatorConfig, MoAMode, MoaArchitecture } from '../../shared/types'
+import { getRoleTemplate } from '../../shared/moaRoles'
 import { getDatabase } from '../db/database'
 
 const CONFIG_KEY = 'moa_runtime_config'
@@ -46,6 +47,27 @@ export function loadMoaConfigFromDb(): void {
       for (const sm of subModels) {
         if (sm && typeof sm === 'object' && !sm.id) {
           sm.id = crypto.randomUUID()
+          migrated = true
+        }
+      }
+      // 旧配置迁移（v9）：① v8 角色三态残留清收——非自定义模式（customRole===false）下残留的
+      // expertName 在 v8 运行时不生效，清除以保持一致；② 预设角色退役 → 转为等价自定义角色
+      // （名字=模板名、介绍=模板提示词；已有自定义内容优先保留），role 清空；③ customRole 字段退役。
+      for (const sm of subModels) {
+        if (!sm || typeof sm !== 'object') continue
+        if (sm.customRole === false && sm.expertName !== undefined) {
+          sm.expertName = undefined
+          migrated = true
+        }
+        if (sm.role) {
+          const tpl = getRoleTemplate(sm.role)
+          if (!(sm.expertName ?? '').trim()) sm.expertName = tpl?.label ?? sm.role
+          if (!(sm.systemPrompt ?? '').trim() && tpl?.systemPrompt) sm.systemPrompt = tpl.systemPrompt
+          sm.role = ''
+          migrated = true
+        }
+        if (sm.customRole !== undefined) {
+          delete sm.customRole
           migrated = true
         }
       }

@@ -4,9 +4,8 @@ import { useConfigStore } from '../store/configStore'
 import { useProbeStore, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture, SubModelRole } from '../../../shared/types'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
-import { MOA_ROLE_TEMPLATES } from '../../../shared/moaRoles'
 import { splitModelKey } from '../../../shared/modelKey'
 import ExpertTeamSection from './ExpertTeamSection'
 import { switchSeatModel } from '../utils/expertTeam'
@@ -175,23 +174,6 @@ function unwrapMoaConfig(res: any): any {
   return res && typeof res === 'object' && 'success' in res ? res.data : res
 }
 
-/** 主席团角色下拉的「自定义角色…」哨兵值：选中时展开角色名输入框（写入 expertName 自由文本） */
-const CUSTOM_ROLE = '__custom__'
-
-/**
- * 席位角色模式（三态）。无显式 customRole 标记（旧数据）时按字段推导：
- * - 'custom'：自定义角色（短名 + 完整介绍常显）
- * - 'preset'：固定模板（role 指定，介绍由模板提供）
- * - 'none'：无角色（通用）
- * 切换角色只改 customRole 与 role，不删 expertName/systemPrompt——切回自定义时数据仍在（v8）。
- */
-function roleModeOf(sm: SubModelConfig): 'custom' | 'preset' | 'none' {
-  if (sm.customRole === true) return 'custom'
-  if (sm.customRole === false) return sm.role ? 'preset' : 'none'
-  // 旧数据推导：expertName 存在视为自定义，否则按 role 分预设/无角色
-  return sm.expertName !== undefined ? 'custom' : sm.role ? 'preset' : 'none'
-}
-
 function MoASection() {
   const providers = useConfigStore((s) => s.providers)
   const notifySaveResult = useSettingsStore((s) => s.notifySaveResult)
@@ -208,15 +190,6 @@ function MoASection() {
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [architecture, setArchitecture] = useState<MoaArchitecture>('election')
-  // 展开"自定义提示词"覆盖编辑的席位 key 集合（预设模板/无角色时可折叠编辑；支持多席位同时展开）
-  const [editPromptKeys, setEditPromptKeys] = useState<Set<string>>(new Set())
-  const togglePromptKey = (key: string) =>
-    setEditPromptKeys((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
 
   // Load existing config on mount
   useEffect(() => {
@@ -378,8 +351,6 @@ function MoASection() {
           // 席位当前模型 key；不在模型池中（厂商/模型已删）时下拉补占位项，避免受控 select 显示错位
           const seatModelKey = `${sm.providerId}:${sm.modelId}`
           const seatModelInPool = modelPoolValues.has(seatModelKey)
-          // 角色模式（三态）：决定下拉选中值与自定义控件（名字 + 介绍）是否显示
-          const roleMode = roleModeOf(sm)
           return (
             <div key={k} className="rounded-md border border-border bg-muted/30 p-2 mb-1 text-sm">
               <div className="flex items-center gap-2">
@@ -413,65 +384,21 @@ function MoASection() {
               </div>
               {architecture === 'committee' && (
                 <div className="mt-2 space-y-2">
-                  {/* 角色选择：固定模板 / 自定义角色（短名 + 完整介绍） / 无角色。
-                      切换只改模式标记（customRole）与 role，不删 expertName/systemPrompt——切回自定义时数据仍在 */}
-                  <select
-                    value={roleMode === 'custom' ? CUSTOM_ROLE : roleMode === 'preset' ? (sm.role ?? '') : ''}
-                    onChange={(e) => {
-                      const v = e.target.value
-                      if (v === CUSTOM_ROLE) updateSubModel(i, { role: '', customRole: true, expertName: sm.expertName ?? '' })
-                      else if (v === '') updateSubModel(i, { role: '', customRole: false })
-                      else updateSubModel(i, { role: v as SubModelRole, customRole: false })
-                    }}
-                    className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                  >
-                    <option value="">无角色（通用）</option>
-                    {MOA_ROLE_TEMPLATES.map((t) => (
-                      <option key={t.key} value={t.key}>{t.label}</option>
-                    ))}
-                    <option value={CUSTOM_ROLE}>自定义角色…</option>
-                  </select>
-                  {roleMode === 'custom' ? (
-                    <>
-                      {/* 自定义角色：角色名（短标签，用于主席团提示词署名）+ 完整介绍（直接可见可编辑，AI 生成的落点） */}
-                      <input
-                        value={sm.expertName}
-                        onChange={(e) => updateSubModel(i, { expertName: e.target.value })}
-                        placeholder="角色名（短，如：安全工程师）"
-                        className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                      <textarea
-                        value={sm.systemPrompt ?? ''}
-                        onChange={(e) => updateSubModel(i, { systemPrompt: e.target.value })}
-                        placeholder="该角色的完整介绍（专长、职责、分析视角）——「AI 生成专家团」在此自动填充"
-                        rows={5}
-                        className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </>
-                  ) : (
-                    <>
-                      {/* 预设模板/无角色：默认提示词由模板提供，此处可选覆盖（折叠） */}
-                      <button
-                        onClick={() => togglePromptKey(k)}
-                        className="text-xs text-muted-foreground hover:text-foreground"
-                      >
-                        {editPromptKeys.has(k)
-                          ? '收起自定义提示词'
-                          : sm.systemPrompt
-                            ? '编辑自定义提示词（已设置）'
-                            : '自定义提示词…'}
-                      </button>
-                      {editPromptKeys.has(k) && (
-                        <textarea
-                          value={sm.systemPrompt ?? ''}
-                          placeholder={sm.role ? "留空则使用所选角色的默认提示词" : "输入该子模型专用的 system prompt（留空为无）"}
-                          onChange={(e) => updateSubModel(i, { systemPrompt: e.target.value })}
-                          rows={4}
-                          className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                        />
-                      )}
-                    </>
-                  )}
+                  {/* 角色：名字（短标签，主席团提示词署名用）+ 完整介绍（都可留空 = 无角色/通用）。
+                      此处是「AI 生成专家团」的落点；预设角色模板已退役（v9） */}
+                  <input
+                    value={sm.expertName ?? ''}
+                    onChange={(e) => updateSubModel(i, { expertName: e.target.value || undefined })}
+                    placeholder="角色名（短，如：安全工程师；留空为无角色）"
+                    className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <textarea
+                    value={sm.systemPrompt ?? ''}
+                    onChange={(e) => updateSubModel(i, { systemPrompt: e.target.value || undefined })}
+                    placeholder="该角色的完整介绍（专长、职责、分析视角）——「AI 生成专家团」在此自动填充"
+                    rows={5}
+                    className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
                 </div>
               )}
             </div>

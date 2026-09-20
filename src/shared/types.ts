@@ -35,17 +35,13 @@ export interface SubModelConfig {
   modelId: string
   providerId: string
   order: number
-  /** 预设角色模板 key；'' = 无预设（保持旧行为） */
+  /** @deprecated 预设角色已退役（v9）：新代码不读不写，恒为空串；旧数据由 moaConfig 启动迁移转自定义角色 */
   role?: SubModelRole
   /** 自定义 system prompt；非空时覆盖 role 模板 */
   systemPrompt?: string
   /** AI 生成的专家名（如「安全工程师」）。显示优先级：expertName > role 模板标签 > 无。旧配置缺省 */
   expertName?: string
-  /**
-   * 显式「自定义角色」模式标记：true = 下拉选中「自定义角色…」（即使角色名为空也显示自定义控件）。
-   * 切换角色（预设模板/无角色）只改此标记与 role，不删 expertName/systemPrompt——切回自定义时数据仍在。
-   * 缺省（undefined，旧数据）按 expertName !== undefined 推导。不参与数据存储语义，仅决定「生效/展示」。
-   */
+  /** @deprecated 角色三态已退役（v9）：预设取消后不再有模式概念；旧数据由 moaConfig 启动迁移清除 */
   customRole?: boolean
 }
 
