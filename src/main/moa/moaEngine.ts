@@ -79,6 +79,9 @@ export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPromp
         : sm.role
           ? getRoleTemplate(sm.role)?.systemPrompt
           : undefined
+    // 生效专家名（主席团署名）：仅「自定义角色」模式使用——从自定义切到预设/无角色后
+    // expertName 仍保留在配置里（供切回），但不得参与署名与展示
+    const isCustomRole = sm.customRole ?? (sm.expertName !== undefined)
     return {
       providerId: sm.providerId,
       providerBaseUrl: p?.baseUrl || '',
@@ -87,7 +90,7 @@ export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPromp
       enabled: p?.enabled !== false,
       role: (sm.role || '') as SubModelRole,
       systemPrompt: effectiveSystemPrompt || defaultSystemPrompt,
-      expertName: sm.expertName
+      expertName: isCustomRole ? sm.expertName : undefined
     }
   }).filter((sm) => sm.providerBaseUrl && sm.enabled && sm.apiKey)
 }

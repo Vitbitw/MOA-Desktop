@@ -380,6 +380,19 @@ const AGG_CONFIG = { primaryProviderId: 'p1', primaryModelId: 'agg-primary', fal
     eq(resolved[1].systemPrompt, '自定义提示词', '自定义 systemPrompt 优先')
     ok(typeof resolved[2].systemPrompt === 'string' && resolved[2].systemPrompt.length > 0 && resolved[2].systemPrompt !== '全局默认提示词', '角色模板 systemPrompt 生效（critic）')
     eq(resolved[0].role, '', '未配角色 → 空角色')
+
+    // customRole 模式（v8）：切换角色保留 expertName 数据，但仅「自定义角色」模式下才参与署名/展示
+    const resolved2 = engine.resolveSubModels([
+      { modelId: 'm5', providerId: 'p1', order: 0, role: 'critic', customRole: false, expertName: '残留名' },
+      { modelId: 'm6', providerId: 'p1', order: 1, role: '', customRole: false, expertName: '残留名' },
+      { modelId: 'm7', providerId: 'p1', order: 2, role: '', customRole: true, expertName: '安全工程师' },
+      { modelId: 'm8', providerId: 'p1', order: 3, role: '', expertName: '旧数据推导' }
+    ])
+    eq(resolved2.length, 4, 'customRole 用例：4 条全部可用')
+    eq(resolved2[0].expertName, undefined, '预设模式（customRole=false）→ 残留 expertName 不生效')
+    eq(resolved2[1].expertName, undefined, '无角色模式（customRole=false）→ 残留 expertName 不生效')
+    eq(resolved2[2].expertName, '安全工程师', '自定义模式（customRole=true）→ expertName 生效')
+    eq(resolved2[3].expertName, '旧数据推导', '旧数据缺 customRole → 按 expertName 推导为自定义，生效')
   }
 
   console.log('\n[6] 聚合进行中 abort：primary 流中途中止 → 不发起 fallback（守卫）+ 无重置帧')

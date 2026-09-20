@@ -41,6 +41,12 @@ export interface SubModelConfig {
   systemPrompt?: string
   /** AI 生成的专家名（如「安全工程师」）。显示优先级：expertName > role 模板标签 > 无。旧配置缺省 */
   expertName?: string
+  /**
+   * 显式「自定义角色」模式标记：true = 下拉选中「自定义角色…」（即使角色名为空也显示自定义控件）。
+   * 切换角色（预设模板/无角色）只改此标记与 role，不删 expertName/systemPrompt——切回自定义时数据仍在。
+   * 缺省（undefined，旧数据）按 expertName !== undefined 推导。不参与数据存储语义，仅决定「生效/展示」。
+   */
+  customRole?: boolean
 }
 
 // ─── Aggregator Config ───

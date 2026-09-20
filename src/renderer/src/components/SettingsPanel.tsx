@@ -178,6 +178,20 @@ function unwrapMoaConfig(res: any): any {
 /** 主席团角色下拉的「自定义角色…」哨兵值：选中时展开角色名输入框（写入 expertName 自由文本） */
 const CUSTOM_ROLE = '__custom__'
 
+/**
+ * 席位角色模式（三态）。无显式 customRole 标记（旧数据）时按字段推导：
+ * - 'custom'：自定义角色（短名 + 完整介绍常显）
+ * - 'preset'：固定模板（role 指定，介绍由模板提供）
+ * - 'none'：无角色（通用）
+ * 切换角色只改 customRole 与 role，不删 expertName/systemPrompt——切回自定义时数据仍在（v8）。
+ */
+function roleModeOf(sm: SubModelConfig): 'custom' | 'preset' | 'none' {
+  if (sm.customRole === true) return 'custom'
+  if (sm.customRole === false) return sm.role ? 'preset' : 'none'
+  // 旧数据推导：expertName 存在视为自定义，否则按 role 分预设/无角色
+  return sm.expertName !== undefined ? 'custom' : sm.role ? 'preset' : 'none'
+}
+
 function MoASection() {
   const providers = useConfigStore((s) => s.providers)
   const notifySaveResult = useSettingsStore((s) => s.notifySaveResult)
@@ -364,6 +378,8 @@ function MoASection() {
           // 席位当前模型 key；不在模型池中（厂商/模型已删）时下拉补占位项，避免受控 select 显示错位
           const seatModelKey = `${sm.providerId}:${sm.modelId}`
           const seatModelInPool = modelPoolValues.has(seatModelKey)
+          // 角色模式（三态）：决定下拉选中值与自定义控件（名字 + 介绍）是否显示
+          const roleMode = roleModeOf(sm)
           return (
             <div key={k} className="rounded-md border border-border bg-muted/30 p-2 mb-1 text-sm">
               <div className="flex items-center gap-2">
@@ -397,14 +413,15 @@ function MoASection() {
               </div>
               {architecture === 'committee' && (
                 <div className="mt-2 space-y-2">
-                  {/* 角色选择：固定模板 / 自定义角色（短名 + 完整介绍） / 无角色 */}
+                  {/* 角色选择：固定模板 / 自定义角色（短名 + 完整介绍） / 无角色。
+                      切换只改模式标记（customRole）与 role，不删 expertName/systemPrompt——切回自定义时数据仍在 */}
                   <select
-                    value={sm.expertName !== undefined ? CUSTOM_ROLE : (sm.role ?? '')}
+                    value={roleMode === 'custom' ? CUSTOM_ROLE : roleMode === 'preset' ? (sm.role ?? '') : ''}
                     onChange={(e) => {
                       const v = e.target.value
-                      if (v === CUSTOM_ROLE) updateSubModel(i, { role: '', expertName: sm.expertName ?? '' })
-                      else if (v === '') updateSubModel(i, { role: '', expertName: undefined })
-                      else updateSubModel(i, { role: v as SubModelRole, expertName: undefined })
+                      if (v === CUSTOM_ROLE) updateSubModel(i, { role: '', customRole: true, expertName: sm.expertName ?? '' })
+                      else if (v === '') updateSubModel(i, { role: '', customRole: false })
+                      else updateSubModel(i, { role: v as SubModelRole, customRole: false })
                     }}
                     className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                   >
@@ -414,7 +431,7 @@ function MoASection() {
                     ))}
                     <option value={CUSTOM_ROLE}>自定义角色…</option>
                   </select>
-                  {sm.expertName !== undefined ? (
+                  {roleMode === 'custom' ? (
                     <>
                       {/* 自定义角色：角色名（短标签，用于主席团提示词署名）+ 完整介绍（直接可见可编辑，AI 生成的落点） */}
                       <input
