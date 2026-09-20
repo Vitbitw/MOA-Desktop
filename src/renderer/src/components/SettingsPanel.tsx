@@ -175,6 +175,9 @@ function unwrapMoaConfig(res: any): any {
   return res && typeof res === 'object' && 'success' in res ? res.data : res
 }
 
+/** 主席团角色下拉的「自定义角色…」哨兵值：选中时展开角色名输入框（写入 expertName 自由文本） */
+const CUSTOM_ROLE = '__custom__'
+
 function MoASection() {
   const providers = useConfigStore((s) => s.providers)
   const notifySaveResult = useSettingsStore((s) => s.notifySaveResult)
@@ -378,7 +381,8 @@ function MoASection() {
                     <option key={opt.value} value={opt.value}>{opt.label}</option>
                   ))}
                 </select>
-                {sm.expertName && (
+                {/* 专家名徽标：主席团模式下专家名由下方角色控件承载（避免同卡片两处重复显示）；选举模式下仍作唯一展示位 */}
+                {architecture !== 'committee' && sm.expertName && (
                   <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary shrink-0">{sm.expertName}</span>
                 )}
                 <button
@@ -389,16 +393,31 @@ function MoASection() {
               </div>
               {architecture === 'committee' && (
                 <div className="mt-2 space-y-2">
+                  {/* 角色选择：固定模板 / 自定义角色（自由文本角色名，写入 expertName） / 无角色 */}
                   <select
-                    value={sm.role ?? ''}
-                    onChange={(e) => updateSubModel(i, { role: (e.target.value || '') as SubModelRole })}
+                    value={sm.expertName !== undefined ? CUSTOM_ROLE : (sm.role ?? '')}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      if (v === CUSTOM_ROLE) updateSubModel(i, { role: '', expertName: sm.expertName ?? '' })
+                      else if (v === '') updateSubModel(i, { role: '', expertName: undefined })
+                      else updateSubModel(i, { role: v as SubModelRole, expertName: undefined })
+                    }}
                     className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                   >
                     <option value="">无角色（通用）</option>
                     {MOA_ROLE_TEMPLATES.map((t) => (
                       <option key={t.key} value={t.key}>{t.label}</option>
                     ))}
+                    <option value={CUSTOM_ROLE}>自定义角色…</option>
                   </select>
+                  {sm.expertName !== undefined && (
+                    <input
+                      value={sm.expertName}
+                      onChange={(e) => updateSubModel(i, { expertName: e.target.value })}
+                      placeholder="角色名，如：安全工程师"
+                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  )}
                   <button
                     onClick={() => setEditPromptKey(editPromptKey === k ? null : k)}
                     className="text-xs text-muted-foreground hover:text-foreground"

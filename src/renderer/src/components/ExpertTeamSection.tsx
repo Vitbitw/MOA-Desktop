@@ -1,8 +1,7 @@
 import React, { useMemo, useState } from 'react'
-import { Sparkles, Loader2, ChevronDown, Check, RefreshCw } from 'lucide-react'
+import { Sparkles, Loader2, ChevronDown } from 'lucide-react'
 import { useConfigStore } from '../store/configStore'
-import { buildImportPlan, initialDrafts, type ExpertDraft, type ModelOption } from '../utils/expertTeam'
-import { splitModelKey } from '../../../shared/modelKey'
+import { buildImportPlan, initialDrafts, type ModelOption } from '../utils/expertTeam'
 import type { SubModelConfig, ExpertTeamPlan } from '../../../shared/types'
 
 interface ExpertTeamSectionProps {
@@ -11,71 +10,37 @@ interface ExpertTeamSectionProps {
   notifySaveResult: (ok: boolean, detail?: string) => void
 }
 
-/** 「无可用模型」下拉占位文案（该项导入时跳过） */
-const NO_MODEL_HINT = '无可用模型（请先配置厂商/模型）'
+/** 模型名短显（结果行内联展示，过长截断） */
+const shortModelId = (id: string): string => (id.length > 24 ? id.slice(0, 21) + '…' : id)
+
+/** 模型明细文案（前 3 个 + 等 N 个） */
+const detailOf = (ids: string[]): string =>
+  ids.slice(0, 3).map(shortModelId).join('、') + (ids.length > 3 ? ` 等 ${ids.length} 个` : '')
 
 /**
- * 主席团模式「AI 生成专家团」折叠面板（设计文档 §5.6）：
- * 输入任务需求 → 主进程生成专家草案（专家名/提示词/模型分配均可编辑）
- * → 一键导入（席位自动扩充/缩减，本地 state + moa:setConfig 落库）。
- * 数据由 props 注入（不直接读 moa:getConfig）；席位调整算法在 utils/expertTeam.ts。
+ * 主席团模式「AI 生成专家团」折叠面板（生成即写入，无中间预览/确认步骤）：
+ * 输入任务需求 → 主进程生成专家（推荐数量 + 角色名 + 提示词）
+ * → 直接写入下方子模型卡片（角色名 / 提示词 / 席位自动扩充缩减）并落库；
+ * 微调在下方卡片内进行（角色选择支持「自定义角色…」，可编辑角色名与提示词）。
+ * 席位调整算法见 utils/expertTeam.ts（纯函数，独立测试）。
  */
 export default function ExpertTeamSection({ subModels, setSubModels, notifySaveResult }: ExpertTeamSectionProps) {
   const providers = useConfigStore((s) => s.providers)
 
   const [open, setOpen] = useState(false)
   const [requirement, setRequirement] = useState('')
-  // 生成阶段：loading（进行中）/ error（错误行；失败保留需求输入与上次结果）
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // 预览态：plan（AI 生成结果）+ drafts（可编辑草案）
-  const [plan, setPlan] = useState<ExpertTeamPlan | null>(null)
-  const [drafts, setDrafts] = useState<ExpertDraft[]>([])
-  const [importing, setImporting] = useState(false)
-  const [imported, setImported] = useState(false)
+  // 生成成功后的结果行（专家数 / 席位变化 / 跳过明细；含「已写入本地未落库」提示）
+  const [applied, setApplied] = useState<string | null>(null)
+  // 是否已生成过（按钮文案：生成专家团 / 重新生成）
+  const [generated, setGenerated] = useState(false)
 
   // 全量模型选项（与 MoASection 同构：不按 apiKey 过滤）
   const allModelOptions = useMemo<ModelOption[]>(
     () => providers.flatMap((p) => (p.models || []).map((m) => ({ label: `${p.name} · ${m.id}`, value: `${p.id}:${m.id}` }))),
     [providers]
   )
-  const poolValues = useMemo(() => new Set(allModelOptions.map((o) => o.value)), [allModelOptions])
-
-  // 可导入草案数（modelKey 合法）；席位摘要与 skipped 提示均以此为准（与 buildImportPlan 同口径）
-  const validCount = useMemo(
-    () => drafts.filter((d) => d.modelKey !== '' && poolValues.has(d.modelKey)).length,
-    [drafts, poolValues]
-  )
-  const skippedCount = drafts.length - validCount
-
-  // 模型名短显（摘要行内联展示，过长截断）
-  const shortModelId = (id: string): string => (id.length > 24 ? id.slice(0, 21) + '…' : id)
-
-  // 席位变化摘要（导入后将发生的席位增减；含受影响模型明细，对齐设计文档 §5.6 示例）
-  const seatSummary = useMemo(() => {
-    const existingCount = subModels.length
-    const finalCount = validCount
-    if (finalCount === existingCount) return `席位保持 ${existingCount} 个`
-    if (finalCount > existingCount) {
-      // 新增席位 = 合法草案中超出现有席位数的尾段，展示其分配模型（最多 3 个）
-      const added = drafts
-        .filter((d) => d.modelKey !== '' && poolValues.has(d.modelKey))
-        .slice(existingCount)
-        .map((d) => splitModelKey(d.modelKey).modelId)
-      const shown = added.slice(0, 3).map(shortModelId).join('、') + (added.length > 3 ? ` 等 ${added.length} 个` : '')
-      return `席位 ${existingCount} → ${finalCount}：自动新增 ${finalCount - existingCount} 个席位（${shown}）`
-    }
-    // 被移除席位 = 现有席位中超出合法草案数的尾段
-    const removed = subModels.slice(validCount).map((s) => s.modelId)
-    const shown = removed.slice(0, 3).map(shortModelId).join('、') + (removed.length > 3 ? ` 等 ${removed.length} 个` : '')
-    return `席位 ${existingCount} → ${finalCount}：移除 ${existingCount - finalCount} 个席位（${shown}；其原有角色/提示词将一并移除）`
-  }, [validCount, subModels, drafts, poolValues])
-
-  /** 编辑任一草案（专家名/提示词/模型）→ 清除「已导入」标记 */
-  const updateDraft = (idx: number, patch: Partial<ExpertDraft>) => {
-    setDrafts((prev) => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)))
-    setImported(false)
-  }
 
   const handleGenerate = async () => {
     const req = requirement.trim()
@@ -83,41 +48,50 @@ export default function ExpertTeamSection({ subModels, setSubModels, notifySaveR
     setLoading(true)
     setError(null)
     try {
-      const res = await window.moaAPI.generateExperts({
+      const res: any = await window.moaAPI.generateExperts({
         requirement: req,
         seats: subModels.map((s) => s.modelId)
       })
-      if (res?.success === false) {
-        setError(res.error || '生成失败')
-      } else if (res?.data) {
-        setPlan(res.data)
-        setDrafts(initialDrafts(res.data.experts, subModels, allModelOptions))
-        setImported(false)
-      } else {
-        setError('生成失败：主进程未返回数据')
+      if (res?.success === false) throw new Error(res?.error || '生成失败')
+      const data = res?.data as ExpertTeamPlan | undefined
+      if (!data || !Array.isArray(data.experts) || data.experts.length === 0) throw new Error('生成结果为空')
+
+      // 直接应用：默认分配（前 min(M,N) 个映射现有席位，新增席位复用第一个子模型）→ 席位自动扩充/缩减
+      const drafts = initialDrafts(data.experts, subModels, allModelOptions)
+      const plan = buildImportPlan(subModels, allModelOptions, drafts)
+      if (plan.subModels.length === 0) {
+        throw new Error('没有可写入的专家：请先在「设置 → 厂商」配置可用模型')
       }
+
+      // 本地 state 立即生效（落库失败也保留，用户可手动「保存配置」重试）
+      setSubModels(plan.subModels)
+      let saved = true
+      try {
+        const save: any = await window.moaAPI.setMoaConfig({ subModels: plan.subModels })
+        if (save?.success === false) throw new Error(save?.error || '保存失败')
+        notifySaveResult(true)
+      } catch (err) {
+        saved = false
+        notifySaveResult(false, String(err))
+      }
+
+      const parts: string[] = [`已生成 ${plan.subModels.length} 个专家`]
+      if (plan.changes.expanded.length > 0) {
+        parts.push(`新增 ${plan.changes.expanded.length} 个席位（${detailOf(plan.changes.expanded.map((c) => c.modelId))}）`)
+      }
+      if (plan.changes.shrunk.length > 0) {
+        parts.push(`移除 ${plan.changes.shrunk.length} 个席位（${detailOf(plan.changes.shrunk.map((c) => c.modelId))}）`)
+      }
+      if (plan.skipped > 0) {
+        parts.push(`${plan.skipped} 个专家因无可用模型未写入`)
+      }
+      if (!saved) parts.push('已写入本地但保存失败，请点「保存配置」重试')
+      setApplied(parts.join('；'))
+      setGenerated(true)
     } catch (err) {
-      setError(String(err))
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
-    }
-  }
-
-  const handleImport = async () => {
-    if (importing) return
-    const importPlan = buildImportPlan(subModels, allModelOptions, drafts)
-    // ① 本地 state 立即生效（② 落库失败也保留，用户可手动「保存配置」重试）
-    setSubModels(importPlan.subModels)
-    setImporting(true)
-    try {
-      const res: any = await window.moaAPI.setMoaConfig({ subModels: importPlan.subModels })
-      if (res?.success === false) throw new Error(res?.error || '保存失败')
-      notifySaveResult(true)
-      setImported(true)
-    } catch (err) {
-      notifySaveResult(false, String(err))
-    } finally {
-      setImporting(false)
     }
   }
 
@@ -143,88 +117,20 @@ export default function ExpertTeamSection({ subModels, setSubModels, notifySaveR
             className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           />
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={handleGenerate}
               disabled={!requirement.trim() || loading}
               className="inline-flex items-center gap-1.5 px-3 py-1 text-xs bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 shrink-0"
             >
               {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-              {loading ? '生成中…' : '生成专家团'}
+              {loading ? '生成中…' : generated ? '重新生成' : '生成专家团'}
             </button>
+            <span className="text-xs text-muted-foreground/70">生成后直接写入下方专家席位（按推荐数量自动扩充/缩减）</span>
           </div>
+
           {error && <p className="text-xs text-destructive">{error}</p>}
-
-          {/* 预览态：推荐理由 + 席位变化摘要 + 可编辑专家卡片 + 一键导入 */}
-          {plan && drafts.length > 0 && (
-            <div className="space-y-2 border-t border-border pt-2">
-              {plan.reason?.trim() && <p className="text-xs text-muted-foreground">推荐理由：{plan.reason}</p>}
-              <p className="text-xs text-primary">{seatSummary}</p>
-              <p className="text-xs text-muted-foreground/70">由 {plan.providerId} · {plan.modelId} 生成</p>
-
-              {drafts.map((d, i) => {
-                const keyValid = d.modelKey !== '' && poolValues.has(d.modelKey)
-                return (
-                  <div key={i} className="rounded-md border border-border bg-background p-2 space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-muted-foreground shrink-0">专家 {i + 1}</span>
-                      <input
-                        value={d.name}
-                        onChange={(e) => updateDraft(i, { name: e.target.value })}
-                        placeholder="专家名"
-                        className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                      <select
-                        value={d.modelKey}
-                        onChange={(e) => updateDraft(i, { modelKey: e.target.value })}
-                        title={keyValid ? undefined : NO_MODEL_HINT}
-                        className={`w-40 shrink-0 rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring ${
-                          keyValid ? 'text-foreground' : 'text-muted-foreground'
-                        }`}
-                      >
-                        {!keyValid && (
-                          <option value={d.modelKey} disabled>{NO_MODEL_HINT}</option>
-                        )}
-                        {allModelOptions.map((opt) => (
-                          <option key={opt.value} value={opt.value}>{opt.label}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <textarea
-                      value={d.prompt}
-                      onChange={(e) => updateDraft(i, { prompt: e.target.value })}
-                      rows={4}
-                      placeholder="该专家的 system prompt"
-                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                  </div>
-                )
-              })}
-
-              <div className="flex items-center gap-2 flex-wrap">
-                <button
-                  onClick={handleImport}
-                  disabled={importing || validCount === 0}
-                  className="inline-flex items-center gap-1.5 px-3 py-1 text-xs bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50 shrink-0"
-                >
-                  {importing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-                  {importing ? '导入中…' : '一键导入'}
-                </button>
-                <button
-                  onClick={handleGenerate}
-                  disabled={loading || !requirement.trim()}
-                  className="inline-flex items-center gap-1.5 px-3 py-1 text-xs border border-input text-foreground rounded-md hover:bg-accent/50 disabled:opacity-50 shrink-0"
-                >
-                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-                  重新生成
-                </button>
-                {imported && <span className="text-xs text-primary">已导入</span>}
-                {skippedCount > 0 && (
-                  <span className="text-xs text-muted-foreground">{skippedCount} 个专家因无可用模型未导入</span>
-                )}
-              </div>
-            </div>
-          )}
+          {applied && <p className="text-xs text-primary">{applied}</p>}
         </div>
       )}
     </div>
