@@ -381,10 +381,6 @@ function MoASection() {
                     <option key={opt.value} value={opt.value}>{opt.label}</option>
                   ))}
                 </select>
-                {/* 专家名徽标：主席团模式下专家名由下方角色控件承载（避免同卡片两处重复显示）；选举模式下仍作唯一展示位 */}
-                {architecture !== 'committee' && sm.expertName && (
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary shrink-0">{sm.expertName}</span>
-                )}
                 <button
                   onClick={() => removeSubModel(i)}
                   className="text-muted-foreground hover:text-destructive shrink-0"

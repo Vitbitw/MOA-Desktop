@@ -97,7 +97,7 @@ function GatewayMonitorView({ round }: { round: GatewayRound }) {
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {round.subOutputs.map((out) => (
-                <SubModelPanel key={`sub-${out.index}`} output={out} />
+                <SubModelPanel key={`sub-${out.index}`} output={out} showIdentity={architecture === 'committee'} />
               ))}
             </div>
           </div>
@@ -272,6 +272,7 @@ function SessionRoundsView({ showProxyBadge }: { showProxyBadge: boolean }) {
                   {Array.from({ length: subModelCount }).map((_, i) => (
                     <SubModelPanel
                       key={`pending-${i}`}
+                      showIdentity={architecture === 'committee'}
                       output={{
                         index: i, modelId: '...', providerId: '',
                         content: '', status: 'pending'
@@ -281,7 +282,7 @@ function SessionRoundsView({ showProxyBadge }: { showProxyBadge: boolean }) {
                 </>
               )}
               {displayOutputs.map((out) => (
-                <SubModelPanel key={`sub-${out.index}`} output={out} />
+                <SubModelPanel key={`sub-${out.index}`} output={out} showIdentity={architecture === 'committee'} />
               ))}
             </div>
           </div>

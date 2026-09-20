@@ -26,13 +26,16 @@ const STATUS_COLOR: Record<string, string> = {
  * - memo：单面板内容更新不重渲染其余面板（store 只替换变化的 index 对象）
  * - running 且 content 非空 → markdown + 闪烁光标（与 AggregatorPanel 光标样式一致）
  * - error 且 content 非空 → 展示已流出内容 + 错误行（流中途断开时保留已收文本）
+ * - showIdentity：身份标签（专家名/角色）仅在主席团模式显示——选举模式子模型是平等候选、无身份语义；缺省 true
  */
-function SubModelPanel({ output }: { output: LiveSubOutput }) {
+function SubModelPanel({ output, showIdentity = true }: { output: LiveSubOutput; showIdentity?: boolean }) {
   const isRunningOrPending = output.status === 'running' || (output.status === 'pending' && output.modelId === '...')
   const shortModelName = output.modelId.length > 30
     ? output.modelId.slice(0, 27) + '…'
     : output.modelId
-  const roleLabel = output.expertName?.trim() || (output.role ? MOA_ROLE_LABELS[output.role as SubModelRole] : '')
+  const roleLabel = showIdentity
+    ? output.expertName?.trim() || (output.role ? MOA_ROLE_LABELS[output.role as SubModelRole] : '')
+    : ''
 
   return (
     <div className={`
