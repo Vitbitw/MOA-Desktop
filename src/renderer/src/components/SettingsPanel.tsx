@@ -194,7 +194,7 @@ function MoASection() {
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [architecture, setArchitecture] = useState<MoaArchitecture>('election')
-  // 展开提示词编辑的席位 key 集合（生成专家团后由 onApplied 批量展开；支持多席位同时展开）
+  // 展开"自定义提示词"覆盖编辑的席位 key 集合（预设模板/无角色时可折叠编辑；支持多席位同时展开）
   const [editPromptKeys, setEditPromptKeys] = useState<Set<string>>(new Set())
   const togglePromptKey = (key: string) =>
     setEditPromptKeys((prev) => {
@@ -203,9 +203,6 @@ function MoASection() {
       else next.add(key)
       return next
     })
-  /** 生成专家团完成后：自动展开全部新席位的提示词区（角色描述直接可见，无需逐个点开） */
-  const expandPromptKeys = (seats: SubModelConfig[]) =>
-    setEditPromptKeys(new Set(seats.map((s) => s.id).filter((id): id is string => !!id)))
 
   // Load existing config on mount
   useEffect(() => {
@@ -357,7 +354,6 @@ function MoASection() {
             subModels={subModels}
             setSubModels={setSubModels}
             notifySaveResult={notifySaveResult}
-            onApplied={expandPromptKeys}
           />
         )}
 
@@ -401,7 +397,7 @@ function MoASection() {
               </div>
               {architecture === 'committee' && (
                 <div className="mt-2 space-y-2">
-                  {/* 角色选择：固定模板 / 自定义角色（自由文本角色名，写入 expertName） / 无角色 */}
+                  {/* 角色选择：固定模板 / 自定义角色（短名 + 完整介绍） / 无角色 */}
                   <select
                     value={sm.expertName !== undefined ? CUSTOM_ROLE : (sm.role ?? '')}
                     onChange={(e) => {
@@ -418,32 +414,46 @@ function MoASection() {
                     ))}
                     <option value={CUSTOM_ROLE}>自定义角色…</option>
                   </select>
-                  {sm.expertName !== undefined && (
-                    <input
-                      value={sm.expertName}
-                      onChange={(e) => updateSubModel(i, { expertName: e.target.value })}
-                      placeholder="角色名，如：安全工程师"
-                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                  )}
-                  <button
-                    onClick={() => togglePromptKey(k)}
-                    className="text-xs text-muted-foreground hover:text-foreground"
-                  >
-                    {editPromptKeys.has(k)
-                      ? '收起自定义提示词'
-                      : sm.systemPrompt
-                        ? '编辑自定义提示词（已设置）'
-                        : '自定义提示词…'}
-                  </button>
-                  {editPromptKeys.has(k) && (
-                    <textarea
-                      value={sm.systemPrompt ?? ''}
-                      placeholder={sm.role ? "留空则使用所选角色的默认提示词" : "输入该子模型专用的 system prompt（留空为无）"}
-                      onChange={(e) => updateSubModel(i, { systemPrompt: e.target.value })}
-                      rows={4}
-                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
+                  {sm.expertName !== undefined ? (
+                    <>
+                      {/* 自定义角色：角色名（短标签，用于主席团提示词署名）+ 完整介绍（直接可见可编辑，AI 生成的落点） */}
+                      <input
+                        value={sm.expertName}
+                        onChange={(e) => updateSubModel(i, { expertName: e.target.value })}
+                        placeholder="角色名（短，如：安全工程师）"
+                        className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                      />
+                      <textarea
+                        value={sm.systemPrompt ?? ''}
+                        onChange={(e) => updateSubModel(i, { systemPrompt: e.target.value })}
+                        placeholder="该角色的完整介绍（专长、职责、分析视角）——「AI 生成专家团」在此自动填充"
+                        rows={5}
+                        className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                      />
+                    </>
+                  ) : (
+                    <>
+                      {/* 预设模板/无角色：默认提示词由模板提供，此处可选覆盖（折叠） */}
+                      <button
+                        onClick={() => togglePromptKey(k)}
+                        className="text-xs text-muted-foreground hover:text-foreground"
+                      >
+                        {editPromptKeys.has(k)
+                          ? '收起自定义提示词'
+                          : sm.systemPrompt
+                            ? '编辑自定义提示词（已设置）'
+                            : '自定义提示词…'}
+                      </button>
+                      {editPromptKeys.has(k) && (
+                        <textarea
+                          value={sm.systemPrompt ?? ''}
+                          placeholder={sm.role ? "留空则使用所选角色的默认提示词" : "输入该子模型专用的 system prompt（留空为无）"}
+                          onChange={(e) => updateSubModel(i, { systemPrompt: e.target.value })}
+                          rows={4}
+                          className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                        />
+                      )}
+                    </>
                   )}
                 </div>
               )}
