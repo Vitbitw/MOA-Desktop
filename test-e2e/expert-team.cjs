@@ -5,6 +5,7 @@
 //      ④ initialDrafts 草案初始化（沿用现有席位 / 复用首个席位模型 / 池空回退空串）
 //      ⑤ buildImportPlan 导入计划（新 uuid / order 重排 / role 清空 / 席位扩充缩减 / skipped）
 //      ⑥ 评审补强（T5）：buildExpertPlanPrompt 全文片段断言（SF-3）/ 含冒号 modelId 无损（SF-1）/ 字符串内 } 的 reason 提取（N-1）/ 码点安全截断（N-2）
+//      ⑦ switchSeatModel 席位模型切换（保留 id/order/role/systemPrompt/expertName / 含冒号 modelId / 非法 key → null）
 // 用法：node test-e2e/expert-team.cjs
 // 加载方式：esbuild bundle 三个被测模块（独立构建）：
 //   - expertTeamGenerator.ts：stub electron / appSettings / providerManager / moaConfig / fetchProxy / streamChat 六个外部模块
@@ -170,8 +171,8 @@ let shared = null
     'expertTeamGenerator 导出 resolveGeneratorModel / buildExpertPlanPrompt / parseExpertPlan / generateExpertTeam'
   )
   ok(
-    ['initialDrafts', 'buildImportPlan'].every((k) => typeof renderer[k] === 'function'),
-    'expertTeam（渲染端）导出 initialDrafts / buildImportPlan'
+    ['initialDrafts', 'buildImportPlan', 'switchSeatModel'].every((k) => typeof renderer[k] === 'function'),
+    'expertTeam（渲染端）导出 initialDrafts / buildImportPlan / switchSeatModel'
   )
 
   // ═══ parseExpertPlan ═══
@@ -582,7 +583,30 @@ let shared = null
     ok(!('expertName' in JSON.parse(JSON.stringify(empty.subModels[0]))), '[31] 序列化后无 expertName 键（落库干净）')
   }
 
-  eq(caseCount, 31, '用例数 = 31（T4 的 28 + T5 补强 2 + 主审 trim 1）')
+  caseHeader(32, 'switchSeatModel：切换只替换 providerId/modelId（id/order/role/systemPrompt/expertName 保留）+ 含冒号 modelId + 非法 key → null')
+  {
+    const seatFull = { id: 'seat-x', providerId: 'p1', modelId: 'm1', order: 2, role: 'critic', systemPrompt: '自定义提示词', expertName: '安全工程师' }
+    const switched = renderer.switchSeatModel(seatFull, 'p2:m2')
+    eq(switched.providerId, 'p2', '[32] providerId 已替换')
+    eq(switched.modelId, 'm2', '[32] modelId 已替换')
+    eq(switched.id, 'seat-x', '[32] 席位 id 保留（同模型多席位不串位）')
+    eq(switched.order, 2, '[32] order 保留')
+    eq(switched.role, 'critic', '[32] role 保留（删除重加会丢）')
+    eq(switched.systemPrompt, '自定义提示词', '[32] systemPrompt 保留')
+    eq(switched.expertName, '安全工程师', '[32] expertName 保留')
+    ok(switched !== seatFull, '[32] 返回新对象（不改原席位引用）')
+    eq(seatFull.modelId, 'm1', '[32] 原席位对象不被修改')
+
+    const colon = renderer.switchSeatModel(seatFull, 'ollama:llama3.1:8b')
+    eq(colon.providerId + ':' + colon.modelId, 'ollama:llama3.1:8b', '[32] 含冒号 modelId 切换后逐字 round-trip')
+
+    eq(renderer.switchSeatModel(seatFull, 'p9'), null, '[32] 无冒号 key（modelId 空）→ null')
+    eq(renderer.switchSeatModel(seatFull, ':m1'), null, '[32] providerId 空 → null')
+    eq(renderer.switchSeatModel(seatFull, 'p1:'), null, '[32] modelId 空 → null')
+    eq(renderer.switchSeatModel(seatFull, ''), null, '[32] 空串 → null')
+  }
+
+  eq(caseCount, 32, '用例数 = 32（T4 的 28 + T5 补强 2 + 主审 trim 1 + 席位切换 1）')
 
   console.log('\n──────────────────────────────')
   console.log(`通过 ${pass} / 失败 ${fail}`)

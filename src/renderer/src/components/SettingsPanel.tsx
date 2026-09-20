@@ -9,6 +9,7 @@ import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../..
 import { MOA_ROLE_TEMPLATES } from '../../../shared/moaRoles'
 import { splitModelKey } from '../../../shared/modelKey'
 import ExpertTeamSection from './ExpertTeamSection'
+import { switchSeatModel } from '../utils/expertTeam'
 
 type SettingsSection = 'moa' | 'providers' | 'network' | 'display' | 'pricing' | 'title'
 
@@ -236,6 +237,8 @@ function MoASection() {
       modelId: m.id
     }))
   )
+  // 模型池 key 集合：席位当前模型可能已不在池中（厂商/模型被删），切换下拉据此补占位项，避免受控 select 显示错位
+  const modelPoolValues = new Set(allModelOptions.map((o) => o.value))
 
   const addSubModel = (value: string) => {
     const { providerId, modelId } = splitModelKey(value)
@@ -347,16 +350,42 @@ function MoASection() {
           const p = providers.find((pr) => pr.id === sm.providerId)
           // 稳定 key：优先席位 id（同模型可占多个席位）；旧配置未补全时回退 providerId:modelId
           const k = sm.id ?? `${sm.providerId}:${sm.modelId}`
+          // 席位当前模型 key；不在模型池中（厂商/模型已删）时下拉补占位项，避免受控 select 显示错位
+          const seatModelKey = `${sm.providerId}:${sm.modelId}`
+          const seatModelInPool = modelPoolValues.has(seatModelKey)
           return (
             <div key={k} className="rounded-md border border-border bg-muted/30 p-2 mb-1 text-sm">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-1.5 min-w-0 text-foreground">
-                  <span className="truncate">{p?.name || sm.providerId} · {sm.modelId}</span>
-                  {sm.expertName && (
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary shrink-0">{sm.expertName}</span>
+              <div className="flex items-center gap-2">
+                {/* 切换模型：只改该席位的 providerId/modelId；id/角色/提示词/专家名全部保留（替代「删除再添加」） */}
+                <select
+                  value={seatModelKey}
+                  onChange={(e) => {
+                    // 同模型可占多席位，不做去重；非法 key（switchSeatModel 返回 null）跳过
+                    const next = switchSeatModel(sm, e.target.value)
+                    if (next) updateSubModel(i, next)
+                  }}
+                  title={seatModelInPool
+                    ? `${p?.name || sm.providerId} · ${sm.modelId}`
+                    : `${p?.name || sm.providerId} · ${sm.modelId}（已不在可用模型列表，可从下拉切换）`}
+                  className={`min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring ${
+                    seatModelInPool ? 'text-foreground' : 'text-muted-foreground'
+                  }`}
+                >
+                  {!seatModelInPool && (
+                    <option value={seatModelKey}>{p?.name || sm.providerId} · {sm.modelId}（当前）</option>
                   )}
-                </span>
-                <button onClick={() => removeSubModel(i)} className="text-muted-foreground hover:text-destructive">✕</button>
+                  {allModelOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                {sm.expertName && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary shrink-0">{sm.expertName}</span>
+                )}
+                <button
+                  onClick={() => removeSubModel(i)}
+                  className="text-muted-foreground hover:text-destructive shrink-0"
+                  title="移除该席位"
+                >✕</button>
               </div>
               {architecture === 'committee' && (
                 <div className="mt-2 space-y-2">

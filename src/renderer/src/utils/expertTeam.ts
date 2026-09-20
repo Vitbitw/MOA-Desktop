@@ -34,6 +34,19 @@ export interface ImportPlan {
 const seatKey = (sm: SubModelConfig): string => `${sm.providerId}:${sm.modelId}`
 
 /**
+ * 切换席位所用模型（设置面板席位下拉）：
+ * - 只替换 providerId/modelId，其余字段（id/order/role/systemPrompt/expertName）原样保留
+ *   （替代「删除再添加」——后者会丢角色/提示词/专家名）；
+ * - modelKey 含冒号 modelId 无损（splitModelKey 按首个冒号切分）；
+ * - providerId 或 modelId 为空串的非法 key → 返回 null，调用方跳过（不写入畸形模型）。
+ */
+export function switchSeatModel(seat: SubModelConfig, modelKey: string): SubModelConfig | null {
+  const { providerId, modelId } = splitModelKey(modelKey)
+  if (!providerId || !modelId) return null
+  return { ...seat, providerId, modelId }
+}
+
+/**
  * 生成完成后初始化预览草案（设计文档 §5.5）：
  * - 前 min(M, N) 个专家依次映射现有席位模型（N = existing.length）；
  * - 其余专家（新增席位）默认复用第一个子专家的模型（生成时点快照，后续不联动）；
