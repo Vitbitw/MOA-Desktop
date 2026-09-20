@@ -3,7 +3,7 @@
 //      ② resolveGeneratorModel 三级解析（主模型 → 首个可用子模型 → 首个可用厂商首模型）
 //      ③ generateExpertTeam 入口（空需求 / 无可用生成模型 / 流式失败 / 成功路径 / 解析失败 / reason 缺省）
 //      ④ initialDrafts 草案初始化（沿用现有席位 / 复用首个席位模型 / 池空回退空串）
-//      ⑤ buildImportPlan 导入计划（新 uuid / order 重排 / role 清空 / 席位扩充缩减 / skipped）
+//      ⑤ buildImportPlan 导入计划（新 uuid / order 重排 / role 清空 / 席位扩充缩减 / skipped / 变化摘要展示名=专家名〔空名回退模型名〕）
 //      ⑥ 评审补强（T5）：buildExpertPlanPrompt 全文片段断言（SF-3）/ 含冒号 modelId 无损（SF-1）/ 字符串内 } 的 reason 提取（N-1）/ 码点安全截断（N-2）
 //      ⑦ switchSeatModel 席位模型切换（保留 id/order/role/systemPrompt/expertName / 含冒号 modelId / 非法 key → null）
 //      ⑧ 生成失败自动重试（5xx/网络类重试一次；401 等不可重试错误直接抛）
@@ -126,8 +126,9 @@ async function rejectMsg(promise) {
 // ── 夹具小工具 ──
 
 let seatSeq = 0
-/** 席位配置（id 自增；order 仅类型需要） */
-const seat = (providerId, modelId) => ({ id: 'seat-' + ++seatSeq, providerId, modelId, order: seatSeq })
+/** 席位配置（id 自增；order 仅类型需要；extra 可补 expertName 等字段） */
+const seat = (providerId, modelId, extra) =>
+  Object.assign({ id: 'seat-' + ++seatSeq, providerId, modelId, order: seatSeq }, extra || {})
 /** 模型池选项（'providerId:modelId'） */
 const opt = (value) => ({ value, label: value })
 /** 厂商 */
@@ -449,7 +450,7 @@ let shared = null
 
   // ═══ buildImportPlan ═══
 
-  caseHeader(23, 'buildImportPlan：M=3 / N=2 → 3 席位，expanded = 第 3 席（复用 existing[0] 模型）')
+  caseHeader(23, 'buildImportPlan：M=3 / N=2 → 3 席位，expanded = 第 3 席（复用 existing[0] 模型；展示名为专家名）')
   {
     const existing = [seat('p1', 'm1'), seat('p2', 'm2')]
     const pool = [opt('p1:m1'), opt('p2:m2')]
@@ -460,7 +461,7 @@ let shared = null
     ]
     const plan = renderer.buildImportPlan(existing, pool, drafts)
     eq(plan.subModels.length, 3, '[23] 生成 3 个席位')
-    eq(plan.changes.expanded, [{ modelId: 'm1' }], '[23] expanded = 新增的第 3 席（modelId = existing[0].modelId）')
+    eq(plan.changes.expanded, [{ name: '丙' }], '[23] expanded = 新增的第 3 席（展示名 = 专家名「丙」而非模型名）')
     eq(plan.changes.shrunk, [], '[23] 无缩减')
     eq(plan.skipped, 0, '[23] 无跳过')
   }
@@ -488,14 +489,19 @@ let shared = null
     eq(plan.subModels.map((s) => s.providerId + ':' + s.modelId), ['p1:m1', 'p2:m2', 'p1:m1'], '[24] modelKey 拆分为 providerId:modelId')
   }
 
-  caseHeader(25, 'buildImportPlan：M=1 / N=2 → shrunk = [{ modelId: existing[1].modelId }]')
+  caseHeader(25, 'buildImportPlan：M=1 / N=2 → shrunk = 被移除席位（展示名：无专家名回退模型名 / 有专家名用专家名）')
   {
     const existing = [seat('p1', 'm1'), seat('p2', 'm2')]
     const pool = [opt('p1:m1'), opt('p2:m2')]
     const plan = renderer.buildImportPlan(existing, pool, [{ name: '甲', prompt: 'pa', modelKey: 'p1:m1' }])
     eq(plan.subModels.length, 1, '[25] 只剩 1 席位')
-    eq(plan.changes.shrunk, [{ modelId: 'm2' }], '[25] shrunk = 被移除的第 2 席（modelId = existing[1].modelId）')
+    eq(plan.changes.shrunk, [{ name: 'm2' }], '[25] shrunk = 被移除的第 2 席（无专家名 → 回退模型名 m2）')
     eq(plan.changes.expanded, [], '[25] 无扩充')
+
+    // 席位展示名 = 专家名（用户诉求：结果行括号内显示席位名而非模型名）
+    const named = [seat('p1', 'm1'), seat('p2', 'm2', { expertName: '性能工程师' })]
+    const plan2 = renderer.buildImportPlan(named, pool, [{ name: '甲', prompt: 'pa', modelKey: 'p1:m1' }])
+    eq(plan2.changes.shrunk, [{ name: '性能工程师' }], '[25] 被移除席位有专家名 → 展示名为「性能工程师」')
   }
 
   caseHeader(26, 'buildImportPlan：M == N → expanded / shrunk 均空')
@@ -589,13 +595,15 @@ let shared = null
     eq(plan.subModels[0].modelId, 'llama3.1:8b', '[30] 席位 modelId 保留完整冒号后缀')
   }
 
-  caseHeader(31, 'buildImportPlan：专家名写入前 trim（空名 → 字段省略）')
+  caseHeader(31, 'buildImportPlan：专家名写入前 trim（空名 → 字段省略；expanded 展示名 trim / 空名回退模型名）')
   {
     const plan = renderer.buildImportPlan([], [opt('p1:m1')], [{ name: '  安全工程师  ', prompt: 'p-甲', modelKey: 'p1:m1' }])
     eq(plan.subModels[0].expertName, '安全工程师', '[31] 首尾空白已 trim')
+    eq(plan.changes.expanded, [{ name: '安全工程师' }], '[31] expanded 展示名 trim 后为「安全工程师」')
     const empty = renderer.buildImportPlan([], [opt('p2:m2')], [{ name: '   ', prompt: 'p-乙', modelKey: 'p2:m2' }])
     ok(empty.subModels[0].expertName === undefined, '[31] 全空白专家名 → undefined')
     ok(!('expertName' in JSON.parse(JSON.stringify(empty.subModels[0]))), '[31] 序列化后无 expertName 键（落库干净）')
+    eq(empty.changes.expanded, [{ name: 'm2' }], '[31] 全空白专家名 → expanded 展示名回退模型名 m2')
   }
 
   caseHeader(32, 'switchSeatModel：切换只替换 providerId/modelId（id/order/role/systemPrompt/expertName 保留）+ 含冒号 modelId + 非法 key → null')

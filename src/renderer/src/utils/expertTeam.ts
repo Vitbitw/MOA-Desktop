@@ -21,17 +21,23 @@ export interface ImportPlan {
   subModels: SubModelConfig[]
   /** 未能导入的草案数（modelKey 为空或不在池中） */
   skipped: number
-  /** 席位变化摘要（UI 展示用） */
+  /** 席位变化摘要（UI 展示用；name = 席位展示名，见 seatDisplayName） */
   changes: {
     /** 自动新增的席位（按席位计数，模型可重复） */
-    expanded: Array<{ modelId: string }>
+    expanded: Array<{ name: string }>
     /** 被移除的席位（其原有角色/提示词将一并移除） */
-    shrunk: Array<{ modelId: string }>
+    shrunk: Array<{ name: string }>
   }
 }
 
 /** 现有席位 → 'providerId:modelId' key */
 const seatKey = (sm: SubModelConfig): string => `${sm.providerId}:${sm.modelId}`
+
+/**
+ * 席位展示名（结果行「新增/移除 N 个席位（…）」括号内文案）：
+ * 席位名（新增=草案专家名 / 移除=原 expertName）trim 后为空 → 回退模型名，保证括号内不出现空项。
+ */
+const seatDisplayName = (expertName: string | undefined, modelId: string): string => expertName?.trim() || modelId
 
 /**
  * 切换席位所用模型（设置面板席位下拉）：
@@ -66,7 +72,8 @@ export function initialDrafts(experts: GeneratedExpert[], existing: SubModelConf
  * - 校验：modelKey 为空或不在模型池中 → 计入 skipped，不导入；其余按序保留；
  * - 写入：每项新 uuid / order 按序 0..k-1 / role 清空 / systemPrompt=prompt / expertName=name；
  * - 允许同一模型重复占席（不做去重）；
- * - changes 按席位位置计数：expanded = valid 超出现有的尾段，shrunk = existing 被移除的尾段。
+ * - changes 按席位位置计数：expanded = valid 超出现有的尾段，shrunk = existing 被移除的尾段；
+ *   展示名取席位名（新增=草案 name / 移除=原 expertName），空名回退模型名（UI 结果行括号内不显示模型名）。
  */
 export function buildImportPlan(existing: SubModelConfig[], pool: ModelOption[], drafts: ExpertDraft[]): ImportPlan {
   const poolValues = new Set(pool.map((o) => o.value))
@@ -94,11 +101,11 @@ export function buildImportPlan(existing: SubModelConfig[], pool: ModelOption[],
     changes: {
       expanded:
         valid.length > existing.length
-          ? valid.slice(existing.length).map((d) => ({ modelId: splitModelKey(d.modelKey).modelId }))
+          ? valid.slice(existing.length).map((d) => ({ name: seatDisplayName(d.name, splitModelKey(d.modelKey).modelId) }))
           : [],
       shrunk:
         existing.length > valid.length
-          ? existing.slice(valid.length).map((s) => ({ modelId: s.modelId }))
+          ? existing.slice(valid.length).map((s) => ({ name: seatDisplayName(s.expertName, s.modelId) }))
           : []
     }
   }

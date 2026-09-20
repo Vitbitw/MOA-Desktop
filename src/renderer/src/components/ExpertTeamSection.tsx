@@ -10,12 +10,12 @@ interface ExpertTeamSectionProps {
   notifySaveResult: (ok: boolean, detail?: string) => void
 }
 
-/** 模型名短显（结果行内联展示，过长截断） */
-const shortModelId = (id: string): string => (id.length > 24 ? id.slice(0, 21) + '…' : id)
+/** 席位名短显（结果行内联展示，过长截断） */
+const shortLabel = (name: string): string => (name.length > 24 ? name.slice(0, 21) + '…' : name)
 
-/** 模型明细文案（前 3 个 + 等 N 个） */
-const detailOf = (ids: string[]): string =>
-  ids.slice(0, 3).map(shortModelId).join('、') + (ids.length > 3 ? ` 等 ${ids.length} 个` : '')
+/** 席位名明细文案（前 3 个 + 等 N 个） */
+const detailOf = (names: string[]): string =>
+  names.slice(0, 3).map(shortLabel).join('、') + (names.length > 3 ? ` 等 ${names.length} 个` : '')
 
 /**
  * 主席团模式「AI 生成专家团」折叠面板（生成即写入，无中间预览/确认步骤）：
@@ -77,10 +77,10 @@ export default function ExpertTeamSection({ subModels, setSubModels, notifySaveR
 
       const parts: string[] = [`已生成 ${plan.subModels.length} 个专家`]
       if (plan.changes.expanded.length > 0) {
-        parts.push(`新增 ${plan.changes.expanded.length} 个席位（${detailOf(plan.changes.expanded.map((c) => c.modelId))}）`)
+        parts.push(`新增 ${plan.changes.expanded.length} 个席位（${detailOf(plan.changes.expanded.map((c) => c.name))}）`)
       }
       if (plan.changes.shrunk.length > 0) {
-        parts.push(`移除 ${plan.changes.shrunk.length} 个席位（${detailOf(plan.changes.shrunk.map((c) => c.modelId))}）`)
+        parts.push(`移除 ${plan.changes.shrunk.length} 个席位（${detailOf(plan.changes.shrunk.map((c) => c.name))}）`)
       }
       if (plan.skipped > 0) {
         parts.push(`${plan.skipped} 个专家因无可用模型未写入`)
