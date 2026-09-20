@@ -6,6 +6,7 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "dev:win": "chcp 65001 >nul & electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "test:all": "npm run test:sse && npm run test:throttle && npm run test:stream && npm run test:engine && npm run test:gateway && npm run test:store && npm run test:anthropic && npm run test:anthropic-env && npm run test:usage-window && npm run test:monitor && npm run test:cloud-cache && npm run test:snapshot-store && npm run test:expert-team",

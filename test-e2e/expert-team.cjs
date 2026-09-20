@@ -6,6 +6,7 @@
 //      ⑤ buildImportPlan 导入计划（新 uuid / order 重排 / role 清空 / 席位扩充缩减 / skipped）
 //      ⑥ 评审补强（T5）：buildExpertPlanPrompt 全文片段断言（SF-3）/ 含冒号 modelId 无损（SF-1）/ 字符串内 } 的 reason 提取（N-1）/ 码点安全截断（N-2）
 //      ⑦ switchSeatModel 席位模型切换（保留 id/order/role/systemPrompt/expertName / 含冒号 modelId / 非法 key → null）
+//      ⑧ 生成失败自动重试（5xx/网络类重试一次；401 等不可重试错误直接抛）
 // 用法：node test-e2e/expert-team.cjs
 // 加载方式：esbuild bundle 三个被测模块（独立构建）：
 //   - expertTeamGenerator.ts：stub electron / appSettings / providerManager / moaConfig / fetchProxy / streamChat 六个外部模块
@@ -23,10 +24,14 @@ const ctl = {
   moaConfig: { subModels: [], aggregator: null }, // getMoaConfig（stub）
   settings: {}, // readAppSettings（stub；本轮用例仅走 probe 的纯函数，不读设置）
   streamChatResult: { content: '' }, // 假 streamChat 的返回值
+  streamChatQueue: null, // 可选：按序返回的队列（只剩一项时保持返回它）；用于「重试」类用例
   streamChatCalls: [], // streamChat 调用记录
   /** 假流式调用：返回形态与真实 streamChat 一致（content/usage/error），永不 throw */
   async streamChat(opts) {
     ctl.streamChatCalls.push(opts)
+    if (Array.isArray(ctl.streamChatQueue) && ctl.streamChatQueue.length > 0) {
+      return ctl.streamChatQueue.length > 1 ? ctl.streamChatQueue.shift() : ctl.streamChatQueue[0]
+    }
     return ctl.streamChatResult
   }
 }
@@ -149,6 +154,7 @@ function hasLoneSurrogate(s) {
 /** 重置假 streamChat 状态（providers / moaConfig 由各用例自行设置） */
 function resetChat() {
   ctl.streamChatResult = { content: '' }
+  ctl.streamChatQueue = null
   ctl.streamChatCalls.length = 0
 }
 
@@ -615,7 +621,39 @@ let shared = null
     eq(renderer.switchSeatModel(seatFull, ''), null, '[32] 空串 → null')
   }
 
-  eq(caseCount, 32, '用例数 = 32（T4 的 28 + T5 补强 2 + 主审 trim 1 + 席位切换 1）')
+  caseHeader(33, 'generateExpertTeam：上游瞬时故障（5xx/网络类）自动重试一次；不可重试错误直接抛')
+  {
+    // ① 第一次 500、第二次成功 → 自动重试成功（复现过「首次 500、手动重试即成功」的场景）
+    resetChat()
+    ctl.providers = [prov('p1', { apiKey: 'key-p1', models: [mdl('p1-m1')] })]
+    ctl.moaConfig = { subModels: [], aggregator: null }
+    ctl.streamChatQueue = [
+      { content: '', error: 'HTTP 500: 上游炸了' },
+      { content: '{"experts":[{"name":"重试专家","prompt":"重试后成功"}]}' }
+    ]
+    const plan = await main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [] })
+    eq(plan.experts.length, 1, '[33] 5xx 自动重试一次后成功解析')
+    eq(ctl.streamChatCalls.length, 2, '[33] 可重试错误 → streamChat 共调用 2 次')
+
+    // ② 两次都失败 → 抛第二次错误原文（重试恰好 1 次）；文案用 streamChat 的真实超时形态（中文「首块响应超时」）
+    resetChat()
+    ctl.streamChatQueue = [
+      { content: '', error: '首块响应超时（60000ms）' },
+      { content: '', error: '流中断：fetch failed' }
+    ]
+    const msg2 = await rejectMsg(main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [] }))
+    eq(ctl.streamChatCalls.length, 2, '[33] 重试恰好 1 次（共 2 次调用）')
+    ok(typeof msg2 === 'string' && msg2.includes('fetch failed'), '[33] 抛第二次失败原文', msg2)
+
+    // ③ 不可重试错误（401 鉴权）→ 不重试、立即抛
+    resetChat()
+    ctl.streamChatResult = { content: '', error: 'HTTP 401: Unauthorized' }
+    const msg3 = await rejectMsg(main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [] }))
+    eq(ctl.streamChatCalls.length, 1, '[33] 不可重试错误（401）不重试')
+    ok(typeof msg3 === 'string' && msg3.includes('HTTP 401'), '[33] 原错误透传', msg3)
+  }
+
+  eq(caseCount, 33, '用例数 = 33（T4 的 28 + T5 补强 2 + 主审 trim 1 + 席位切换 1 + 生成重试 1）')
 
   console.log('\n──────────────────────────────')
   console.log(`通过 ${pass} / 失败 ${fail}`)

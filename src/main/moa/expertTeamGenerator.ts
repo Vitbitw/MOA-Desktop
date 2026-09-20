@@ -6,7 +6,7 @@
 import { getAllProviders } from '../providers/providerManager'
 import { getMoaConfig } from './moaConfig'
 import { streamChat } from './streamChat'
-import { extractJsonArray, extractJsonObject } from '../pricing/probe'
+import { extractJsonArray, extractJsonObject, isRetriableLLMError } from '../pricing/probe'
 import { DEFAULT_SUB_MODEL_TIMEOUT } from '../../shared/defaults'
 import type { ExpertTeamPlan, GeneratedExpert } from '../../shared/types'
 
@@ -15,6 +15,9 @@ const EXPERT_PROMPT_MAX = 4000
 
 /** 码点安全截断（N-2）：超长时按 Unicode 码点取前 max 个（不切裂 emoji 代理对）；未超长原样返回（BMP 与 slice 等价） */
 const clip = (s: string, max: number): string => (s.length > max ? [...s].slice(0, max).join('') : s)
+
+/** 简易退避等待（上游瞬时故障自动重试用） */
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 export interface GenerateExpertsRequest {
   requirement: string
@@ -140,13 +143,21 @@ export async function generateExpertTeam(req: GenerateExpertsRequest): Promise<E
   const seats = Array.isArray(req?.seats) ? req.seats.filter((s): s is string => typeof s === 'string') : []
   const prompt = buildExpertPlanPrompt({ requirement, seats })
 
-  const result = await streamChat({
-    providerBaseUrl: model.baseUrl,
-    apiKey: model.apiKey,
-    modelId: model.modelId,
-    messages: [{ role: 'user', content: prompt }],
-    timeoutMs: DEFAULT_SUB_MODEL_TIMEOUT
-  })
+  const genOnce = (): Promise<Awaited<ReturnType<typeof streamChat>>> =>
+    streamChat({
+      providerBaseUrl: model.baseUrl,
+      apiKey: model.apiKey,
+      modelId: model.modelId,
+      messages: [{ role: 'user', content: prompt }],
+      timeoutMs: DEFAULT_SUB_MODEL_TIMEOUT
+    })
+  // 上游瞬时故障（5xx/网络类）自动重试一次：复现过「首次 500、手动重试即成功」的场景
+  let result = await genOnce()
+  if (result.error !== undefined && isRetriableLLMError(result.error)) {
+    console.warn(`[ExpertGen] 生成失败（${result.error}），1.5s 后自动重试一次`)
+    await sleep(1500)
+    result = await genOnce()
+  }
   if (result.error !== undefined) throw new Error(`生成失败：${result.error}`)
 
   const { reason, experts } = parseExpertPlan(result.content)

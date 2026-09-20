@@ -454,8 +454,11 @@ async function fetchUsagePages(token: string, pageSize: number): Promise<UsageFe
     let res: CcResponse
     try {
       res = await ccGet(`/internal/usage?${qs.toString()}`, { token })
-    } catch {
-      if (pages === 0) return fail(null)
+    } catch (err) {
+      if (pages === 0) {
+        console.warn(`[Monitor] usage 首页请求失败: ${err instanceof Error ? err.message : String(err)}`)
+        return fail(null)
+      }
       truncated = true
       break
     }
@@ -1008,8 +1011,19 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   }
   const getStatus = (i: number): number | null => get(i)?.status ?? null
 
+  // 网络类失败（rejected）此前被 allSettled 静默丢弃 → 日志补上每个失败端点的原因，便于定位（超时/拒绝/代理）
+  const ENDPOINT_TAGS = ['summary', 'credits', 'windows', 'subscription', 'subAlpha', 'charts']
+  const rejectedDetail = results
+    .map((r, i) =>
+      r.status === 'rejected'
+        ? `${ENDPOINT_TAGS[i] ?? `#${i}`}=${r.reason instanceof Error ? r.reason.message : String(r.reason)}`
+        : null
+    )
+    .filter((s): s is string => s !== null)
+    .join('; ')
+
   console.log(
-    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} charts=${getStatus(5)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}`
+    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} charts=${getStatus(5)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}${rejectedDetail ? ` | rejected: ${rejectedDetail}` : ''}`
   )
 
   // 401/403 → 会话失效（含明细首页）

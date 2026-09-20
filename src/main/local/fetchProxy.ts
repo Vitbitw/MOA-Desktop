@@ -422,6 +422,13 @@ async function fetchOnce(
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+
+/** 本次请求的走向描述（诊断日志用）：直连 / 代理隧道 / 回环直连 / 代理降级 */
+function describeVia(urlStr: string): string {
+  if (isLoopbackHost(urlStr)) return 'direct(loopback)'
+  if (!getProxyUrl()) return 'direct'
+  return isProxyBroken() ? 'direct(proxy-broken)' : 'proxy'
+}
 /** 幂等方法下可安全重试的状态码：429、5xx（服务端瞬时故障） */
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504])
 
@@ -490,6 +497,7 @@ export async function fetchProxy(
   const { timeoutMs, retryCount } = getApiRequestConfig()
   const callerSignal = init?.signal
   const maxAttempts = Math.max(1, retryCount + 1)
+  const method = (init?.method ?? 'GET').toUpperCase()
 
   let lastError: Error | null = null
 
@@ -499,6 +507,7 @@ export async function fetchProxy(
     if (attempt > 1) await sleep(Math.min(1500, 300 * 2 ** (attempt - 2)))
 
     const attemptCtrl = new AbortController()
+    const attemptStartedAt = Date.now()
     let timedOut = false
     const onCallerAbort = () => attemptCtrl.abort()
     callerSignal?.addEventListener('abort', onCallerAbort, { once: true })
@@ -529,7 +538,9 @@ export async function fetchProxy(
       if (callerSignal?.aborted) throw err instanceof Error ? err : new Error(String(err))
       lastError = err instanceof Error ? err : new Error(String(err))
       if (attempt < maxAttempts) {
-        console.warn(`[Network] ${timedOut ? 'request timed out' : 'request failed'}, retrying (attempt ${attempt}/${maxAttempts}): ${lastError.message}`)
+        console.warn(
+          `[Network] ${timedOut ? `request timed out (${timeoutMs}ms)` : 'request failed'} after ${Date.now() - attemptStartedAt}ms, retrying (attempt ${attempt}/${maxAttempts}): ${lastError.message} | ${method} ${String(url)} via ${describeVia(String(url))}`
+        )
       }
     } finally {
       clearTimeout(timer)
@@ -537,6 +548,10 @@ export async function fetchProxy(
     }
   }
 
+  // 最终失败也落日志：此前调用方可能静默吞掉（区块级降级），导致失败原因无法从日志定位
+  console.warn(
+    `[Network] all ${maxAttempts} attempt(s) failed for ${method} ${String(url)} via ${describeVia(String(url))}: ${lastError?.message ?? 'unknown'}`
+  )
   throw lastError ?? new Error(`请求失败: ${String(url)}`)
 }
 

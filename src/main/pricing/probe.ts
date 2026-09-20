@@ -793,9 +793,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** 可重试的 LLM 错误：5xx / 524（上游超时）/ 客户端超时 / 网络类 */
-function isRetriableLLMError(err: string): boolean {
-  return /HTTP\s+5\d\d|HTTP\s+524|aborted|timeout|temporarily unavailable|ECONNRESET|ECONNREFUSED|ENETUNREACH|network/i.test(err)
+/** 可重试的 LLM 错误：5xx / 524（上游超时）/ 取消与超时（含 streamChat 的中文超时文案）/ 网络类（导出供专家团生成等复用） */
+export function isRetriableLLMError(err: string): boolean {
+  return /HTTP\s+5\d\d|HTTP\s+524|aborted|timed?\s*out|超时|流中断|temporarily unavailable|ECONNRESET|ECONNREFUSED|ENETUNREACH|network|fetch failed/i.test(err)
 }
 
 /** 单次 LLM 调用（支持流式/非流式），返回 SubModelOutput */
