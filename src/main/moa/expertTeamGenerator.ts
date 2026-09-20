@@ -17,6 +17,8 @@ const EXPERT_NAME_MAX = 50
 const EXPERT_PROMPT_MAX = 4000
 const EXPERT_QUESTION_MAX = 200
 const EXPERT_ANSWER_MAX = 2000
+/** 诊断开关（MOA_MONITOR_DEBUG=1）：输出追问与生成结果详情，排查生成质量问题时开启 */
+const DEBUG = process.env.MOA_MONITOR_DEBUG === '1'
 /** 档位说明（Q3 决策：纯定性描述，不给数字） */
 const SCALE_TEXT: Record<ExpertScale, string> = {
   few: '偏少：团队精干，每位专家覆盖多个相关维度，人数宜少不宜多。',
@@ -271,17 +273,21 @@ export async function generateExpertTeam(req: GenerateExpertsRequest): Promise<E
   if (reply.kind === 'clarify') {
     // force 兜底：本轮已要求直接生成而模型仍追问 → 视为生成失败
     if (force) throw new Error('生成失败：模型未按要求直接生成专家团，请重试')
-    // 诊断日志：记录追问问题（便于定位模型为何需要补充信息）
-    console.log(`[ExpertGen] 追问 ${reply.questions.length} 个问题：${reply.questions.join(' / ')}`)
+    // 诊断日志：记录追问问题（便于定位模型为何需要补充信息；MOA_MONITOR_DEBUG=1）
+    if (DEBUG) {
+      console.log(`[ExpertGen] 追问 ${reply.questions.length} 个问题：${reply.questions.join(' / ')}`)
+    }
     const clarify: ExpertGenResult = { kind: 'clarify', questions: reply.questions, modelId: model.modelId, providerId: model.providerId }
     if (reply.reason !== undefined) clarify.reason = reply.reason
     return clarify
   }
 
-  // 诊断日志：记录实际生成结果（专家名 + 角色描述字数）——描述过短/缺失时便于定位是模型输出问题还是链路问题
-  console.log(
-    `[ExpertGen] ${model.providerId} / ${model.modelId} → ${reply.experts.length} 位专家：${reply.experts.map((e) => `${e.name}(${e.prompt.length}字)`).join('、')}`
-  )
+  // 诊断日志：记录实际生成结果（专家名 + 角色描述字数）——描述过短/缺失时便于定位是模型输出问题还是链路问题（MOA_MONITOR_DEBUG=1）
+  if (DEBUG) {
+    console.log(
+      `[ExpertGen] ${model.providerId} / ${model.modelId} → ${reply.experts.length} 位专家：${reply.experts.map((e) => `${e.name}(${e.prompt.length}字)`).join('、')}`
+    )
+  }
 
   const plan: ExpertGenResult = { kind: 'plan', experts: reply.experts, modelId: model.modelId, providerId: model.providerId }
   if (reply.reason !== undefined) plan.reason = reply.reason

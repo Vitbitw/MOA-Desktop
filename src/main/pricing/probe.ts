@@ -33,6 +33,8 @@ const FRAGMENT_PAD = 400
 /** CNY → USD 固定折算率（与 usageFormat.ts 的 7.2 一致） */
 const CNY_TO_USD_RATE = 7.2
 const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
+/** 诊断开关（MOA_MONITOR_DEBUG=1）：输出探测进度细节与页面统计，排查定价解析异常时开启 */
+const DEBUG = process.env.MOA_MONITOR_DEBUG === '1'
 
 export interface ProbeModel {
   providerId: string
@@ -720,7 +722,9 @@ export async function probeSource(
 ): Promise<ProbeSourceResult> {
   // 关键词自动取所绑定厂商 /models 的模型名
   const keywords = await getSourceKeywords(source)
-  console.log(`[PricingProbe] ${source.name}(${source.id}) probe model: ${model.baseUrl} / ${model.modelId}${force ? ' [force]' : ''}`)
+  if (DEBUG) {
+    console.log(`[PricingProbe] ${source.name}(${source.id}) probe model: ${model.baseUrl} / ${model.modelId}${force ? ' [force]' : ''}`)
+  }
   onStage?.('fetching')
   const fullText = await fetchPageText(source.url, keywords)
   if (!fullText) {
@@ -733,9 +737,11 @@ export async function probeSource(
   if (!force && cache?.hash && cache.hash === hash) {
     const existing = readProbedPricingEntries(source.id)
     if (existing.length > 0) {
-      console.log(
-        `[PricingProbe] ${source.name}(${source.id}) page unchanged (${fullText.length} chars), reuse ${existing.length} entries, skip LLM`
-      )
+      if (DEBUG) {
+        console.log(
+          `[PricingProbe] ${source.name}(${source.id}) page unchanged (${fullText.length} chars), reuse ${existing.length} entries, skip LLM`
+        )
+      }
       return { ok: true, entries: existing, skipped: true }
     }
   }
@@ -748,15 +754,17 @@ export async function probeSource(
   if (result.status !== 'success' || !result.content) {
     return { ok: false, error: `大模型调用失败: ${result.error || '空响应'}` }
   }
-  console.log(
-    `[PricingProbe] ${source.name}(${source.id}) page ${fullText.length} chars, fragment ${pageText.length} chars (…${briefOf(pageText.slice(0, 40))}…|…${briefOf(pageText.slice(-60))}), keywords ${keywords.length}, LLM response ${result.content.length} chars`
-  )
+  if (DEBUG) {
+    console.log(
+      `[PricingProbe] ${source.name}(${source.id}) page ${fullText.length} chars, fragment ${pageText.length} chars (…${briefOf(pageText.slice(0, 40))}…|…${briefOf(pageText.slice(-60))}), keywords ${keywords.length}, LLM response ${result.content.length} chars`
+    )
+  }
 
   let entries = buildProbedEntries(source, extractJsonArray(result.content) ?? [])
   if (entries.length === 0) {
     // 失败时打印原始响应便于定位（可能是格式不符 / 页面无相关价格）
     console.warn(
-      `[PricingProbe] ${source.name}(${source.id}) no valid pricing parsed, LLM raw response: ${result.content.slice(0, 800)}`
+      `[PricingProbe] ${source.name}(${source.id}) 未解析出有效定价${DEBUG ? `，LLM 原始响应: ${result.content.slice(0, 800)}` : ''}`
     )
     return { ok: false, error: '未能从页面解析出有效定价' }
   }
@@ -778,7 +786,9 @@ export async function probeSource(
           entries = [...entries, ex]
           added++
         }
-        console.log(`[PricingProbe] ${source.name}(${source.id}) fill missing ${missing.length} models → +${added} entries`)
+        if (DEBUG) {
+          console.log(`[PricingProbe] ${source.name}(${source.id}) fill missing ${missing.length} models → +${added} entries`)
+        }
       }
     }
   }
