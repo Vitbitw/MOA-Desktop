@@ -15,6 +15,8 @@ const API_BASE = 'https://platform.xiaomimimo.com/api/v1'
 const LOGIN_URL = 'https://platform.xiaomimimo.com'
 const LOGIN_PARTITION = 'persist:mimo'
 const REQUEST_TIMEOUT_MS = 15_000
+/** 诊断开关（MOA_MONITOR_DEBUG=1）：输出刷新状态，排查用量数据异常时开启 */
+const DEBUG = process.env.MOA_MONITOR_DEBUG === '1'
 
 /** 判定登录有效所需的关键 cookie 名 */
 const REQUIRED_COOKIES = ['api-platform_serviceToken', 'userId']
@@ -231,7 +233,9 @@ export async function refreshMimoUsage(source: RemoteUsageSource): Promise<MimoR
   if (!cookie) return { ok: false, code: 'not_authenticated' }
 
   const [balRes, planRes] = await Promise.all([mimoGet('/balance', cookie), mimoGet('/tokenPlan/usage', cookie)])
-  console.log(`[Monitor] mimo refresh(${source.id}): balance=${balRes.status} tokenPlan=${planRes.status}`)
+  if (DEBUG) {
+    console.log(`[Monitor] mimo refresh(${source.id}): balance=${balRes.status} tokenPlan=${planRes.status}`)
+  }
 
   // 401/403 → 会话失效（cookie 过期，约 24h）
   if (balRes.status === 401 || balRes.status === 403 || planRes.status === 401 || planRes.status === 403) {

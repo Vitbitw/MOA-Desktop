@@ -30,7 +30,7 @@ const parts = [
   grab('probeDisabledUntil', /let probeDisabledUntil = \d+/),
   grab('USAGE_MAX_PAGES', /const USAGE_MAX_PAGES = \d+/),
   grab('USAGE_PAGE_BUDGET_MS', /const USAGE_PAGE_BUDGET_MS = [\d_]+/),
-  grab('DEBUG_USAGE_PAGES', /const DEBUG_USAGE_PAGES = [^\n]+/),
+  grab('DEBUG', /const DEBUG = [^\n]+/),
   fn('fetchUsagePages'),
   fn('fetchUsageRecords'),
   fn('recordTimeRange'),

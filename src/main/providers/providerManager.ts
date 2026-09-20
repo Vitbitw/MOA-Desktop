@@ -110,7 +110,6 @@ export function seedBuiltInProviders(): void {
     console.log(`[Providers] Seeded ${BUILT_IN_PROVIDER_TEMPLATES.length} built-in providers`)
   } else if (added > 0) {
     console.log(`[Providers] Added ${added} new built-in provider(s)`)
-  } else {
-    console.log(`[Providers] All ${BUILT_IN_PROVIDER_TEMPLATES.length} built-in providers already present`)
   }
+  // 无变化（全部已存在）不打日志：每次启动输出「All present」是无信息量噪音
 }

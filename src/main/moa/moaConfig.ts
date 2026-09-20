@@ -92,7 +92,10 @@ export function loadMoaConfigFromDb(): void {
           console.error('[MoA Config] Failed to persist seat id migration:', err)
         }
       }
-      console.log('[MoA Config] Loaded from DB:', JSON.stringify(currentConfig))
+      // 摘要一行：完整 dump 会把每个子模型的 systemPrompt 原文（数 KB）刷进日志，既刷屏又无人看
+      console.log(
+        `[MoA Config] Loaded from DB: 架构=${currentConfig.architecture}, 网关架构=${currentConfig.gatewayArchitecture ?? '跟随'}, 子模型=${currentConfig.subModels.length}, 聚合=${currentConfig.aggregator?.primaryModelId ?? '无'}`
+      )
     }
   } catch (err) {
     console.error('[MoA Config] Failed to load from DB:', err)

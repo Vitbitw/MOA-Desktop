@@ -25,6 +25,8 @@ const PLATFORM_API_BASE = 'https://platform.deepseek.com/api/v0'
 const LOGIN_URL = 'https://platform.deepseek.com'
 const LOGIN_PARTITION = 'persist:deepseek'
 const REQUEST_TIMEOUT_MS = 15_000
+/** 诊断开关（MOA_MONITOR_DEBUG=1）：输出刷新状态与解析详情，排查用量/趋势数据异常时开启 */
+const DEBUG = process.env.MOA_MONITOR_DEBUG === '1'
 
 /** 登录后 localStorage 中可能存放 userToken 的键（按优先级尝试） */
 const TOKEN_KEYS = ['userToken', 'user_token', 'USER_TOKEN']
@@ -453,7 +455,9 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
   const balRes = hasBalanceSource ? get(0) : null
   const amtRes = get(hasBalanceSource ? 1 : 0)
   const costRes = get(hasBalanceSource ? 2 : 1)
-  console.log(`[Monitor] deepseek refresh(${source.id}): balance=${balRes?.status ?? 0} amount=${amtRes?.status ?? 0} cost=${costRes?.status ?? 0} (balanceSrc=${userToken ? 'userSummary' : apiKey ? 'userBalance' : 'none'}, usageAuth=${userToken ? 'userToken' : 'apiKey'})`)
+  if (DEBUG) {
+    console.log(`[Monitor] deepseek refresh(${source.id}): balance=${balRes?.status ?? 0} amount=${amtRes?.status ?? 0} cost=${costRes?.status ?? 0} (balanceSrc=${userToken ? 'userSummary' : apiKey ? 'userBalance' : 'none'}, usageAuth=${userToken ? 'userToken' : 'apiKey'})`)
+  }
 
   // 用量接口 401/403 → 登录态失效（userToken 过期或 API Key 无权访问平台用量）
   if ((amtRes && (amtRes.status === 401 || amtRes.status === 403)) || (costRes && (costRes.status === 401 || costRes.status === 403))) {
@@ -474,11 +478,13 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
   // 用量（需 amount 与 cost 至少一个成功）
   const amtPayload = amtRes && amtRes.status === 200 ? extractPayload(amtRes.body) : null
   const costPayload = costRes && costRes.status === 200 ? extractPayload(costRes.body) : null
-  // 诊断：接口状态与解析结果，用于排查趋势/用量数据异常
-  console.log(
-    `[Monitor] deepseek usage parse: amount=${amtRes?.status ?? 0}(${amtPayload ? `total:${amtPayload.total.length},days:${amtPayload.days.length}` : 'null'}) cost=${costRes?.status ?? 0}(${costPayload ? `total:${costPayload.total.length},days:${costPayload.days.length}` : 'null'})`
-  )
-  if (amtRes && amtRes.status !== 500) {
+  // 诊断：接口状态与解析结果，用于排查趋势/用量数据异常（MOA_MONITOR_DEBUG=1）
+  if (DEBUG) {
+    console.log(
+      `[Monitor] deepseek usage parse: amount=${amtRes?.status ?? 0}(${amtPayload ? `total:${amtPayload.total.length},days:${amtPayload.days.length}` : 'null'}) cost=${costRes?.status ?? 0}(${costPayload ? `total:${costPayload.total.length},days:${costPayload.days.length}` : 'null'})`
+    )
+  }
+  if (DEBUG && amtRes && amtRes.status !== 500) {
     const preview = JSON.stringify(amtRes?.body ?? null)
     console.log(`[Monitor] deepseek amount body (${preview.length} chars):`, preview.slice(0, 300))
   }
@@ -535,7 +541,9 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
       }
     })
     data.daily = daily
-    console.log(`[Monitor] deepseek daily generated: ${daily.map((d) => `${d.date.slice(5)}:${d.tokens}`).join(' ')}`)
+    if (DEBUG) {
+      console.log(`[Monitor] deepseek daily generated: ${daily.map((d) => `${d.date.slice(5)}:${d.tokens}`).join(' ')}`)
+    }
 
     const today = daily[6]
     data.todayTokens = today?.tokens ?? 0

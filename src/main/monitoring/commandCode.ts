@@ -417,8 +417,8 @@ let probeDisabledUntil = 0
 const USAGE_MAX_PAGES = 20
 /** 分页总耗时预算（ms）：超预算即停止继续翻页，已取记录照常聚合 */
 const USAGE_PAGE_BUDGET_MS = 12_000
-/** 诊断开关（MOA_MONITOR_DEBUG=1）：逐页打印响应结构，排查服务端分页/字段变化时使用 */
-const DEBUG_USAGE_PAGES = process.env.MOA_MONITOR_DEBUG === '1'
+/** 诊断开关（MOA_MONITOR_DEBUG=1）：输出逐页响应结构与刷新状态摘要，排查分页/字段变化或端点异常时使用 */
+const DEBUG = process.env.MOA_MONITOR_DEBUG === '1'
 
 interface UsageFetch {
   /** 首页 HTTP 状态（null = 网络异常 / 请求抛错） */
@@ -472,7 +472,7 @@ async function fetchUsagePages(token: string, pageSize: number): Promise<UsageFe
     }
 
     pages += 1
-    if (DEBUG_USAGE_PAGES) {
+    if (DEBUG) {
       const root = unwrapSuccess(res.body)
       console.log(
         `[Monitor] usage page ${pages} (limit=${pageSize}): usages=${page.usages.length} nextCursor=${page.nextCursor ? 'present' : 'absent'} window=${page.windowDays ?? '?'} rootKeys=${isObj(root) ? Object.keys(root).join(',') : typeof root}`
@@ -521,7 +521,7 @@ async function fetchUsageRecords(token: string): Promise<UsageFetch> {
   if (probe.status === 401 || probe.status === 403) return probe
   if (probe.status !== 200) {
     probeDisabledUntil = Date.now() + USAGE_PROBE_COOLDOWN_MS
-    if (DEBUG_USAGE_PAGES) {
+    if (DEBUG) {
       console.log(
         `[Monitor] usage probe limit=${USAGE_PROBE_PAGE_SIZE} → status=${probe.status}，沿用 ${base.records.length} 条（冷却 ${USAGE_PROBE_COOLDOWN_MS / 3600_000} 小时）`
       )
@@ -530,12 +530,12 @@ async function fetchUsageRecords(token: string): Promise<UsageFetch> {
   }
   if (probe.records.length <= base.records.length) {
     probeDisabledUntil = Date.now() + USAGE_PROBE_COOLDOWN_MS
-    if (DEBUG_USAGE_PAGES) {
+    if (DEBUG) {
       console.log(`[Monitor] usage probe limit=${USAGE_PROBE_PAGE_SIZE} → ${probe.records.length} 条（无收益，冷却）`)
     }
     return base
   }
-  if (DEBUG_USAGE_PAGES) {
+  if (DEBUG) {
     console.log(`[Monitor] usage probe limit=${USAGE_PROBE_PAGE_SIZE} → ${probe.records.length} 条（base ${base.records.length} 条）`)
   }
   return probe
@@ -1011,7 +1011,8 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   }
   const getStatus = (i: number): number | null => get(i)?.status ?? null
 
-  // 网络类失败（rejected）此前被 allSettled 静默丢弃 → 日志补上每个失败端点的原因，便于定位（超时/拒绝/代理）
+  // 网络类失败（rejected）此前被 allSettled 静默丢弃 → 失败端点始终告警，便于定位（超时/拒绝/代理）；
+  // 全端点状态摘要仅在 MOA_MONITOR_DEBUG=1 时输出（每次刷新的常规信息，排查时再开）
   const ENDPOINT_TAGS = ['summary', 'credits', 'windows', 'subscription', 'subAlpha', 'charts']
   const rejectedDetail = results
     .map((r, i) =>
@@ -1022,9 +1023,13 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     .filter((s): s is string => s !== null)
     .join('; ')
 
-  console.log(
-    `[Monitor] refresh(${source.id}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} charts=${getStatus(5)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}${rejectedDetail ? ` | rejected: ${rejectedDetail}` : ''}`
-  )
+  if (rejectedDetail) {
+    console.warn(`[Monitor] refresh(${source.id}) 端点请求失败: ${rejectedDetail}`)
+  } else if (DEBUG) {
+    console.log(
+      `[Monitor] refresh(${source.id}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} charts=${getStatus(5)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}`
+    )
+  }
 
   // 401/403 → 会话失效（含明细首页）
   if (usageFetch.status === 401 || usageFetch.status === 403) {
