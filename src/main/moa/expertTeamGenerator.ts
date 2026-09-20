@@ -151,6 +151,10 @@ export async function generateExpertTeam(req: GenerateExpertsRequest): Promise<E
 
   const { reason, experts } = parseExpertPlan(result.content)
   if (experts.length === 0) throw new Error('未能解析出有效专家列表，请重试')
+  // 诊断日志：记录实际生成结果（专家名 + 角色描述字数）——描述过短/缺失时便于定位是模型输出问题还是链路问题
+  console.log(
+    `[ExpertGen] ${model.providerId} / ${model.modelId} → ${experts.length} 位专家：${experts.map((e) => `${e.name}(${e.prompt.length}字)`).join('、')}`
+  )
 
   const plan: ExpertTeamPlan = { experts, modelId: model.modelId, providerId: model.providerId }
   if (reason !== undefined) plan.reason = reason

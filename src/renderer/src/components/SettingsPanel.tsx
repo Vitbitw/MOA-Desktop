@@ -194,7 +194,18 @@ function MoASection() {
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [architecture, setArchitecture] = useState<MoaArchitecture>('election')
-  const [editPromptKey, setEditPromptKey] = useState<string | null>(null)
+  // 展开提示词编辑的席位 key 集合（生成专家团后由 onApplied 批量展开；支持多席位同时展开）
+  const [editPromptKeys, setEditPromptKeys] = useState<Set<string>>(new Set())
+  const togglePromptKey = (key: string) =>
+    setEditPromptKeys((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  /** 生成专家团完成后：自动展开全部新席位的提示词区（角色描述直接可见，无需逐个点开） */
+  const expandPromptKeys = (seats: SubModelConfig[]) =>
+    setEditPromptKeys(new Set(seats.map((s) => s.id).filter((id): id is string => !!id)))
 
   // Load existing config on mount
   useEffect(() => {
@@ -346,6 +357,7 @@ function MoASection() {
             subModels={subModels}
             setSubModels={setSubModels}
             notifySaveResult={notifySaveResult}
+            onApplied={expandPromptKeys}
           />
         )}
 
@@ -415,16 +427,16 @@ function MoASection() {
                     />
                   )}
                   <button
-                    onClick={() => setEditPromptKey(editPromptKey === k ? null : k)}
+                    onClick={() => togglePromptKey(k)}
                     className="text-xs text-muted-foreground hover:text-foreground"
                   >
-                    {editPromptKey === k
+                    {editPromptKeys.has(k)
                       ? '收起自定义提示词'
                       : sm.systemPrompt
                         ? '编辑自定义提示词（已设置）'
                         : '自定义提示词…'}
                   </button>
-                  {editPromptKey === k && (
+                  {editPromptKeys.has(k) && (
                     <textarea
                       value={sm.systemPrompt ?? ''}
                       placeholder={sm.role ? "留空则使用所选角色的默认提示词" : "输入该子模型专用的 system prompt（留空为无）"}

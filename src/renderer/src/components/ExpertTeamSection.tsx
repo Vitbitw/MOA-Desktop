@@ -8,6 +8,8 @@ interface ExpertTeamSectionProps {
   subModels: SubModelConfig[]
   setSubModels: React.Dispatch<React.SetStateAction<SubModelConfig[]>>
   notifySaveResult: (ok: boolean, detail?: string) => void
+  /** 生成并写入完成后回调（携带写入的席位）：设置面板据此自动展开各席位的提示词区，让角色描述直接可见 */
+  onApplied?: (seats: SubModelConfig[]) => void
 }
 
 /** 模型名短显（结果行内联展示，过长截断） */
@@ -24,7 +26,7 @@ const detailOf = (ids: string[]): string =>
  * 微调在下方卡片内进行（角色选择支持「自定义角色…」，可编辑角色名与提示词）。
  * 席位调整算法见 utils/expertTeam.ts（纯函数，独立测试）。
  */
-export default function ExpertTeamSection({ subModels, setSubModels, notifySaveResult }: ExpertTeamSectionProps) {
+export default function ExpertTeamSection({ subModels, setSubModels, notifySaveResult, onApplied }: ExpertTeamSectionProps) {
   const providers = useConfigStore((s) => s.providers)
 
   const [open, setOpen] = useState(false)
@@ -88,6 +90,8 @@ export default function ExpertTeamSection({ subModels, setSubModels, notifySaveR
       if (!saved) parts.push('已写入本地但保存失败，请点「保存配置」重试')
       setApplied(parts.join('；'))
       setGenerated(true)
+      // 通知设置面板自动展开新席位的提示词区（角色描述直接可见，无需逐个点开「编辑自定义提示词」）
+      onApplied?.(plan.subModels)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
