@@ -986,6 +986,20 @@ let shared = null
     const pt = ctl.streamChatCalls[0].messages[0].content
     ok(pt.includes('- 答：y'), '[41] 答案首尾空白被 trim（- 答：y）')
     ok(!pt.includes('- 答：  y'), '[41] prompt 不含未 trim 的原始答案')
+
+    // ⑤ 清洗：answers 非字符串项（123/null）→ 对齐为「（未补充）」（评审 M12b 缺口闭合）
+    resetChat()
+    ctl.streamChatResult = { content: '{"action":"ask","reason":"r","questions":["再补充？"]}' }
+    await main.generateExpertTeam({
+      requirement: '设计一个分布式任务调度系统',
+      seats: [],
+      history: [{ questions: ['a', 'b', 'c'], answers: [123, null, '  有效  '] }]
+    })
+    const pn = ctl.streamChatCalls[0].messages[0].content
+    ok(
+      pn.includes('第 1 轮：\n- 问：a\n- 答：（未补充）\n- 问：b\n- 答：（未补充）\n- 问：c\n- 答：有效'),
+      '[41] 非字符串答案项（123/null）→「（未补充）」；字符串项 trim 保留（逐字渲染）'
+    )
   }
 
   eq(caseCount, 41, '用例数 = 41（v11：档位/追问/上限与清洗）')
