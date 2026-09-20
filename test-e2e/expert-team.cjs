@@ -7,6 +7,9 @@
 //      ⑥ 评审补强（T5）：buildExpertPlanPrompt 全文片段断言（SF-3；v11：档位/追问段）/ 含冒号 modelId 无损（SF-1）/ 字符串内 } 的 reason 提取（N-1）/ 码点安全截断（N-2）
 //      ⑦ switchSeatModel 席位模型切换（保留 id/order/role/systemPrompt/expertName / 含冒号 modelId / 非法 key → null）
 //      ⑧ 生成失败自动重试（5xx/网络类重试一次；401 等不可重试错误直接抛）
+//      ⑨ v11 生成档位与追问（T3）：parseExpertTeamReply 判别解析（ask 命中/问空回退 plan/容错截断/ask 优先）/
+//         buildExpertPlanPrompt 三档互斥文案·追问历史渲染（轮号/成对/未补充/跳空轮）·force 强制段 /
+//         generateExpertTeam 追问链路（clarify 返回 / force 透传与兜底 / ≥MAX_CLARIFY_ROUNDS 本地强制 / history 清洗）
 // 用法：node test-e2e/expert-team.cjs
 // 加载方式：esbuild bundle 三个被测模块（独立构建）：
 //   - expertTeamGenerator.ts：stub electron / appSettings / providerManager / moaConfig / fetchProxy / streamChat 六个外部模块
@@ -671,7 +674,321 @@ let shared = null
     ok(typeof msg3 === 'string' && msg3.includes('HTTP 401'), '[33] 原错误透传', msg3)
   }
 
-  eq(caseCount, 33, '用例数 = 33（原 33：v11 契约适配，无增删）')
+  // ═══ v11-T3：parseExpertTeamReply 判别解析 ═══
+
+  caseHeader(34, 'parseExpertTeamReply：ask 命中 → clarify（questions 精确 / reason 透传 / 无 experts 字段 / trim）')
+  {
+    const content = '{"action":"ask","reason":"需求信息不足","questions":["q1","q2"]}'
+    const r = main.parseExpertTeamReply(content)
+    eq(r.kind, 'clarify', '[34] kind=clarify')
+    eq(r.questions, ['q1', 'q2'], '[34] questions 精确相等（按序、1-3 个）')
+    eq(r.reason, '需求信息不足', '[34] reason 透传')
+    eq('experts' in r, false, '[34] clarify 结果不含 experts 字段')
+    eq(Object.keys(r).sort(), ['kind', 'questions', 'reason'], '[34] clarify 键 = kind/questions/reason')
+
+    const padded = main.parseExpertTeamReply(
+      JSON.stringify({ action: 'ask', reason: 'r', questions: ['  前后空白  ', '\tq2\n'] })
+    )
+    eq(padded.questions, ['前后空白', 'q2'], '[34] questions 项首尾空白被 trim')
+  }
+
+  caseHeader(35, 'parseExpertTeamReply：ask 容错与边界（截前 3 / 非法项丢弃 / 截断 200 / 问空回退 plan / 垃圾 → null）')
+  {
+    // >3 个问题 → 取前 3
+    const four = main.parseExpertTeamReply(JSON.stringify({ action: 'ask', questions: ['q1', 'q2', 'q3', 'q4'] }))
+    eq(four.questions, ['q1', 'q2', 'q3'], '[35] 4 个问题 → 取前 3')
+
+    // 空串 / 纯空白 / 非字符串 → 丢弃，合法项保留
+    const mixed = main.parseExpertTeamReply(
+      JSON.stringify({ action: 'ask', questions: ['', '   ', 123, '有效一', null, '  有效二  '] })
+    )
+    eq(mixed.questions, ['有效一', '有效二'], '[35] 非法项丢弃、合法项 trim 后按序保留')
+
+    // 单项 250 字 → 截断 200（码点安全）
+    const clipped = main.parseExpertTeamReply(JSON.stringify({ action: 'ask', questions: ['问'.repeat(250)] }))
+    eq(clipped.questions[0].length, 200, '[35] 250 字问题 → 截断为 200')
+    eq(clipped.questions[0], '问'.repeat(200), '[35] 截断取前 200 字')
+    eq([...clipped.questions[0]].length, 200, '[35] 截断后码点数 = 200')
+    const emoji = main.parseExpertTeamReply(JSON.stringify({ action: 'ask', questions: ['🚀'.repeat(250)] }))
+    eq([...emoji.questions[0]].length, 200, '[35] emoji 超长问题 → 按码点截 200（代理对完整）')
+    eq(emoji.questions[0], '🚀'.repeat(200), '[35] emoji 截断取前 200 个码点')
+    ok(!hasLoneSurrogate(emoji.questions[0]), '[35] 截断结果无孤立代理项')
+
+    // action:'ask' 但问题列表无效 + 对象含 experts → 回退 plan（格式漂移容错）
+    const drift = main.parseExpertTeamReply(
+      JSON.stringify({ action: 'ask', reason: '漂移', questions: [], experts: [exp('甲', 'p-甲')] })
+    )
+    eq(drift.kind, 'plan', '[35] action=ask 但 questions 空 + 有 experts → 回退 kind=plan')
+    eq(drift.experts, [exp('甲', 'p-甲')], '[35] 回退后 experts 正常解析')
+    eq(drift.reason, '漂移', '[35] 回退后 reason 仍透传')
+
+    // questions 有效 + 同时带 experts → ask 优先（规则 1 先于规则 3）
+    const both = main.parseExpertTeamReply(
+      JSON.stringify({ action: 'ask', questions: ['还需要什么？'], experts: [exp('乙', 'p-乙')] })
+    )
+    eq(both.kind, 'clarify', '[35] questions 有效 → ask 优先于 experts')
+
+    // action:'generate' → plan + reason 透传
+    const gen = main.parseExpertTeamReply(JSON.stringify({ action: 'generate', reason: 'r-生成', experts: [exp('丙', 'p-丙')] }))
+    eq(gen.kind, 'plan', '[35] action=generate → kind=plan')
+    eq(gen.reason, 'r-生成', '[35] generate 分支 reason 透传')
+
+    // 纯垃圾 / 空串 / ask 问题全非法且无 experts → null
+    eq(main.parseExpertTeamReply(''), null, '[35] 空串 → null')
+    eq(main.parseExpertTeamReply('抱歉，我无法完成这个请求。'), null, '[35] 纯垃圾文本 → null')
+    eq(main.parseExpertTeamReply(JSON.stringify({ action: 'ask', questions: ['', '  ', 123] })), null, '[35] ask 问题全非法且无 experts → null')
+
+    // ask 无 reason → 不写 undefined 字段
+    const noReason = main.parseExpertTeamReply(JSON.stringify({ action: 'ask', questions: ['q'] }))
+    eq(noReason.kind, 'clarify', '[35] ask 无 reason → 仍返回 clarify')
+    eq('reason' in noReason, false, '[35] 缺 reason → 结果上不存在 reason 字段（不写 undefined）')
+  }
+
+  caseHeader(36, 'parseExpertTeamReply：plan 分支与 parseExpertPlan 逐项等价（冻结两函数一致性）')
+  {
+    const legacy = '{"reason":"覆盖多维","experts":[{"name":"安全工程师","prompt":"p-安全"},{"name":"性能专家","prompt":"p-性能"}]}'
+    const a = main.parseExpertTeamReply(legacy)
+    const b = main.parseExpertPlan(legacy)
+    eq(a.kind, 'plan', '[36] 旧格式 {reason, experts} → kind=plan')
+    eq(a.experts.length, b.experts.length, '[36] 专家数量与 parseExpertPlan 相等')
+    for (let i = 0; i < b.experts.length; i++) eq(a.experts[i], b.experts[i], `[36] 第 ${i + 1} 项专家与 parseExpertPlan 逐项相等`)
+    eq(a.reason, b.reason, '[36] reason 与 parseExpertPlan 相等')
+
+    // 脏格式（markdown 代码块 + 空白名/空名/null 脏项）两条路径同样等价
+    const messy = '```json\n{"reason":"脏项","experts":[{"name":"  合法  ","prompt":"p1"},{"name":"","prompt":"p2"},null]}\n```'
+    const a2 = main.parseExpertTeamReply(messy)
+    const b2 = main.parseExpertPlan(messy)
+    eq(a2.kind, 'plan', '[36] 代码块 + 脏项 → kind=plan')
+    eq(a2.experts, b2.experts, '[36] 脏项场景 experts 与 parseExpertPlan 深相等')
+    eq(a2.reason, b2.reason, '[36] 脏项场景 reason 相等')
+
+    // 无 reason：两条路径均不携带 reason 字段
+    const plain = '{"experts":[{"name":"甲","prompt":"p-甲"}]}'
+    const a3 = main.parseExpertTeamReply(plain)
+    const b3 = main.parseExpertPlan(plain)
+    eq(a3.experts, b3.experts, '[36] 无 reason 场景 experts 相等')
+    eq('reason' in a3, false, '[36] 无 reason → parseExpertTeamReply 结果不含 reason 字段')
+    eq('reason' in a3, 'reason' in b3, '[36] reason 字段存在性与 parseExpertPlan 一致')
+  }
+
+  // ═══ v11-T3：buildExpertPlanPrompt 档位 / 追问历史 / 强制段 ═══
+
+  caseHeader(37, 'buildExpertPlanPrompt：三档文案互斥（few / more / 缺省与非法 → normal）+ 数字软约束退役')
+  {
+    const requirement = '设计一个分布式任务调度系统'
+
+    const few = main.buildExpertPlanPrompt({ requirement, seats: [], scale: 'few' })
+    ok(few.includes('【细分程度】偏少：团队精干，每位专家覆盖多个相关维度，人数宜少不宜多。'), '[37] few 档含「【细分程度】偏少：…」逐字文案')
+    ok(!few.includes('正常：均衡规划'), '[37] few 档不含 normal 文案')
+    ok(!few.includes('较多：高度细分'), '[37] few 档不含 more 文案')
+    ok(!few.includes('通常 2-6 位'), '[37] few 档不含数字软约束「通常 2-6 位」（已退役）')
+
+    const more = main.buildExpertPlanPrompt({ requirement, seats: [], scale: 'more' })
+    ok(
+      more.includes('【细分程度】较多：高度细分，每位专家聚焦一个细分方向，覆盖尽量完整的维度，同时避免无意义的冗余与重复。'),
+      '[37] more 档含「【细分程度】较多：…」逐字文案'
+    )
+    ok(!more.includes('偏少：团队精干'), '[37] more 档不含 few 文案')
+    ok(!more.includes('正常：均衡规划'), '[37] more 档不含 normal 文案')
+    ok(!more.includes('通常 2-6 位'), '[37] more 档不含数字软约束')
+
+    const def = main.buildExpertPlanPrompt({ requirement, seats: [] })
+    ok(def.includes('【细分程度】正常：均衡规划，覆盖任务的关键维度，人数适中。'), '[37] 缺省档 → 含 normal 逐字文案')
+    ok(!def.includes('通常 2-6 位'), '[37] 缺省档不含数字软约束')
+    ok(def.includes('每次最多 3 个问题，宁少勿滥'), '[37] 含追问规则片段「每次最多 3 个问题，宁少勿滥」')
+
+    const weird = main.buildExpertPlanPrompt({ requirement, seats: [], scale: 'weird' })
+    ok(weird.includes('【细分程度】正常：均衡规划，覆盖任务的关键维度，人数适中。'), '[37] 非法档位（weird）→ 回退 normal 文案')
+    ok(!weird.includes('通常 2-6 位'), '[37] 非法档位不含数字软约束')
+  }
+
+  caseHeader(38, 'buildExpertPlanPrompt：追问历史渲染（轮号/成对/未补充/跳空轮）+ force 段按需插入')
+  {
+    const requirement = '设计一个分布式任务调度系统'
+    const history = [
+      { questions: ['缺什么信息？'], answers: ['需要支持多人协作'] },
+      { questions: ['部署环境？'], answers: [] }
+    ]
+    const p = main.buildExpertPlanPrompt({ requirement, seats: [], history })
+    ok(p.includes('【追问历史】'), '[38] history 非空 → 含【追问历史】')
+    ok(p.includes('第 1 轮：'), '[38] 含第 1 轮')
+    ok(p.includes('- 问：缺什么信息？'), '[38] 含第 1 轮问题')
+    ok(p.includes('- 答：需要支持多人协作'), '[38] 含第 1 轮答案')
+    ok(p.includes('第 2 轮：'), '[38] 含第 2 轮')
+    ok(p.includes('- 答：（未补充）'), '[38] 空答案 → 「（未补充）」')
+    ok(p.indexOf('第 1 轮：') < p.indexOf('第 2 轮：'), '[38] 轮号按序（第 1 轮在 第 2 轮 之前）')
+    ok(p.includes('第 1 轮：\n- 问：缺什么信息？\n- 答：需要支持多人协作'), '[38] 第 1 轮 Q/A 成对逐字渲染')
+    ok(p.includes('第 2 轮：\n- 问：部署环境？\n- 答：（未补充）'), '[38] 第 2 轮 Q/A 成对逐字渲染（答为空）')
+
+    // 空问题轮被跳过：轮号从 1 起连续
+    const skip = main.buildExpertPlanPrompt({
+      requirement,
+      seats: [],
+      history: [
+        { questions: [], answers: ['不该出现'] },
+        { questions: ['Q2'], answers: ['A2'] }
+      ]
+    })
+    ok(skip.includes('第 1 轮：\n- 问：Q2\n- 答：A2'), '[38] 空问题轮被跳过 → 有效轮前移为第 1 轮')
+    ok(!skip.includes('第 2 轮：'), '[38] 仅 1 个有效轮 → 无第 2 轮')
+    ok(!skip.includes('不该出现'), '[38] 空问题轮的答案不进入 prompt')
+
+    // force 段（段形式：标记独占一行 + 正文 —— 「【本次要求】」字样在追问规则第 4 条中恒存在，故用段形式判别）
+    const forceText = '【本次要求】\n用户已选择直接生成：立即生成专家团队，不得再追问。'
+    const forced = main.buildExpertPlanPrompt({ requirement, seats: [], force: true })
+    ok(forced.includes(forceText), '[38] force:true → 含【本次要求】逐字强制段')
+    const notForced = main.buildExpertPlanPrompt({ requirement, seats: [], force: false })
+    ok(!notForced.includes(forceText), '[38] force:false → 不含【本次要求】段')
+    const def = main.buildExpertPlanPrompt({ requirement, seats: [] })
+    ok(!def.includes(forceText), '[38] force 缺省 → 不含【本次要求】段')
+    ok(!def.includes('【追问历史】\n'), '[38] history 缺省 → 不含【追问历史】段')
+    ok(def.includes('若【本次要求】写明不得再追问'), '[38] 恒存在的是追问规则第 4 条字样（段形式判别的依据）')
+
+    // 两者同时：段序 = 追问历史 → 本次要求 → 专家要求
+    const both = main.buildExpertPlanPrompt({ requirement, seats: [], history, force: true })
+    ok(
+      both.indexOf('【追问历史】\n') < both.indexOf(forceText) && both.indexOf(forceText) < both.indexOf('【专家要求】'),
+      '[38] 段序：追问历史 < 本次要求 < 专家要求'
+    )
+  }
+
+  // ═══ v11-T3：generateExpertTeam 追问链路 ═══
+
+  caseHeader(39, 'generateExpertTeam：LLM 返回 ask → resolve {kind:clarify}（questions/reason/模型来源/单次调用）')
+  {
+    resetChat()
+    ctl.providers = [prov('p1', { apiKey: 'key-p1', models: [mdl('p1-m1')] })]
+    ctl.moaConfig = { subModels: [], aggregator: { primaryProviderId: 'p1', primaryModelId: 'agg-1' } }
+    ctl.streamChatResult = { content: '{"action":"ask","reason":"需求不足","questions":["面向什么平台？"]}' }
+    const res = await main.generateExpertTeam({ requirement: '做一个通知功能', seats: [] })
+    eq(res.kind, 'clarify', '[39] 返回 kind=clarify')
+    eq(res.questions, ['面向什么平台？'], '[39] questions 透传（按序）')
+    eq(res.reason, '需求不足', '[39] reason 透传')
+    eq(res.modelId, 'agg-1', '[39] modelId = 生成模型')
+    eq(res.providerId, 'p1', '[39] providerId = 生成模型厂商')
+    eq(Object.keys(res).sort(), ['kind', 'modelId', 'providerId', 'questions', 'reason'], '[39] clarify 键 = kind/modelId/providerId/questions/reason')
+    eq('experts' in res, false, '[39] clarify 结果不含 experts 字段')
+    eq(ctl.streamChatCalls.length, 1, '[39] 恰好一次 streamChat 调用')
+  }
+
+  caseHeader(40, 'generateExpertTeam：scale/history 透传进 prompt；forceGenerate 下模型仍追问 → reject（force 透传证据）')
+  {
+    // ① scale + history 进入 prompt；非 force 不出现【本次要求】段
+    resetChat()
+    ctl.providers = [prov('p1', { apiKey: 'key-p1', models: [mdl('p1-m1')] })]
+    ctl.moaConfig = { subModels: [], aggregator: null }
+    ctl.streamChatResult = {
+      content: '{"action":"generate","reason":"覆盖平台与协作","experts":[{"name":"平台专家","prompt":"p-平台"}]}'
+    }
+    const plan = await main.generateExpertTeam({
+      requirement: '设计一个分布式任务调度系统',
+      seats: [],
+      scale: 'more',
+      history: [{ questions: ['Q1'], answers: ['A1'] }]
+    })
+    eq(plan.kind, 'plan', '[40] 正常路径返回 kind=plan')
+    const prompt = ctl.streamChatCalls[0].messages[0].content
+    ok(prompt.includes('【追问历史】'), '[40] history 透传：prompt 含【追问历史】')
+    ok(prompt.includes('- 问：Q1'), '[40] prompt 含历史问题')
+    ok(prompt.includes('- 答：A1'), '[40] prompt 含历史答案')
+    ok(prompt.includes('【细分程度】较多'), '[40] scale=more 透传：prompt 含「较多」档文案')
+    ok(!prompt.includes('【本次要求】\n'), '[40] 未 force → prompt 无【本次要求】段')
+
+    // ② forceGenerate:true + LLM 返回 ask → reject；prompt 含强制段（force 透传证据）
+    resetChat()
+    ctl.streamChatResult = { content: '{"action":"ask","reason":"再确认","questions":["还需要补充什么？"]}' }
+    const msg = await rejectMsg(
+      main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [], forceGenerate: true })
+    )
+    ok(
+      typeof msg === 'string' && msg.includes('未按要求直接生成专家团'),
+      '[40] force 下模型仍追问 → reject 文案含「未按要求直接生成专家团」',
+      msg
+    )
+    const forcedPrompt = ctl.streamChatCalls[0].messages[0].content
+    ok(
+      forcedPrompt.includes('【本次要求】\n用户已选择直接生成：立即生成专家团队，不得再追问。'),
+      '[40] force 透传：prompt 含【本次要求】逐字强制段'
+    )
+    eq(ctl.streamChatCalls.length, 1, '[40] force 场景仅一次 streamChat 调用（无重试）')
+  }
+
+  caseHeader(41, 'generateExpertTeam：轮数上限（≥MAX_CLARIFY_ROUNDS 本地强制）/ 4 轮截前 3 / history 清洗')
+  {
+    // ① history 3 轮（合法）= MAX_CLARIFY_ROUNDS → 本地强制：模型仍追问则 reject
+    resetChat()
+    ctl.providers = [prov('p1', { apiKey: 'key-p1', models: [mdl('p1-m1')] })]
+    ctl.moaConfig = { subModels: [], aggregator: null }
+    ctl.streamChatResult = { content: '{"action":"ask","reason":"还想问","questions":["第三轮之后还想问？"]}' }
+    const h3 = [
+      { questions: ['问题一'], answers: ['答案一'] },
+      { questions: ['问题二'], answers: ['答案二'] },
+      { questions: ['问题三'], answers: ['答案三'] }
+    ]
+    const msg3 = await rejectMsg(
+      main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [], history: h3 })
+    )
+    eq(msg3, '生成失败：模型未按要求直接生成专家团，请重试', '[41] history 3 轮达上限 → 本地强制 reject（文案逐字）')
+    const p3 = ctl.streamChatCalls[0].messages[0].content
+    ok(p3.includes('第 3 轮：'), '[41] 三轮历史全部渲染（第 3 轮在）')
+    ok(p3.includes('- 问：问题三'), '[41] 第 3 轮内容进入 prompt')
+    ok(p3.includes('【本次要求】\n用户已选择直接生成：立即生成专家团队，不得再追问。'), '[41] 达上限 → prompt 含【本次要求】段（本地强制证据）')
+    ok(!p3.includes('第 4 轮：'), '[41] 3 轮历史 → 无第 4 轮')
+
+    // ② history 2 轮 + 返回 ask → 未达上限 → 不强制，正常返回 clarify（锁定边界）
+    resetChat()
+    ctl.streamChatResult = { content: '{"action":"ask","reason":"继续问","questions":["目标平台？"]}' }
+    const h2 = [
+      { questions: ['问题一'], answers: ['答案一'] },
+      { questions: ['问题二'], answers: ['答案二'] }
+    ]
+    const res2 = await main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [], history: h2 })
+    eq(res2.kind, 'clarify', '[41] 2 轮 < 上限 → 不本地强制，返回 kind=clarify')
+    eq(res2.questions, ['目标平台？'], '[41] clarify questions 透传')
+    const p2 = ctl.streamChatCalls[0].messages[0].content
+    ok(!p2.includes('【本次要求】\n'), '[41] 2 轮 → prompt 无【本次要求】段')
+
+    // ③ history 4 轮 → 截前 3 且达上限 → 本地强制
+    resetChat()
+    ctl.streamChatResult = { content: '{"action":"ask","reason":"还想问","questions":["还问？"]}' }
+    const h4 = h3.concat([{ questions: ['问题四'], answers: ['答案四'] }])
+    const msg4 = await rejectMsg(
+      main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [], history: h4 })
+    )
+    ok(typeof msg4 === 'string' && msg4.includes('未按要求直接生成专家团'), '[41] 4 轮 → 截前 3 后达上限 → 本地强制 reject', msg4)
+    const p4 = ctl.streamChatCalls[0].messages[0].content
+    ok(p4.includes('第 3 轮：'), '[41] 第 3 轮保留')
+    ok(!p4.includes('第 4 轮：'), '[41] 第 4 轮被截断（prompt 不含「第 4 轮：」）')
+    ok(!p4.includes('问题四') && !p4.includes('答案四'), '[41] 第 4 轮内容不进入 prompt')
+
+    // ④ 清洗：answers 缺项 → 对齐补「（未补充）」；答案首尾空白 trim
+    resetChat()
+    ctl.streamChatResult = { content: '{"action":"ask","reason":"r","questions":["再补充？"]}' }
+    const cleaned = await main.generateExpertTeam({
+      requirement: '设计一个分布式任务调度系统',
+      seats: [],
+      history: [{ questions: ['a', 'b'], answers: ['x'] }]
+    })
+    eq(cleaned.kind, 'clarify', '[41] 清洗场景未达上限 → 正常返回 clarify')
+    const pc = ctl.streamChatCalls[0].messages[0].content
+    ok(
+      pc.includes('第 1 轮：\n- 问：a\n- 答：x\n- 问：b\n- 答：（未补充）'),
+      '[41] answers 缺项 → 第二问答对齐补「（未补充）」（逐字渲染）'
+    )
+
+    resetChat()
+    ctl.streamChatResult = { content: '{"action":"ask","reason":"r","questions":["再补充？"]}' }
+    await main.generateExpertTeam({
+      requirement: '设计一个分布式任务调度系统',
+      seats: [],
+      history: [{ questions: ['a'], answers: ['  y  '] }]
+    })
+    const pt = ctl.streamChatCalls[0].messages[0].content
+    ok(pt.includes('- 答：y'), '[41] 答案首尾空白被 trim（- 答：y）')
+    ok(!pt.includes('- 答：  y'), '[41] prompt 不含未 trim 的原始答案')
+  }
+
+  eq(caseCount, 41, '用例数 = 41（v11：档位/追问/上限与清洗）')
 
   console.log('\n──────────────────────────────')
   console.log(`通过 ${pass} / 失败 ${fail}`)
