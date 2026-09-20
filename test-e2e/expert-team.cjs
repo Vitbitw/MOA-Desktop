@@ -1,10 +1,10 @@
 // 冒烟测试：主席团专家团 —— 主进程生成器 src/main/moa/expertTeamGenerator.ts + 渲染端席位映射 src/renderer/src/utils/expertTeam.ts + 共享 key 解析 src/shared/modelKey.ts（T4 + T5 补强）
 // 覆盖：① parseExpertPlan 宽容解析（标准对象 / markdown 代码块 / 前后杂文 / 纯数组 / 方括号 reason / 脏项丢弃 / 超长截断 / 垃圾输入）
 //      ② resolveGeneratorModel 三级解析（主模型 → 首个可用子模型 → 首个可用厂商首模型）
-//      ③ generateExpertTeam 入口（空需求 / 无可用生成模型 / 流式失败 / 成功路径 / 解析失败 / reason 缺省）
+//      ③ generateExpertTeam 入口（空需求 / 无可用生成模型 / 流式失败 / 成功路径 / 解析失败 / reason 缺省）；返回 {kind:'plan'} 判别
 //      ④ initialDrafts 草案初始化（沿用现有席位 / 复用首个席位模型 / 池空回退空串）
 //      ⑤ buildImportPlan 导入计划（新 uuid / order 重排 / role 清空 / 席位扩充缩减 / skipped / 变化摘要展示名=专家名〔空名回退模型名〕）
-//      ⑥ 评审补强（T5）：buildExpertPlanPrompt 全文片段断言（SF-3）/ 含冒号 modelId 无损（SF-1）/ 字符串内 } 的 reason 提取（N-1）/ 码点安全截断（N-2）
+//      ⑥ 评审补强（T5）：buildExpertPlanPrompt 全文片段断言（SF-3；v11：档位/追问段）/ 含冒号 modelId 无损（SF-1）/ 字符串内 } 的 reason 提取（N-1）/ 码点安全截断（N-2）
 //      ⑦ switchSeatModel 席位模型切换（保留 id/order/role/systemPrompt/expertName / 含冒号 modelId / 非法 key → null）
 //      ⑧ 生成失败自动重试（5xx/网络类重试一次；401 等不可重试错误直接抛）
 // 用法：node test-e2e/expert-team.cjs
@@ -172,11 +172,12 @@ let shared = null
 
   console.log('══ 模块导出（签名对齐任务卡）══')
   ok(
-    ['resolveGeneratorModel', 'buildExpertPlanPrompt', 'parseExpertPlan', 'generateExpertTeam'].every(
+    ['resolveGeneratorModel', 'buildExpertPlanPrompt', 'parseExpertPlan', 'parseExpertTeamReply', 'generateExpertTeam'].every(
       (k) => typeof main[k] === 'function'
     ),
-    'expertTeamGenerator 导出 resolveGeneratorModel / buildExpertPlanPrompt / parseExpertPlan / generateExpertTeam'
+    'expertTeamGenerator 导出 resolveGeneratorModel / buildExpertPlanPrompt / parseExpertPlan / parseExpertTeamReply / generateExpertTeam'
   )
+  ok(main.MAX_CLARIFY_ROUNDS === 3, 'expertTeamGenerator 导出 MAX_CLARIFY_ROUNDS === 3（追问轮数上限）')
   ok(
     ['initialDrafts', 'buildImportPlan', 'switchSeatModel'].every((k) => typeof renderer[k] === 'function'),
     'expertTeam（渲染端）导出 initialDrafts / buildImportPlan / switchSeatModel'
@@ -380,6 +381,7 @@ let shared = null
     }
     const requirement = '设计一个分布式任务调度系统'
     const plan = await main.generateExpertTeam({ requirement, seats: ['席位A', '席位B'] })
+    eq(plan.kind, 'plan', '[17] 返回 kind=plan')
     eq(plan.experts, [exp('架构师', 'p-架构'), exp('测试工程师', 'p-测试')], '[17] experts 按序解析')
     eq(plan.reason, '规模适中', '[17] reason 透传')
     eq(plan.modelId, 'agg-1', '[17] plan.modelId = 生成模型')
@@ -400,14 +402,14 @@ let shared = null
     eq(ctl.streamChatCalls[0].timeoutMs, 60000, '[17] timeoutMs = DEFAULT_SUB_MODEL_TIMEOUT（60s）')
   }
 
-  caseHeader(18, 'generateExpertTeam：streamChat 返回纯垃圾 → reject「未能解析出有效专家列表」')
+  caseHeader(18, 'generateExpertTeam：streamChat 返回纯垃圾 → reject「未能解析出生成结果」')
   {
     resetChat()
     ctl.providers = [prov('p1', { apiKey: 'key-p1', models: [mdl('p1-m1')] })]
     ctl.moaConfig = { subModels: [], aggregator: null }
     ctl.streamChatResult = { content: '这个问题很有挑战性，我认为需要多角度考虑。' }
     const msg = await rejectMsg(main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [] }))
-    ok(typeof msg === 'string' && msg.includes('未能解析出有效专家列表'), '[18] 文案含「未能解析出有效专家列表」', msg)
+    ok(typeof msg === 'string' && msg.includes('未能解析出生成结果'), '[18] 文案含「未能解析出生成结果」', msg)
   }
 
   caseHeader(19, 'generateExpertTeam：成功但 reason 缺失 → plan 无 reason 字段（不写 undefined）')
@@ -418,8 +420,9 @@ let shared = null
     ctl.streamChatResult = { content: '{"experts":[{"name":"唯一专家","prompt":"p-唯一"}]}' }
     const plan = await main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [] })
     eq(plan.experts.length, 1, '[19] 无 reason 不影响专家解析')
+    eq(plan.kind, 'plan', '[19] kind=plan')
     eq('reason' in plan, false, '[19] plan 上不存在 reason 字段')
-    eq(Object.keys(plan).sort(), ['experts', 'modelId', 'providerId'], '[19] plan 键 = experts/modelId/providerId')
+    eq(Object.keys(plan).sort(), ['experts', 'kind', 'modelId', 'providerId'], '[19] plan 键 = experts/kind/modelId/providerId')
   }
 
   // ═══ initialDrafts ═══
@@ -555,25 +558,31 @@ let shared = null
       '你是多模型协作（主席团模式）的专家团队规划师',
       '【任务需求】',
       '【当前配置】',
-      '【规划要求】',
+      '【细分程度】',
+      '正常：均衡规划，覆盖任务的关键维度，人数适中',
+      '专家总数与分工颗粒度由你依据该档位自行决定',
+      '【追问规则】',
+      '每次最多 3 个问题，宁少勿滥',
+      '【专家要求】',
       '【输出要求】',
-      '通常 2-6 位',
-      '新席位默认复用现有第一个席位的模型',
       '只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释',
-      '参考本轮上下文，只输出你的意见',
-      '"reason": "一句话说明推荐这个数量的理由"',
-      // v6 补强：角色描述四段结构 + 字数下限 + 格式示例（防「只写一句身份」的生成质量退化）
+      '"action": "ask"',
+      '"action": "generate"',
       '200-350 字',
       '宁详勿简',
       '① 身份设定',
       '② 职责描述',
       '③ 工作方法',
       '④ 输出要求',
+      '新席位默认复用现有第一个席位的模型',
+      '参考本轮上下文，只输出你的意见',
       '示例（仅格式与详略程度示意；内容必须按实际任务生成，勿照抄）',
       '你是一位深耕应用与供应链安全的资深安全工程师'
     ]
     for (const f of fragments) ok(withSeats.includes(f), `[29] prompt 含关键片段「${f}」`)
     ok(withSeats.includes('已配置专家席位：2 个（席位A、席位B）'), '[29] seats 非空 → 含席位清单 join 结果')
+    ok(!withSeats.includes('\n【本次要求】\n'), '[29] 非 force → 不含【本次要求】段')
+    ok(!withSeats.includes('\n【追问历史】\n'), '[29] 无历史 → 不含【追问历史】段')
     const noSeats = main.buildExpertPlanPrompt({ requirement, seats: [] })
     ok(noSeats.includes('已配置专家席位：0 个（无，将自动创建席位）'), '[29] seats 空 → 含「（无，将自动创建席位）」')
     ok(noSeats.includes(requirement), '[29] seats 空分支同样嵌入需求原文')
@@ -640,6 +649,7 @@ let shared = null
       { content: '{"experts":[{"name":"重试专家","prompt":"重试后成功"}]}' }
     ]
     const plan = await main.generateExpertTeam({ requirement: '设计一个分布式任务调度系统', seats: [] })
+    eq(plan.kind, 'plan', '[33] kind=plan')
     eq(plan.experts.length, 1, '[33] 5xx 自动重试一次后成功解析')
     eq(ctl.streamChatCalls.length, 2, '[33] 可重试错误 → streamChat 共调用 2 次')
 
@@ -661,7 +671,7 @@ let shared = null
     ok(typeof msg3 === 'string' && msg3.includes('HTTP 401'), '[33] 原错误透传', msg3)
   }
 
-  eq(caseCount, 33, '用例数 = 33（T4 的 28 + T5 补强 2 + 主审 trim 1 + 席位切换 1 + 生成重试 1）')
+  eq(caseCount, 33, '用例数 = 33（原 33：v11 契约适配，无增删）')
 
   console.log('\n──────────────────────────────')
   console.log(`通过 ${pass} / 失败 ${fail}`)

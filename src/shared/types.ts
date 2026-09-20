@@ -187,6 +187,45 @@ export interface ExpertTeamPlan {
   providerId: string
 }
 
+/** 生成档位（细分程度）：偏少 / 正常 / 较多。缺省 'normal' */
+export type ExpertScale = 'few' | 'normal' | 'more'
+
+/** 一轮已提交的追问问答（questions 与 answers 等长；answers 项可为空串 = 未补充） */
+export interface ClarifyTurn {
+  questions: string[]
+  answers: string[]
+}
+
+/** 生成请求（moa:generateExperts req） */
+export interface GenerateExpertsRequest {
+  requirement: string
+  seats: string[]
+  /** 细分程度（缺省/非法值 → 'normal'） */
+  scale?: ExpertScale
+  /** 追问历史（多轮追问时逐轮追加；轮数超上限由主进程截断 + 强制生成） */
+  history?: ClarifyTurn[]
+  /** true = 用户点「直接生成」：本轮不得再追问，直接输出专家团 */
+  forceGenerate?: boolean
+}
+
+/** 追问结果（moa:generateExperts 返回 data 之一） */
+export interface ExpertClarifyResult {
+  kind: 'clarify'
+  /** 追问问题（1-3 个） */
+  questions: string[]
+  /** AI 一句话说明为何需要追问（可空） */
+  reason?: string
+  modelId: string
+  providerId: string
+}
+
+/** 专家团结果（moa:generateExperts 返回 data 之一） */
+export interface ExpertPlanResult extends ExpertTeamPlan {
+  kind: 'plan'
+}
+
+export type ExpertGenResult = ExpertClarifyResult | ExpertPlanResult
+
 export interface AggregationChunk {
   text: string
   done: boolean

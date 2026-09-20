@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
 import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from '../shared/ipc-channels'
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
   // Config / Providers
@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld('moaAPI', {
   setMoaConfig: (config: unknown) => ipcRenderer.invoke('moa:setConfig', config),
 
   // 主席团专家团生成（AI 规划专家）
-  generateExperts: (req: { requirement: string; seats: string[] }) =>
+  generateExperts: (req: GenerateExpertsRequest) =>
     ipcRenderer.invoke(IPC.MOA_GENERATE_EXPERTS, req),
 
   // MoA Send

@@ -5,7 +5,7 @@ import { getDatabase } from './db/database'
 import { readAppSettings, updateRawAppSettings } from './config/appSettings'
 import { handleIpc, handleIpcRaw } from './ipc/handle'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, ProbeProgressEvent, ToastData } from '../shared/types'
+import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { applyGatewayServer, stopGatewayServer } from './gateway/server'
 import { initUiBridge } from './uiBridge'
@@ -355,7 +355,7 @@ function registerIpcHandlers() {
   handleIpc(IPC.MOA_SET_CONFIG, (_e, config) => setMoaConfig(config))
 
   // ── 主席团专家团生成（AI 规划专家角色）──
-  handleIpc(IPC.MOA_GENERATE_EXPERTS, (_e, req: { requirement: string; seats: string[] }) => generateExpertTeam(req))
+  handleIpc(IPC.MOA_GENERATE_EXPERTS, (_e, req: GenerateExpertsRequest) => generateExpertTeam(req))
 
   // ── MoA Send Message ──
   handleIpcRaw(IPC.MOA_SEND_MESSAGE, async (_e, msg: {

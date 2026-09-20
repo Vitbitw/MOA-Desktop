@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent, ExpertTeamPlan, ToastData } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent, ExpertGenResult, GenerateExpertsRequest, ToastData } from './types'
 import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from './ipc-channels'
 
 interface MoaAPI {
@@ -22,8 +22,8 @@ interface MoaAPI {
   setMoaConfig: (config: unknown) => unknown
 
   // 主席团专家团生成（AI 规划专家）
-  generateExperts: (req: { requirement: string; seats: string[] }) =>
-    Promise<{ success: boolean; data?: ExpertTeamPlan; error?: string }>
+  generateExperts: (req: GenerateExpertsRequest) =>
+    Promise<{ success: boolean; data?: ExpertGenResult; error?: string }>
 
   // MoA Send
   sendMessage: (msg: { conversationId?: string; title?: string; content: string; mode: string }) =>
