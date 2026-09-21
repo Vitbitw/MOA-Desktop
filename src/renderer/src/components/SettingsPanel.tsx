@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useSettingsStore } from '../store/settingsStore'
 import { useConfigStore } from '../store/configStore'
-import { useProbeStore, type PricingSortKey } from '../store/probeStore'
+import { useProbeStore, probeResultsToMessages, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture } from '../../../shared/types'
@@ -1372,11 +1372,8 @@ function ProbeSection() {
   const { busy, runningIds, messages, progress, setBusy, setRunningIds, setMessages, setProgress, collapsed, toggleCollapsed, sorts, setSort } =
     useProbeStore()
 
-  // 订阅 main 进程实时推送的探查进度（抓取/解析阶段）
-  useEffect(() => {
-    const off = window.moaAPI.onProbeProgress((p) => setProgress(p))
-    return off
-  }, [setProgress])
+  // 探查运行状态与进度由全局订阅（probeStore.initProbeStateSubscription，App 挂载时建立）
+  // 统一维护：后台自动刷新期间打开本页同样能看到「正在刷新」与进度
 
   // 探查模型选项（仅列有 API Key 的 provider 的模型，探查需要真实调用）
   const modelOptions = providers
@@ -1462,15 +1459,7 @@ function ProbeSection() {
     try {
       const res = await window.moaAPI.probePricing(targets, force)
       if (res.success && res.data) {
-        const nextMsg: Record<string, string> = {}
-        for (const r of res.data.results) {
-          nextMsg[r.sourceId] = r.ok
-            ? r.skipped
-              ? `页面无变化（沿用 ${r.entryCount} 条）`
-              : `已更新 ${r.entryCount} 条定价`
-            : `失败：${r.error}`
-        }
-        setMessages(nextMsg)
+        setMessages(probeResultsToMessages(res.data.results))
       } else {
         setMessages({ __global: res.error || '探查失败' })
       }

@@ -9,7 +9,7 @@
     "dev:win": "chcp 65001 >nul & electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "test:all": "npm run test:sse && npm run test:throttle && npm run test:stream && npm run test:engine && npm run test:gateway && npm run test:store && npm run test:anthropic && npm run test:anthropic-env && npm run test:usage-window && npm run test:monitor && npm run test:cloud-cache && npm run test:snapshot-store && npm run test:expert-team",
+    "test:all": "npm run test:sse && npm run test:throttle && npm run test:stream && npm run test:engine && npm run test:gateway && npm run test:store && npm run test:anthropic && npm run test:anthropic-env && npm run test:usage-window && npm run test:monitor && npm run test:cloud-cache && npm run test:snapshot-store && npm run test:expert-team && npm run test:probe-state",
     "test:sse": "node test-e2e/sse-parser.cjs",
     "test:throttle": "node test-e2e/stream-throttle.cjs",
     "test:stream": "node test-e2e/stream-call.cjs",
@@ -23,6 +23,7 @@
     "test:cloud-cache": "node test-e2e/cloud-monitor-cache.cjs",
     "test:snapshot-store": "node test-e2e/monitor-snapshot-store.cjs",
     "test:expert-team": "node test-e2e/expert-team.cjs",
+    "test:probe-state": "node test-e2e/pricing-probe-state.cjs",
     "test:arch-persist": "node test-e2e/architecture-persist.cjs",
     "db:inspect": "node test-e2e/db-inspect.cjs"
   },

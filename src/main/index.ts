@@ -5,7 +5,7 @@ import { getDatabase } from './db/database'
 import { readAppSettings, updateRawAppSettings } from './config/appSettings'
 import { handleIpc, handleIpcRaw } from './ipc/handle'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
+import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, PricingProbeState, PricingProbeResultItem, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { applyGatewayServer, stopGatewayServer } from './gateway/server'
 import { initUiBridge } from './uiBridge'
@@ -63,7 +63,19 @@ function safeSendMain(channel: string, ...args: unknown[]): void {
 let moaRunning = false
 
 // ── 定价探查状态 ──
-let pricingProbeRunning = false
+// 手动与后台自动刷新共用：置位/复位时广播给渲染进程（设置页据此显示「正在刷新」并禁用探查按钮）
+let pricingProbeState: PricingProbeState = { running: false, sourceIds: [], trigger: 'auto' }
+
+/** 更新探查运行状态并广播（渲染进程全局订阅，挂载时经 pricing:probeStatus 兜底同步） */
+function setPricingProbeState(next: PricingProbeState): void {
+  pricingProbeState = next
+  safeSendMain(IPC_EVENT.PRICING_PROBE_STATE, next)
+}
+
+/** 向渲染进程推送探查进度（抓取/解析阶段变化） */
+function emitProbeProgress(p: ProbeProgressEvent): void {
+  safeSendMain(IPC_EVENT.PRICING_PROBE_PROGRESS, p)
+}
 
 /** request_logs 表行结构（含 models 列） */
 interface RequestLogRow {
@@ -786,28 +798,28 @@ function registerIpcHandlers() {
 
   // ── 定价探查（LLM 自动更新官方定价）──
   handleIpcRaw(IPC.PRICING_PROBE_RUN, async (_e, sources?: PricingProbeSource[], force?: boolean) => {
-    if (pricingProbeRunning) return { success: false, error: '探查进行中' }
-    pricingProbeRunning = true
+    if (pricingProbeState.running) return { success: false, error: '探查进行中' }
+    // 直接探查调用方传入的源对象（已配置 key 的厂商可自动派生，无需持久化源）
+    const valid = (Array.isArray(sources) ? sources : []).filter(
+      (s) => s && s.enabled !== false && sourceHasConfiguredKey(s)
+    )
+    if (valid.length === 0) return { success: true, data: { results: [] } }
+    const model = resolveProbeModel()
+    if (!model) {
+      return { success: false, error: '未配置可用的大模型（请先配置带 API Key 的厂商，或在「定价探查」指定探查模型）' }
+    }
+    // 运行状态广播：UI 据此显示「正在刷新」并禁用探查按钮（校验均为同步，无并发窗口）
+    setPricingProbeState({ running: true, sourceIds: valid.map((s) => s.id), trigger: 'manual' })
     try {
-      // 直接探查调用方传入的源对象（已配置 key 的厂商可自动派生，无需持久化源）
-      const valid = (Array.isArray(sources) ? sources : []).filter(
-        (s) => s && s.enabled !== false && sourceHasConfiguredKey(s)
-      )
-      if (valid.length === 0) return { success: true, data: { results: [] } }
-      const model = resolveProbeModel()
-      if (!model) {
-        return { success: false, error: '未配置可用的大模型（请先配置带 API Key 的厂商，或在「定价探查」指定探查模型）' }
-      }
-      // 探查过程中向渲染进程实时推送进度事件
-      const emitProgress = (p: ProbeProgressEvent) => {
-        safeSendMain(IPC_EVENT.PRICING_PROBE_PROGRESS, p)
-      }
-      const results = await probeSources(valid, model, emitProgress, force === true)
+      const results = await probeSources(valid, model, emitProbeProgress, force === true)
       return { success: true, data: { results } }
     } finally {
-      pricingProbeRunning = false
+      setPricingProbeState({ running: false, sourceIds: [], trigger: 'manual' })
     }
   })
+
+  // 渲染进程挂载时同步探查状态：覆盖订阅注册前已开始的后台自动刷新
+  handleIpc(IPC.PRICING_PROBE_STATUS, () => pricingProbeState)
 }
 
 /** 定价探查自动刷新定时器句柄（模块级，设置变更时可重置） */
@@ -831,6 +843,8 @@ function schedulePricingAutoRefresh(initialDelayMs = 10_000): void {
     try {
       const { autoRefreshSeconds, sources } = getPricingProbeConfig()
       if (autoRefreshSeconds <= 0) return
+      // 手动探查进行中：跳过本轮（不与用户操作并发／不覆盖 UI 状态），等下一个周期
+      if (pricingProbeState.running) return
       const enabled = sources.filter((s) => s.enabled && sourceHasConfiguredKey(s))
       if (enabled.length === 0) return
 
@@ -858,12 +872,22 @@ function schedulePricingAutoRefresh(initialDelayMs = 10_000): void {
         title: '定价自动刷新将消耗 Token',
         message: `将对 ${stale.length} 个过期定价源调用 ${probeProviderName} · ${model.modelId} 探查，产生 Token 消耗`
       })
-      pricingProbeRunning = true
+      // 运行状态广播：设置页打开时同样显示「正在刷新」进度并禁用探查按钮
+      setPricingProbeState({ running: true, sourceIds: stale.map((s) => s.id), trigger: 'auto' })
+      let results: PricingProbeResultItem[] = []
       try {
-        await probeSources(stale, model)
+        results = await probeSources(stale, model, emitProbeProgress)
       } finally {
-        pricingProbeRunning = false
+        setPricingProbeState({ running: false, sourceIds: [], trigger: 'auto', results })
       }
+      // 完成后结果通知（UI 不在设置页也能看到）；详情在「设置 → 定价」
+      const okCount = results.filter((r) => r.ok).length
+      sendToastToRenderer({
+        type: okCount === results.length ? 'success' : 'warning',
+        title: '定价自动刷新完成',
+        message: `${okCount}/${results.length} 个源更新成功（设置 → 定价 查看详情）`,
+        duration: 4000
+      })
     } catch (err) {
       console.error('[PricingProbe] auto-refresh failed:', err)
     } finally {

@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, ProbeProgressEvent, ExpertGenResult, GenerateExpertsRequest, ToastData } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, PricingProbeState, ProbeProgressEvent, ExpertGenResult, GenerateExpertsRequest, ToastData } from './types'
 import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from './ipc-channels'
 
 interface MoaAPI {
@@ -70,7 +70,11 @@ interface MoaAPI {
   // Pricing Probe
   probePricing: (sources: PricingProbeSource[], force?: boolean) =>
     Promise<{ success: boolean; data?: { results: PricingProbeResultItem[] }; error?: string }>
+  /** 当前探查运行状态（挂载时同步，覆盖订阅注册前已开始的后台自动刷新） */
+  getProbeStatus: () => Promise<{ success: boolean; data?: PricingProbeState; error?: string }>
   onProbeProgress: (callback: (data: ProbeProgressEvent) => void) => () => void
+  /** 探查运行状态变更（开始/结束；手动与后台自动刷新共用） */
+  onProbeState: (callback: (data: PricingProbeState) => void) => () => void
 
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => () => void

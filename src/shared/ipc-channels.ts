@@ -45,6 +45,8 @@ export const IPC = {
 
   // Pricing Probe
   PRICING_PROBE_RUN: 'pricing:probeRun',
+  /** 查询当前探查运行状态（渲染进程挂载时同步，覆盖订阅注册前已开始的后台自动刷新） */
+  PRICING_PROBE_STATUS: 'pricing:probeStatus',
 } as const
 
 export const IPC_EVENT = {
@@ -55,6 +57,8 @@ export const IPC_EVENT = {
 
   // 定价探查进度
   PRICING_PROBE_PROGRESS: 'pricing:probeProgress',
+  // 定价探查运行状态变更（开始/结束；手动与后台自动刷新共用，UI 据此显示「正在刷新」）
+  PRICING_PROBE_STATE: 'pricing:probeState',
 
   // Menu events
   MENU_NEW_CONVERSATION: 'menu:newConversation',

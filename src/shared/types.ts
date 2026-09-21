@@ -604,6 +604,21 @@ export interface PricingProbeResultItem {
   skipped?: boolean
 }
 
+/**
+ * 定价探查运行状态（main → renderer 推送 + pricing:probeStatus 查询）。
+ * 手动与后台自动刷新共用同一状态：UI 据此显示「正在刷新」并禁用探查按钮。
+ */
+export interface PricingProbeState {
+  /** 是否有探查在运行（含后台自动刷新） */
+  running: boolean
+  /** 本轮覆盖的源 ID（running=true 时有效；与 UI visibleSources 的 id 对齐） */
+  sourceIds: string[]
+  /** 触发方式：manual = 设置页按钮；auto = 后台自动刷新定时器 */
+  trigger: 'manual' | 'auto'
+  /** 本轮结果（仅 auto 完成时携带；manual 以 probeRun 返回值为准） */
+  results?: PricingProbeResultItem[]
+}
+
 // ─── 悬浮通知（renderer Toast）───
 
 export type ToastType = 'info' | 'warning' | 'success' | 'error'

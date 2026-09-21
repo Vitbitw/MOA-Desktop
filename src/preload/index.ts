@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
 import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from '../shared/ipc-channels'
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, PricingProbeState, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
   // Config / Providers
@@ -60,10 +60,16 @@ contextBridge.exposeInMainWorld('moaAPI', {
 
   // Pricing Probe
   probePricing: (sources: PricingProbeSource[], force?: boolean) => ipcRenderer.invoke(IPC.PRICING_PROBE_RUN, sources, force),
+  getProbeStatus: () => ipcRenderer.invoke(IPC.PRICING_PROBE_STATUS),
   onProbeProgress: (callback: (data: ProbeProgressEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: ProbeProgressEvent) => callback(data)
     ipcRenderer.on(IPC_EVENT.PRICING_PROBE_PROGRESS, handler)
     return () => ipcRenderer.removeListener(IPC_EVENT.PRICING_PROBE_PROGRESS, handler)
+  },
+  onProbeState: (callback: (data: PricingProbeState) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: PricingProbeState) => callback(data)
+    ipcRenderer.on(IPC_EVENT.PRICING_PROBE_STATE, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.PRICING_PROBE_STATE, handler)
   },
 
   // MoA Event Listeners (streaming)

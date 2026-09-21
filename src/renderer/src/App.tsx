@@ -4,6 +4,7 @@ import { useConfigStore } from './store/configStore'
 import { useConversationStore, convFromRow } from './store/conversationStore'
 import { initGatewaySubscriptions } from './store/gatewayStore'
 import { useSettingsStore } from './store/settingsStore'
+import { initProbeStateSubscription } from './store/probeStore'
 import Sidebar from './components/Sidebar'
 import ChatArea from './components/ChatArea'
 import InputBox from './components/InputBox'
@@ -105,6 +106,11 @@ function App() {
       useNotificationStore.getState().push(data)
     })
     return unsub
+  }, [])
+
+  // 定价探查运行状态（含后台自动刷新）：全局订阅，设置页据此显示「正在刷新」并禁用按钮
+  useEffect(() => {
+    return initProbeStateSubscription()
   }, [])
 
   return (

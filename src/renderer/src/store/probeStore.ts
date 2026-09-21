@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { ProbeProgressEvent } from '../../../shared/types'
+import type { PricingProbeResultItem, PricingProbeState, ProbeProgressEvent } from '../../../shared/types'
+import { useSettingsStore } from './settingsStore'
 
 /** 定价表格可排序字段 */
 export type PricingSortKey = 'modelId' | 'input' | 'output' | 'cacheRead' | 'cacheCreation'
@@ -69,3 +70,53 @@ export const useProbeStore = create<ProbeState>((set) => ({
   reset: () =>
     set({ busy: false, runningIds: new Set(), messages: {}, progress: null, collapsed: new Set(), sorts: {} })
 }))
+
+/** 探查结果 → 各源提示文案（设置页手动探查与全局状态订阅共用）；键为源 id */
+export function probeResultsToMessages(results: PricingProbeResultItem[]): Record<string, string> {
+  const messages: Record<string, string> = {}
+  for (const r of results) {
+    messages[r.sourceId] = r.ok
+      ? r.skipped
+        ? `页面无变化（沿用 ${r.entryCount} 条）`
+        : `已更新 ${r.entryCount} 条定价`
+      : `失败：${r.error}`
+  }
+  return messages
+}
+
+/**
+ * 订阅 main 进程的探查运行状态（App 挂载时调用一次，返回退订函数）。
+ *
+ * 必须全局订阅而非在定价页内订阅：探查可能在页面卸载后开始/结束（如后台自动刷新），
+ * 页面内订阅会漏掉这些事件，把 busy 卡在错误状态（表现为「不显示刷新中」或按钮长期禁用）。
+ * 订阅建立前先查询一次当前状态，覆盖订阅注册前已开始的后台自动刷新。
+ */
+export function initProbeStateSubscription(): () => void {
+  const apply = (s: PricingProbeState): void => {
+    const st = useProbeStore.getState()
+    if (s.running) {
+      st.setBusy(true)
+      st.setRunningIds(new Set(s.sourceIds))
+      return
+    }
+    st.setBusy(false)
+    st.setRunningIds(new Set())
+    st.setProgress(null)
+    // 后台自动刷新：结果文案与数据刷新在此补上（手动探查由 runProbe 自行处理）
+    if (s.trigger === 'auto') {
+      if (s.results && s.results.length > 0) st.setMessages(probeResultsToMessages(s.results))
+      void useSettingsStore.getState().loadSettings()
+    }
+  }
+  // 查询当前状态：仅在「正在运行」时应用，避免与本地刚触发的探查响应互相覆盖
+  void window.moaAPI.getProbeStatus().then((res) => {
+    if (res.success && res.data?.running) apply(res.data)
+  })
+  // 进度事件同在此订阅：定价页打开前发生的进度也不丢（页面直接读 store）
+  const offProgress = window.moaAPI.onProbeProgress((p) => useProbeStore.getState().setProgress(p))
+  const offState = window.moaAPI.onProbeState(apply)
+  return () => {
+    offProgress()
+    offState()
+  }
+}
