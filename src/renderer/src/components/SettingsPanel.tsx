@@ -4,7 +4,7 @@ import { useConfigStore } from '../store/configStore'
 import { useProbeStore, probeResultsToMessages, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
 import { formatCost } from '../lib/usageFormat'
-import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
+import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap, Pencil } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { splitModelKey } from '../../../shared/modelKey'
@@ -229,10 +229,10 @@ function MoASection() {
     }
   }, [providers.length])
 
-  // All usable models flattened from all providers
+  // All usable models flattened from all providers（label 带计费通道徽标：按量 / Plan）
   const allModelOptions = providers.flatMap((p) =>
     (p.models || []).map((m) => ({
-      label: `${p.name} · ${m.id}`,
+      label: `${p.name} · ${m.id}（${p.billing === 'plan' ? 'Plan' : '按量'}）`,
       value: `${p.id}:${m.id}`,
       providerId: p.id,
       modelId: m.id
@@ -657,6 +657,8 @@ function ProvidersSection() {
   const [loading, setLoading] = useState<string | null>(null)
   const [showKey, setShowKey] = useState<Record<string, boolean>>({})
   const [showAdd, setShowAdd] = useState(false)
+  // 编辑模式：非空 = 正在编辑该厂商（AddProviderDialog 走 updateProvider / updateProviderKey）
+  const [editing, setEditing] = useState<Provider | null>(null)
 
   const refresh = async () => {
     const res = await window.moaAPI.getProviders()
@@ -702,7 +704,16 @@ function ProvidersSection() {
         {availableProviders.map((p) => (
           <div key={p.id} className="rounded-lg border border-border p-3 text-sm space-y-1.5">
             <div className="flex items-center justify-between">
-              <span className="font-medium text-foreground">{p.name}</span>
+              <span className="font-medium text-foreground">
+                {p.name}
+                {/* 通道徽标：按量=中性灰、Plan=主题色（记录属性，与是否分组无关） */}
+                <span className={`ml-1.5 text-[10px] font-normal ${p.billing === 'plan' ? 'text-primary' : 'text-muted-foreground'}`}>
+                  （{p.billing === 'plan' ? 'Plan' : '按量'}）
+                </span>
+                {p.vendorKey && (
+                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">· {p.vendorKey}</span>
+                )}
+              </span>
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => fetchModels(p.id)}
@@ -711,6 +722,13 @@ function ProvidersSection() {
                   title="获取模型列表"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${loading === p.id ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  onClick={() => setEditing(p)}
+                  className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent/50 transition-colors"
+                  title="编辑厂商（分组 / 通道 / 订阅费 / 密钥）"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={() => handleDelete(p.id)}
@@ -722,6 +740,13 @@ function ProvidersSection() {
               </div>
             </div>
             <div className="text-muted-foreground truncate text-xs">{p.baseUrl}</div>
+            {p.billing === 'plan' && (
+              <div className="text-xs text-muted-foreground">
+                {p.plan
+                  ? `订阅费 ${p.plan.currency === 'CNY' ? '¥' : '$'}${p.plan.amount}/月`
+                  : '未配置订阅费，按单价估算'}
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <span className={hasProviderAccess(p) ? 'text-green-500' : 'text-red-400'}>
@@ -753,43 +778,126 @@ function ProvidersSection() {
           onDone={() => { setShowAdd(false); refresh() }}
         />
       )}
+
+      {editing && (
+        <AddProviderDialog
+          editingProvider={editing}
+          onClose={() => setEditing(null)}
+          onDone={() => { setEditing(null); refresh() }}
+        />
+      )}
     </div>
   )
 }
 
-function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [name, setName] = useState('')
-  const [baseUrl, setBaseUrl] = useState('')
-  const [apiKey, setApiKey] = useState('')
+/** 周期起始日（date input 值 'YYYY-MM-DD'）→ epoch ms；空/非法 → undefined（缺省当月 1 号） */
+const parsePlanAnchor = (dateStr: string): number | undefined => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim())
+  if (!m) return undefined
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
+}
+
+/** epoch ms → date input 值 'YYYY-MM-DD'（本地时区）；无值 → '' */
+const formatPlanAnchor = (ts?: number): string => {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/** 「新建分组…」选项哨兵值（与真实分组名区分） */
+const NEW_VENDOR_SENTINEL = '__new__'
+
+function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () => void; onDone: () => void; editingProvider?: Provider }) {
+  const providers = useConfigStore((s) => s.providers)
+  const editing = !!editingProvider
+  const [name, setName] = useState(editingProvider?.name ?? '')
+  const [baseUrl, setBaseUrl] = useState(editingProvider?.baseUrl ?? '')
+  const [apiKey, setApiKey] = useState(editingProvider?.apiKey ?? '')
+  // 厂商分组：'' = 独立厂商；NEW_VENDOR_SENTINEL = 新建分组（用下方文本输入）
+  const [vendorChoice, setVendorChoice] = useState(editingProvider?.vendorKey ?? '')
+  const [newVendor, setNewVendor] = useState('')
+  // 计费通道：'usage' = 按量（默认）| 'plan' = 订阅/Token 包
+  const [billing, setBilling] = useState<'usage' | 'plan'>(editingProvider?.billing ?? 'usage')
+  // Plan 三件套：每期消费金额（留空 = 未配置）/ 币种 / 周期起始日
+  const [planAmount, setPlanAmount] = useState(editingProvider?.plan ? String(editingProvider.plan.amount) : '')
+  const [planCurrency, setPlanCurrency] = useState<'CNY' | 'USD'>(editingProvider?.plan?.currency ?? 'CNY')
+  const [planDate, setPlanDate] = useState(formatPlanAnchor(editingProvider?.plan?.anchorTs))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // 现有分组：所有厂商非空 vendorKey 去重（保序）
+  const vendorOptions = [...new Set(providers.map((p) => (p.vendorKey || '').trim()).filter(Boolean))]
+  // 实际生效的分组名（选「新建分组…」时取输入值）
+  const resolvedVendorKey = vendorChoice === NEW_VENDOR_SENTINEL ? newVendor.trim() : vendorChoice.trim()
 
   const handleSave = async () => {
     if (!name.trim()) {
       setError('名称为必填')
       return
     }
+    // baseUrl 为空且选中了内置模板 → 用模板 URL；否则要求用户填 URL（不能拿 name 当 URL）
+    const selectedTemplate = BUILT_IN_PROVIDER_TEMPLATES.find((t) => t.name === name.trim())
+    const finalBaseUrl = baseUrl.trim() || selectedTemplate?.baseUrl || ''
+    if (!finalBaseUrl) {
+      setError('请填写 API 地址（或从上方快速选择内置厂商）')
+      return
+    }
+    // 本地回环地址免 Key（本地推理服务不校验 Authorization）；云端厂商必须填 Key
+    if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl)) {
+      setError('云端厂商需填写 API Key（本地地址可留空）')
+      return
+    }
+    if (vendorChoice === NEW_VENDOR_SENTINEL && !newVendor.trim()) {
+      setError('请填写新分组名称')
+      return
+    }
+    // 每期消费金额：留空 = 未配置（回退单价链）；填了必须是 ≥0 数字
+    let amount = 0
+    if (planAmount.trim() !== '') {
+      amount = Number(planAmount)
+      if (!Number.isFinite(amount) || amount < 0) {
+        setError('每期消费金额需为不小于 0 的数字')
+        return
+      }
+    }
+    const anchorTs = parsePlanAnchor(planDate)
+    const plan = billing === 'plan' && amount > 0
+      ? { amount, currency: planCurrency, ...(anchorTs !== undefined ? { anchorTs } : {}) }
+      : null
     setSaving(true)
     setError(null)
     try {
-      // baseUrl 为空且选中了内置模板 → 用模板 URL；否则要求用户填 URL（不能拿 name 当 URL）
-      const selectedTemplate = BUILT_IN_PROVIDER_TEMPLATES.find((t) => t.name === name.trim())
-      const finalBaseUrl = baseUrl.trim() || selectedTemplate?.baseUrl || ''
-      if (!finalBaseUrl) {
-        setError('请填写 API 地址（或从上方快速选择内置厂商）')
-        setSaving(false)
-        return
-      }
-      // 本地回环地址免 Key（本地推理服务不校验 Authorization）；云端厂商必须填 Key
-      if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl)) {
-        setError('云端厂商需填写 API Key（本地地址可留空）')
-        setSaving(false)
+      if (editingProvider) {
+        // 编辑：分组 / 通道 / 订阅费 / 名称 / 地址走 updateProvider（plan=null 清空订阅费）
+        const res = await window.moaAPI.updateProvider(editingProvider.id, {
+          name: name.trim(),
+          baseUrl: finalBaseUrl,
+          vendorKey: resolvedVendorKey,
+          billing,
+          plan
+        })
+        if (!res.success) {
+          setError(String(res.error || '保存失败'))
+          return
+        }
+        // 密钥变更走 updateProviderKey：同分组厂商全组同步写入
+        if (apiKey !== editingProvider.apiKey) {
+          const keyRes = await window.moaAPI.updateProviderKey(editingProvider.id, apiKey)
+          if (!keyRes.success) {
+            setError(String(keyRes.error || '密钥保存失败'))
+            return
+          }
+        }
+        onDone()
         return
       }
       const res = await window.moaAPI.addProvider({
         name: name.trim(),
         baseUrl: finalBaseUrl,
-        apiKey: apiKey.trim()
+        apiKey: apiKey.trim(), vendorKey: resolvedVendorKey,
+        billing,
+        ...(plan ? { plan } : {})
       })
       if (res.success) {
         onDone()
@@ -806,8 +914,9 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-card border border-border rounded-xl p-5 w-96 shadow-2xl max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-sm font-semibold text-foreground mb-4">添加厂商</h3>
+        <h3 className="text-sm font-semibold text-foreground mb-4">{editing ? '编辑厂商' : '添加厂商'}</h3>
 
+        {!editing && (
         <div className="mb-3">
           <p className="text-xs text-muted-foreground mb-1.5">快速选择：</p>
           <div className="flex flex-wrap gap-1.5">
@@ -826,6 +935,7 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             ))}
           </div>
         </div>
+        )}
 
         <div className="space-y-3">
           <div>
@@ -855,7 +965,97 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
               className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="sk-...（本地回环地址可留空）"
             />
+            {editing && resolvedVendorKey !== '' && (
+              <p className="text-[10px] text-muted-foreground mt-1">同分组厂商将同步此密钥</p>
+            )}
           </div>
+
+          {/* 厂商分组：现有分组去重 +「新建分组…」文本输入；空 = 独立厂商 */}
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">厂商分组</label>
+            <select
+              value={vendorChoice}
+              onChange={(e) => setVendorChoice(e.target.value)}
+              className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value="">独立厂商（不分组）</option>
+              {vendorOptions.map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+              <option value={NEW_VENDOR_SENTINEL}>新建分组…</option>
+            </select>
+            {vendorChoice === NEW_VENDOR_SENTINEL && (
+              <input
+                value={newVendor}
+                onChange={(e) => setNewVendor(e.target.value)}
+                className="mt-1.5 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder="输入新分组名称，如：阿里云"
+              />
+            )}
+            <p className="text-[10px] text-muted-foreground mt-1">同分组厂商共享 API 密钥</p>
+          </div>
+
+          {/* 计费通道：按量（默认）/ Plan（订阅·Token 包） */}
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">计费通道</label>
+            <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5 w-fit">
+              {(['usage', 'plan'] as const).map((b) => (
+                <button
+                  key={b}
+                  type="button"
+                  onClick={() => setBilling(b)}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                    billing === b
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {b === 'usage' ? '按量' : 'Plan（订阅）'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Plan 三件套：每期消费金额 / 币种 / 周期起始日（读时按月分桶摊销） */}
+          {billing === 'plan' && (
+            <div className="space-y-2 rounded-md border border-border bg-muted/30 p-2">
+              <div className="flex items-end gap-2">
+                <div className="flex-1 min-w-0">
+                  <label className="text-xs text-muted-foreground block mb-1">每期消费金额（月）</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={planAmount}
+                    onChange={(e) => setPlanAmount(e.target.value)}
+                    placeholder="如：68（留空 = 未配置，按单价估算）"
+                    className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-1">币种</label>
+                  <select
+                    value={planCurrency}
+                    onChange={(e) => setPlanCurrency(e.target.value as 'CNY' | 'USD')}
+                    className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <option value="CNY">CNY（¥）</option>
+                    <option value="USD">USD（$）</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">周期起始日</label>
+                <input
+                  type="date"
+                  value={planDate}
+                  onChange={(e) => setPlanDate(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                <p className="text-[10px] text-muted-foreground mt-1">摊销按月分桶，缺省当月 1 号；年费÷12 填入</p>
+              </div>
+            </div>
+          )}
         </div>
 
         {error && <p className="text-xs text-destructive mt-2">{error}</p>}
@@ -892,7 +1092,7 @@ function TitleSettingsSection() {
     .filter((p) => hasProviderAccess(p))
     .flatMap((p) =>
     (p.models || []).map((m) => ({
-      label: `${p.name} · ${m.id}`,
+      label: `${p.name} · ${m.id}（${p.billing === 'plan' ? 'Plan' : '按量'}）`,
       value: `${p.id}:${m.id}`,
       providerId: p.id,
       modelId: m.id
@@ -1726,12 +1926,19 @@ function ProbeSection() {
       <div className="space-y-4">
         {visibleSources.map((s) => {
           const meta = sourceMeta(s.id)
+          // 源绑定的厂商（通道徽标由此推导；未绑定不标）
+          const boundProvider = providerForSource(s)
           return (
             <div key={s.id} className="rounded-lg border border-border p-4 space-y-3">
               {/* 顶部：厂商名标题 + 结果提示 + 探查按钮 + 开关 + 删除 */}
               <div className="flex items-center gap-3">
                 <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" title={s.name}>
                   {s.name}
+                  {boundProvider && (
+                    <span className={`ml-1 text-[10px] font-normal ${boundProvider.billing === 'plan' ? 'text-primary' : 'text-muted-foreground'}`}>
+                      （{boundProvider.billing === 'plan' ? 'Plan' : '按量'}）
+                    </span>
+                  )}
                 </h3>
                 {messages[s.id] && (
                   <span

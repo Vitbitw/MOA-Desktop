@@ -153,6 +153,8 @@ export default function UsageView() {
                 // 有 token 用量但 cost=0 → 未定价（模型不在价格表）
                 const unpriced = row.cost === 0 && (row.prompt > 0 || row.completion > 0)
                 const share = totalCost > 0 ? `${((row.cost / totalCost) * 100).toFixed(1)}%` : null
+                // Plan 摊销行：按厂商分组时主进程生成的 key 形如「组名·Plan」/「组名·按量」
+                const isPlanRow = row.key.includes('·Plan')
                 return (
                   <tr key={row.key} className="border-b border-border/50 last:border-b-0 hover:bg-accent/30">
                     <td className="px-4 py-2 text-foreground">{row.key}</td>
@@ -165,6 +167,14 @@ export default function UsageView() {
                         <span className="text-muted-foreground">未定价</span>
                       ) : (
                         formatCost(row.cost, currency)
+                      )}
+                      {isPlanRow && (
+                        <span
+                          className="ml-1 text-[10px] text-muted-foreground"
+                          title="期内消费 × token 占比，改订阅费后历史随之重算"
+                        >
+                          Plan 摊销
+                        </span>
                       )}
                     </td>
                     <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">
