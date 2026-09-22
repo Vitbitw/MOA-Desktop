@@ -271,8 +271,12 @@ function registerIpcHandlers() {
   // ── Config / Providers ──
   handleIpc(IPC.CONFIG_GET_PROVIDERS, () => getAllProviders())
 
-  handleIpc(IPC.CONFIG_ADD_PROVIDER, (_e, data: { name: string; baseUrl: string; apiKey: string }) =>
-    addProvider(data.name, data.baseUrl, data.apiKey)
+  handleIpc(IPC.CONFIG_ADD_PROVIDER, (_e, data: { name: string; baseUrl: string; apiKey: string; vendorKey?: string; billing?: 'usage' | 'plan'; plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } }) =>
+    addProvider(data.name, data.baseUrl, data.apiKey, {
+      vendorKey: data.vendorKey,
+      billing: data.billing,
+      plan: data.plan
+    })
   )
 
   handleIpc(IPC.CONFIG_REMOVE_PROVIDER, (_e, id: string) => {
