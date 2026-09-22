@@ -96,7 +96,7 @@ export function resolveGeneratorModel(): GeneratorModel | null {
     }
   }
 
-  // ③ 首个可用（有 Key 或本地地址）厂商的首个模型
+  // ③ 首个可用（有 Key 或回环地址）厂商的首个模型
   for (const p of providers) {
     if (!p.enabled || !hasProviderAccess(p)) continue
     const m = p.models?.[0]

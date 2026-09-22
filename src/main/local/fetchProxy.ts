@@ -12,6 +12,7 @@ import http from 'node:http'
 import tls from 'node:tls'
 import { Readable } from 'node:stream'
 import { readAppSettings } from '../config/appSettings'
+import { isLocalBaseUrl } from '../../shared/providerAccess'
 
 // ─── 代理状态 ───
 /** 代理 HTTPS 不可用的过期时间戳（0 = 可用） */
@@ -34,15 +35,6 @@ function parseProxy(url: string): { host: string; port: number } | null {
   }
 }
 
-/** 是否本地回环地址（本地引擎/本机服务直连，不走代理——代理普遍拒绝回环目标）。 */
-function isLoopbackHost(urlStr: string): boolean {
-  try {
-    const host = new URL(urlStr).hostname.replace(/^\[|\]$/g, '').toLowerCase()
-    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0:0:0:0:0:0:0:1'
-  } catch {
-    return false
-  }
-}
 
 function safeDestroy(...sockets: (import('net').Socket | null | undefined)[]): void {
   for (const s of sockets) {
@@ -386,7 +378,7 @@ async function fetchOnce(
 
   const urlStr = typeof url === 'string' ? url : url.toString()
   // 本地回环地址直连：即使配置了代理，本机引擎/代理自身的请求也不走代理
-  if (isLoopbackHost(urlStr)) return fetch(url, init)
+  if (isLocalBaseUrl(urlStr)) return fetch(url, init)
 
   // 无代理 → 直连
   if (!proxyUrl) return fetch(url, init)
@@ -425,7 +417,7 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 
 /** 本次请求的走向描述（诊断日志用）：直连 / 代理隧道 / 回环直连 / 代理降级 */
 function describeVia(urlStr: string): string {
-  if (isLoopbackHost(urlStr)) return 'direct(loopback)'
+  if (isLocalBaseUrl(urlStr)) return 'direct(loopback)'
   if (!getProxyUrl()) return 'direct'
   return isProxyBroken() ? 'direct(proxy-broken)' : 'proxy'
 }

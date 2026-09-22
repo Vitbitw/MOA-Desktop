@@ -694,7 +694,7 @@ function ProvidersSection() {
 
       {availableProviders.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8 border border-dashed border-border rounded-md">
-          暂无可用的厂商（本地地址免 Key），点击上方按钮添加
+          暂无可用的厂商（回环地址免 Key），点击上方按钮添加
         </p>
       )}
 
@@ -724,9 +724,7 @@ function ProvidersSection() {
             <div className="text-muted-foreground truncate text-xs">{p.baseUrl}</div>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span className={hasProviderAccess(p) ? 'text-green-500' : 'text-red-400'}>
-                  {hasProviderAccess(p) ? '●' : '○'}
-                </span>
+                <span className="text-green-500">●</span>
                 <span className="font-mono truncate max-w-[140px]">
                   {p.apiKey
                     ? showKey[p.id] ? p.apiKey : `${p.apiKey.slice(0, 4)}...${p.apiKey.slice(-4)}`
@@ -782,7 +780,7 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
       }
       // 本地回环地址免 Key（本地推理服务不校验 Authorization）；云端厂商必须填 Key
       if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl)) {
-        setError('云端厂商需填写 API Key（本地地址可留空）')
+        setError('云端厂商需填写 API Key（回环地址可留空）')
         setSaving(false)
         return
       }
@@ -847,7 +845,7 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground block mb-1">API Key（本地地址可留空）</label>
+            <label className="text-xs text-muted-foreground block mb-1">API Key（回环地址可留空）</label>
             <input
               type="password"
               value={apiKey}
@@ -906,7 +904,7 @@ function TitleSettingsSection() {
   return (
     <div className="space-y-5 max-w-xl">
       <p className="text-sm text-muted-foreground">
-        配置 AI 自动为对话生成标题。需要选择一个可用的轻量模型（已配置 API Key 或本地地址）来执行标题生成。
+        配置 AI 自动为对话生成标题。需要选择一个可用的轻量模型（已配置 API Key 或回环地址）来执行标题生成。
       </p>
 
       <SettingRow label="标题模型" hint="用于生成标题的轻量模型（建议选择便宜快速的模型）">
@@ -1385,7 +1383,7 @@ function ProbeSection() {
   // 探查运行状态与进度由全局订阅（probeStore.initProbeStateSubscription，App 挂载时建立）
   // 统一维护：后台自动刷新期间打开本页同样能看到「正在刷新」与进度
 
-  // 探查模型选项（仅列可用厂商的模型：有 Key 或本地地址，探查需要真实调用）
+  // 探查模型选项（仅列可用厂商的模型：有 Key 或回环地址，探查需要真实调用）
   const modelOptions = providers
     .filter((p) => hasProviderAccess(p))
     .flatMap((p) =>

@@ -10,7 +10,7 @@
 export function isLocalBaseUrl(baseUrl: string): boolean {
   try {
     const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase()
-    return host === 'localhost' || host.startsWith('127.') || host === '::1' || host === '0:0:0:0:0:0:0:1'
+    return host === 'localhost' || /^127(?:\.\d{1,3}){3}$/.test(host) || host === '::1'
   } catch {
     return false
   }
