@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, PricingProbeState, ProbeProgressEvent, ExpertGenResult, GenerateExpertsRequest, ToastData } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, PricingProbeState, ProbeProgressEvent, ExpertGenResult, GenerateExpertsRequest, ToastData, ProviderUpdatePatch } from './types'
 import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from './ipc-channels'
 
 interface MoaAPI {
@@ -7,6 +7,10 @@ interface MoaAPI {
   addProvider: (data: { name: string; baseUrl: string; apiKey: string }) => Promise<{ success: boolean; data: unknown; error?: string }>
   removeProvider: (id: string) => Promise<{ success: boolean; error?: string }>
   getModels: (providerId: string) => Promise<{ success: boolean; data: unknown; error?: string }>
+  /** T1：编辑厂商（仅传入字段更新；plan 传 null 清空订阅费三列） */
+  updateProvider: (id: string, patch: ProviderUpdatePatch) => Promise<{ success: boolean; error?: string }>
+  /** T1：改 API 密钥 —— 同 vendor_key 分组内全部记录同步为同一值 */
+  updateProviderKey: (id: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
 
   // Conversations
   getConversations: () => Promise<{ success: boolean; data: unknown; error?: string }>

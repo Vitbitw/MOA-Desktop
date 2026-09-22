@@ -1,8 +1,8 @@
 import crypto from 'node:crypto'
 import { getDatabase } from '../db/database'
 import { getProviderKey, saveProviderKey, removeProviderKey } from '../store/key-store'
-import type { Provider, ModelInfo } from '../../shared/types'
-import { BUILT_IN_PROVIDER_TEMPLATES } from '../../shared/defaults'
+import type { Provider, ModelInfo, ProviderUpdatePatch } from '../../shared/types'
+import { BUILT_IN_PROVIDER_TEMPLATES, PLAN_BILLING_NAMES, VENDOR_GROUP } from '../../shared/defaults'
 import { fetchProxy } from '../local/fetchProxy'
 import { broadcastToUi } from '../uiBridge'
 import { IPC_EVENT } from '../../shared/ipc-channels'
@@ -10,7 +10,9 @@ import { IPC_EVENT } from '../../shared/ipc-channels'
 export function getAllProviders(): Provider[] {
   const rows = getDatabase().query<{
     id: string; name: string; base_url: string; model_list: string; enabled: number
-  }>('SELECT id, name, base_url, model_list, enabled FROM providers ORDER BY name')
+    vendor_key: string; billing: string
+    plan_amount: number | null; plan_currency: string; plan_anchor_ts: number | null
+  }>('SELECT id, name, base_url, model_list, enabled, vendor_key, billing, plan_amount, plan_currency, plan_anchor_ts FROM providers ORDER BY name')
 
   return rows.map((row) => ({
     id: row.id,
@@ -18,14 +20,53 @@ export function getAllProviders(): Provider[] {
     baseUrl: row.base_url,
     apiKey: getProviderKey(row.id) || '',
     models: JSON.parse(row.model_list || '[]') as ModelInfo[],
-    enabled: row.enabled === 1
+    enabled: row.enabled === 1,
+    vendorKey: row.vendor_key || '',
+    billing: row.billing === 'plan' ? 'plan' : 'usage',
+    plan: planFromRow(row.plan_amount, row.plan_currency, row.plan_anchor_ts)
   }))
+}
+
+/** 校验用户提供的 API 地址（仅 http/https），非法抛错；addProvider / updateProvider 共用 */
+function validateProviderUrl(raw: string): string {
+  try {
+    const u = new URL(raw)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      throw new Error('仅支持 http/https 协议')
+    }
+  } catch (err) {
+    throw new Error(`API 地址无效: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return raw
+}
+
+/** plan_amount 缺失 / 0 = 「未配置订阅费」→ plan 字段整体为 undefined（消费端回退单价链估算） */
+function planFromRow(
+  amount: number | null,
+  currency: string,
+  anchorTs: number | null
+): { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } | undefined {
+  if (amount == null || amount <= 0) return undefined
+  const plan: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } = {
+    amount,
+    currency: currency === 'USD' ? 'USD' : 'CNY'
+  }
+  if (anchorTs != null) plan.anchorTs = anchorTs
+  return plan
+}
+
+/** addProvider 可选扩展（T1）：同厂商分组 / 计费通道 / Plan 三件套 */
+export interface AddProviderOpts {
+  vendorKey?: string
+  billing?: 'usage' | 'plan'
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
 }
 
 export function addProvider(
   name: string,
   baseUrl: string,
-  apiKey: string
+  apiKey: string,
+  opts?: AddProviderOpts
 ): { id: string } {
   const template = BUILT_IN_PROVIDER_TEMPLATES.find((t) => t.name === name)
   // 用户提供的 URL 优先；仅当用户留空时才回退内置模板 URL。
@@ -36,25 +77,95 @@ export function addProvider(
     if (!url) throw new Error('请填写 API 地址（或从内置厂商中选择）')
   } else {
     // 用户提供的 URL 一律校验合法性（无论名称是否命中内置模板）
-    try {
-      const u = new URL(url)
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-        throw new Error('仅支持 http/https 协议')
-      }
-    } catch (err) {
-      throw new Error(`API 地址无效: ${err instanceof Error ? err.message : String(err)}`)
-    }
+    url = validateProviderUrl(url)
   }
 
   const id = crypto.randomUUID()
   getDatabase().exec(
-    'INSERT INTO providers (id, name, base_url, model_list, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)',
-    [id, name, url, '[]', Date.now()]
+    'INSERT INTO providers (id, name, base_url, model_list, enabled, created_at, vendor_key, billing, plan_amount, plan_currency, plan_anchor_ts) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)',
+    [
+      id, name, url, '[]', Date.now(),
+      opts?.vendorKey?.trim() ?? '',
+      opts?.billing === 'plan' ? 'plan' : 'usage',
+      opts?.plan?.amount ?? null,
+      opts?.plan?.currency === 'USD' ? 'USD' : 'CNY',
+      opts?.plan?.anchorTs ?? null
+    ]
   )
 
   if (apiKey) saveProviderKey(id, apiKey)
 
   return { id }
+}
+
+
+/**
+ * 编辑厂商（T1）：仅 patch 传入的字段更新，未传入的保持原值。
+ * baseUrl 复用 addProvider 的 URL 校验；plan 传 null 清空订阅费三列。
+ */
+export function updateProvider(id: string, patch: ProviderUpdatePatch): void {
+  const sets: string[] = []
+  const params: unknown[] = []
+
+  if (patch.name !== undefined) {
+    const name = patch.name.trim()
+    if (!name) throw new Error('厂商名称不能为空')
+    sets.push('name = ?')
+    params.push(name)
+  }
+  if (patch.baseUrl !== undefined) {
+    sets.push('base_url = ?')
+    params.push(validateProviderUrl(patch.baseUrl.trim()))
+  }
+  if (patch.vendorKey !== undefined) {
+    sets.push('vendor_key = ?')
+    params.push(patch.vendorKey.trim())
+  }
+  if (patch.billing !== undefined) {
+    if (patch.billing !== 'usage' && patch.billing !== 'plan') {
+      throw new Error(`计费通道无效: ${patch.billing}`)
+    }
+    sets.push('billing = ?')
+    params.push(patch.billing)
+  }
+  if (patch.plan !== undefined) {
+    // plan 视为一个字段整体写入：null = 清空（amount / anchor 置 NULL，currency 复位 CNY）
+    sets.push('plan_amount = ?', 'plan_currency = ?', 'plan_anchor_ts = ?')
+    params.push(patch.plan ? patch.plan.amount : null)
+    params.push(patch.plan && patch.plan.currency === 'USD' ? 'USD' : 'CNY')
+    params.push(patch.plan ? (patch.plan.anchorTs ?? null) : null)
+  }
+  if (sets.length === 0) return
+
+  params.push(id)
+  getDatabase().exec(`UPDATE providers SET ${sets.join(', ')} WHERE id = ?`, params)
+}
+
+/**
+ * 改 API 密钥（T1，组内共享）：先查同 vendor_key（非空）的全部记录 id 并收集完整名单，
+ * 再对名单内每个 id 写入同一值（复用 saveProviderKey）；vendor_key 为空 = 独立厂商只写自身。
+ * 收集阶段异常向上抛（尚未写入任何 key）；写入阶段异常同样向上抛、不做静默吞错。
+ */
+export function updateProviderKey(id: string, apiKey: string): void {
+  const row = getDatabase().queryOne<{ id: string; vendor_key: string }>(
+    'SELECT id, vendor_key FROM providers WHERE id = ?',
+    [id]
+  )
+  if (!row) throw new Error(`Provider ${id} not found`)
+
+  // ① 收集全组 id（含自身防御：组查询万一漏掉自身也补上）
+  let ids = [row.id]
+  if (row.vendor_key) {
+    const group = getDatabase().query<{ id: string }>(
+      'SELECT id FROM providers WHERE vendor_key = ?',
+      [row.vendor_key]
+    )
+    ids = group.map((r) => r.id)
+    if (!ids.includes(row.id)) ids.push(row.id)
+  }
+
+  // ② 对收集到的 id 逐条写入同一值
+  for (const targetId of ids) saveProviderKey(targetId, apiKey)
 }
 
 export function removeProvider(id: string): void {
@@ -118,9 +229,14 @@ export function seedBuiltInProviders(): void {
   let added = 0
   for (const tpl of BUILT_IN_PROVIDER_TEMPLATES) {
     if (existingNames.has(tpl.name)) continue
+    // T1：新建条目直接写入预设分组 / 计费通道（migrate-only 清单命中才预设，未命中保持默认态）
     getDatabase().exec(
-      'INSERT INTO providers (id, name, base_url, model_list, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)',
-      [crypto.randomUUID(), tpl.name, tpl.baseUrl, '[]', Date.now()]
+      'INSERT INTO providers (id, name, base_url, model_list, enabled, created_at, vendor_key, billing) VALUES (?, ?, ?, ?, 1, ?, ?, ?)',
+      [
+        crypto.randomUUID(), tpl.name, tpl.baseUrl, '[]', Date.now(),
+        VENDOR_GROUP[tpl.name] ?? '',
+        PLAN_BILLING_NAMES.includes(tpl.name) ? 'plan' : 'usage'
+      ]
     )
     added++
   }
@@ -132,3 +248,34 @@ export function seedBuiltInProviders(): void {
   }
   // 无变化（全部已存在）不打日志：每次启动输出「All present」是无信息量噪音
 }
+
+/**
+ * 启动 backfill（T1，设计文档 §1 / D4）：按名称清单给「默认态」旧记录补计费通道与厂商分组。
+ * 仅当 billing='usage' AND vendor_key=''（用户从未改过）的记录才补写，已手动改过的不覆盖；
+ * billing 与 vendor_key 两字段独立判断（清单命中谁补谁）；幂等，二次运行 no-op。
+ * 全部写走 getDatabase().exec（触发 scheduleSave 落盘）。
+ */
+export function backfillProviderBilling(): void {
+  const rows = getDatabase().query<{ id: string; name: string }>(
+    "SELECT id, name FROM providers WHERE billing = 'usage' AND vendor_key = ''"
+  )
+
+  let billingPatched = 0
+  let vendorPatched = 0
+  for (const row of rows) {
+    if (PLAN_BILLING_NAMES.includes(row.name)) {
+      getDatabase().exec("UPDATE providers SET billing = 'plan' WHERE id = ?", [row.id])
+      billingPatched++
+    }
+    const group = VENDOR_GROUP[row.name]
+    if (group) {
+      getDatabase().exec('UPDATE providers SET vendor_key = ? WHERE id = ?', [group, row.id])
+      vendorPatched++
+    }
+  }
+
+  if (billingPatched > 0 || vendorPatched > 0) {
+    console.log(`[Providers] Backfilled billing=${billingPatched} vendorKey=${vendorPatched}`)
+  }
+}
+

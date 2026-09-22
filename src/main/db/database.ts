@@ -59,6 +59,32 @@ export class Database {
     } catch {
       // Column already exists — ignore
     }
+    // ── T1：同厂商分组与按量/Plan 双通道（providers +5 列）──
+    try {
+      this.exec("ALTER TABLE providers ADD COLUMN vendor_key TEXT NOT NULL DEFAULT ''")
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      this.exec("ALTER TABLE providers ADD COLUMN billing TEXT NOT NULL DEFAULT 'usage'")
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      this.exec('ALTER TABLE providers ADD COLUMN plan_amount REAL')
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      this.exec("ALTER TABLE providers ADD COLUMN plan_currency TEXT NOT NULL DEFAULT 'CNY'")
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      this.exec('ALTER TABLE providers ADD COLUMN plan_anchor_ts INTEGER')
+    } catch {
+      // Column already exists — ignore
+    }
     // 功能更名：request_logs.source 的 'proxy' 值 → 'gateway'（幂等，历史行一并归并）
     this.exec("UPDATE request_logs SET source = 'gateway' WHERE source = 'proxy'")
     // 迁移立即落盘，避免进程退出时丢失结构变更

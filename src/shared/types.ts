@@ -20,6 +20,23 @@ export interface Provider {
   models: ModelInfo[]
   enabled: boolean
   builtIn?: boolean
+  /** 同厂商分组名：'' = 独立厂商；同组记录共享 API 密钥（改组内任一条，全组同步覆盖） */
+  vendorKey: string
+  /** 计费通道：'usage' = 按量 | 'plan' = 订阅/Token 包（成本按期内消费比值摊销） */
+  billing: 'usage' | 'plan'
+  /** Plan 通道每期（月）实际消费（手填）；未配置时省略 → 消费端回退单价链估算 */
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
+}
+
+/** providers 编辑入参（updateProvider patch）：仅传入的字段更新，未传入的保持原值 */
+export interface ProviderUpdatePatch {
+  name?: string
+  baseUrl?: string
+  /** 分组名；'' = 移出分组（变为独立厂商） */
+  vendorKey?: string
+  billing?: 'usage' | 'plan'
+  /** 传 null 清空订阅费配置（amount / currency / anchor 三列一并重置） */
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } | null
 }
 
 export interface ModelInfo {

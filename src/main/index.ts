@@ -5,11 +5,11 @@ import { getDatabase } from './db/database'
 import { readAppSettings, updateRawAppSettings } from './config/appSettings'
 import { handleIpc, handleIpcRaw } from './ipc/handle'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, PricingProbeState, PricingProbeResultItem, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
+import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, PricingProbeState, PricingProbeResultItem, ProbeProgressEvent, ToastData, GenerateExpertsRequest, ProviderUpdatePatch } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { applyGatewayServer, stopGatewayServer } from './gateway/server'
 import { initUiBridge } from './uiBridge'
-import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders } from './providers/providerManager'
+import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders, updateProvider, updateProviderKey, backfillProviderBilling } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
 import type { MoaResponse } from './moa/moaEngine'
@@ -282,6 +282,16 @@ function registerIpcHandlers() {
   // allowEmpty：手动「获取模型列表」是显式要求最新，厂商返回空列表时如实清空并广播；
   // 定价探查（缺省）只把结果当关键词，空列表保留本地缓存
   handleIpc(IPC.CONFIG_GET_MODELS, (_e, providerId: string) => fetchAndCacheModels(providerId, { allowEmpty: true }))
+
+  // T1：编辑厂商（仅 patch 传入字段更新；plan 传 null 清空订阅费配置）
+  handleIpc(IPC.PROVIDERS_UPDATE, (_e, id: string, patch: ProviderUpdatePatch) =>
+    updateProvider(id, patch)
+  )
+
+  // T1：改 API 密钥 —— 同 vendor_key 分组内全部记录写入同一值（组内共享），独立厂商只写自身
+  handleIpc(IPC.PROVIDERS_UPDATE_KEY, (_e, id: string, apiKey: string) => {
+    updateProviderKey(id, apiKey)
+  })
 
   // ── Conversations ──
   handleIpc(IPC.DB_GET_CONVERSATIONS, () =>
@@ -938,6 +948,13 @@ app.whenReady().then(async () => {
     seedBuiltInProviders()
   } catch (err) {
     console.error('[Main] Failed to seed providers:', err)
+  }
+
+  // T1：按名称清单 backfill 旧记录的计费通道 / 厂商分组（幂等，仅默认态记录被补写）
+  try {
+    backfillProviderBilling()
+  } catch (err) {
+    console.error('[Main] Failed to backfill provider billing:', err)
   }
 
   // Register IPC handlers
