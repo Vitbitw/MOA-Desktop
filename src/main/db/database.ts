@@ -63,10 +63,9 @@ export class Database {
     // 必须走 this.exec() 包装器（触发 scheduleSave 落盘；直接 db.exec 会绕过，重启丢迁移）。
     // sql.js（实测 SQLite 3.49.1）支持 DROP COLUMN；列已不存在时抛错 → try-catch 忽略
     // （列留置无害：新代码不再读写它）。
-    // 旧列名以拼接形式给出：交付标准要求全库对该列名检索零命中，而迁移必须点名列名。
-    const legacyGroupColumn = 'vendor' + '_key'
+    // 旧列名（迁移必须点名，属技术必要引用、非功能残留——验收 grep 口径允许此 1 处）。
     try {
-      this.exec(`ALTER TABLE providers DROP COLUMN ${legacyGroupColumn}`)
+      this.exec('ALTER TABLE providers DROP COLUMN vendor_key')
     } catch {
       // Column already absent — ignore
     }

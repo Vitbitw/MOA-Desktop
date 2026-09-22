@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { getDatabase } from '../db/database'
+import { readAppSettings, updateRawAppSettings } from '../config/appSettings'
 import { getProviderKey, saveProviderKey, removeProviderKey } from '../store/key-store'
 import type { Provider, ModelInfo, ProviderUpdatePatch } from '../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, PLAN_BILLING_NAMES } from '../../shared/defaults'
@@ -245,11 +246,14 @@ export function seedBuiltInProviders(): void {
 
 /**
  * 启动 backfill（T1 / D4；v4 B 方案后仅补计费通道）：按名称清单给 billing='usage' 的旧记录补 'plan'。
- * 原「默认态」判据还要求分组列为空，分组列已随 v4 移除 → 判据收敛为 billing='usage'
- * （清单命中才补写，非清单名永不动）；幂等，二次运行 no-op。
+ * **一次性**（v4.1）：`billingBackfillDone` 置位后直接返回——避免用户手动把清单厂商改回 usage
+ * 后在下次启动被静默覆盖。首次执行即置位（含 patched=0 的空跑）；执行中抛异常则不置位、下次重试。
+ * 名单命中才补写，非清单名永不动；执行多次等价 no-op。
  * 全部写走 getDatabase().exec（触发 scheduleSave 落盘）。
  */
 export function backfillProviderBilling(): void {
+  if (readAppSettings().billingBackfillDone) return
+
   const rows = getDatabase().query<{ id: string; name: string }>(
     "SELECT id, name FROM providers WHERE billing = 'usage'"
   )
@@ -261,6 +265,10 @@ export function backfillProviderBilling(): void {
       billingPatched++
     }
   }
+
+  updateRawAppSettings((raw) => {
+    raw.billingBackfillDone = true
+  })
 
   if (billingPatched > 0) {
     console.log(`[Providers] Backfilled billing=${billingPatched}`)

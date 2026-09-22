@@ -152,6 +152,8 @@ export interface AppSettings {
   pricingProbe: PricingProbeSettings
   /** 定价探查页面级缓存（页面哈希 + 定价区块锚句；独立持久化，不入 pricingProbe） */
   pricingProbeCache?: Record<string, PricingPageCache>
+  /** 计费通道一次性 backfill 已执行（v4：置位后重启不再补写，避免覆盖用户手动改回的 billing） */
+  billingBackfillDone?: boolean
 }
 
 export interface PricingConfig {

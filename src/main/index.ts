@@ -988,7 +988,7 @@ app.whenReady().then(async () => {
     console.error('[Main] Failed to seed providers:', err)
   }
 
-  // T1：按名称清单 backfill 旧记录的计费通道 / 厂商分组（幂等，仅默认态记录被补写）
+  // T1：按名称清单 backfill 旧记录的计费通道（v4.1 一次性：billingBackfillDone 置位后重启 no-op）
   try {
     backfillProviderBilling()
   } catch (err) {

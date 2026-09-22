@@ -3,7 +3,7 @@
 //      ② updateProvider 逐字段更新 + plan:null 清空
 //      ③ updateProviderKey：只写本条 / 不存在 id 抛错（v4 单条语义，组同步已退役）
 //      ④ **MF-1 回归**：key 写入失败 → 异常上抛且本条回滚（无新旧混存）
-//      ⑤ backfill：清单命中补 plan / 非清单名不动 / 幂等
+//      ⑤ backfill（v4.1 一次性）：清单命中补 plan / 非清单名不动 / 一次性标记置位 / 手动改回不被覆盖
 //      ⑥ seed 预设：清单命中 → plan
 //      ⑦ Plan 比值摊销（T2）：跨 anchor 分桶 / 桶内 Σ=消费 / 未配订阅费单价链回退 / manual 优先 / CNY 折算 / 零 token 不除零
 //      ⑧ 探查条目按通道过滤（T2 §5）：绑定条目仅同厂商命中、无标记条目全通道命中
@@ -184,7 +184,13 @@ function main() {
   {
     const db = makeFakeDb(); patchQueryParams(db)
     const ks = makeFakeKeyStore()
-    const load = makeLoader({ getDatabase: () => db }, ks.module)
+    const settingsState = { billingBackfillDone: undefined } // stub appSettings（backfill 一次性标记）
+    const load = makeLoader({ getDatabase: () => db }, ks.module, {
+      'config/appSettings': {
+        readAppSettings: () => ({ ...settingsState }),
+        updateRawAppSettings: (mut) => { mut(settingsState); return { ...settingsState } }
+      }
+    })
     const pm = load(pmPath)
     const defaults = load(defaultsPath)
 
@@ -240,11 +246,18 @@ function main() {
     eq(g(e.id).billing, 'usage', 'backfill：非清单名 → billing 不动')
     pm.backfillProviderBilling()
     eq(g(d.id).billing, 'plan', '二次运行幂等（billing 不变）')
+    eq(settingsState.billingBackfillDone, true, 'backfill 执行后置一次性标记')
+    // v4.1 防覆盖：用户手动把清单厂商改回 usage → 再次调用不得静默覆盖
+    pm.updateProvider(d.id, { billing: 'usage' })
+    pm.backfillProviderBilling()
+    eq(g(d.id).billing, 'usage', '置位后手动改回 usage 不被 backfill 覆盖')
     eq(g(e.id).billing, 'usage', '二次运行幂等（非清单名仍不动）')
 
     console.log('[6] seed 预设：清单命中 → plan')
     const emptyDb = makeFakeDb(); patchQueryParams(emptyDb)
-    const seedPm = makeLoader({ getDatabase: () => emptyDb }, makeFakeKeyStore().module)
+    const seedPm = makeLoader({ getDatabase: () => emptyDb }, makeFakeKeyStore().module, {
+      'config/appSettings': { readAppSettings: () => ({}), updateRawAppSettings: () => ({}) }
+    })
     seedPm(pmPath).seedBuiltInProviders()
     const names = emptyDb.rows.map((r) => r.name)
     const pa = seedPm(path.resolve(__dirname, '../src/shared/providerAccess.ts'))
