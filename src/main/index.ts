@@ -808,7 +808,7 @@ function registerIpcHandlers() {
     if (valid.length === 0) return { success: true, data: { results: [] } }
     const model = resolveProbeModel()
     if (!model) {
-      return { success: false, error: '未配置可用的大模型（请先配置带 API Key 的厂商，或在「定价探查」指定探查模型）' }
+      return { success: false, error: '未配置可用的大模型（请先配置可用厂商——云端需 API Key、本地地址免 Key，或在「定价探查」指定探查模型）' }
     }
     // 运行状态广播：UI 据此显示「正在刷新」并禁用探查按钮（校验均为同步，无并发窗口）
     setPricingProbeState({ running: true, sourceIds: valid.map((s) => s.id), trigger: 'manual' })

@@ -1,4 +1,5 @@
 import { getAllProviders } from '../providers/providerManager'
+import { hasProviderAccess } from '../../shared/providerAccess'
 import { callSubModel } from '../moa/subModelCaller'
 import type { SubModelOutput } from '../../shared/types'
 
@@ -22,8 +23,8 @@ function resolveTitleModel(providerId: string): { baseUrl: string; apiKey: strin
     console.error(`[Title] Provider ${p.name} disabled`)
     return null
   }
-  if (!p.apiKey) {
-    console.error(`[Title] Provider ${p.name} has no API key`)
+  if (!hasProviderAccess(p)) {
+    console.error(`[Title] Provider ${p.name} has no API key and is not a local endpoint`)
     return null
   }
   return { baseUrl: p.baseUrl, apiKey: p.apiKey || '' }

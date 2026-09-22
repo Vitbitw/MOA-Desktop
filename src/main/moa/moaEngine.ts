@@ -2,6 +2,7 @@ import { getAllProviders } from '../providers/providerManager'
 import { callSubModelStream, countSuccessfulSubModels } from './subModelCaller'
 import { buildAggregationMessages, buildCommitteeMessages, getAggregationPrompt, CHAIR_PROMPT_ZH } from './aggregationPrompt'
 import { DEFAULT_SUB_MODEL_TIMEOUT, DEFAULT_AGGREGATOR_TIMEOUT } from '../../shared/defaults'
+import { hasProviderAccess, isLocalBaseUrl } from '../../shared/providerAccess'
 import { streamChat } from './streamChat'
 import type { ChatMessage, ToolCallResult } from './streamChat'
 import type { SubModelConfig, AggregatorConfig, SubModelOutput, MoaArchitecture, SubModelRole } from '../../shared/types'
@@ -83,7 +84,7 @@ export function resolveSubModels(subModels: SubModelConfig[], defaultSystemPromp
       systemPrompt: effectiveSystemPrompt || defaultSystemPrompt,
       expertName: sm.expertName
     }
-  }).filter((sm) => sm.providerBaseUrl && sm.enabled && sm.apiKey)
+  }).filter((sm) => sm.providerBaseUrl && sm.enabled && (sm.apiKey || isLocalBaseUrl(sm.providerBaseUrl)))
 }
 
 /** Resolve aggregator model config to { baseUrl, apiKey, modelId } or null. */
@@ -96,7 +97,7 @@ function resolveAggregator(aggregator: AggregatorConfig): {
   const p = providers.find((prov) => prov.id === aggregator.primaryProviderId)
   if (!p) return null
   if (!p.enabled) return null
-  if (!p.apiKey) return null
+  if (!hasProviderAccess(p)) return null
   return {
     providerBaseUrl: p.baseUrl,
     apiKey: p.apiKey || '',
