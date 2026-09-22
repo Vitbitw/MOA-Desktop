@@ -93,6 +93,14 @@ export const DEFAULT_PRICING_PROBE_SOURCES: PricingProbeSource[] = [
     name: 'MiniMax',
     url: 'https://www.minimax.io/platform/document/price',
     enabled: true
+  },
+  {
+    // Command Code：探测实际用「按订阅套餐动态解析的计划页」（probe.ts resolveProbeUrl），
+    // 此 URL 仅作套餐解析失败时的回退页（有全模型 per-1M 单价、无每模型额度）
+    id: 'commandcode',
+    name: 'Command Code',
+    url: 'https://commandcode.ai/docs/resources/pricing-limits',
+    enabled: true
   }
 ]
 

@@ -934,6 +934,20 @@ export const CC_PLAN_TIERS: Record<string, { credits: number; type: 'individual'
 }
 
 /**
+ * planId → 计划文档页 slug（https://commandcode.ai/docs/plans/<slug>）。
+ * 供定价探查按当前订阅套餐动态选计划页（probe.ts resolveProbeUrl）。
+ * 无公开计划页的套餐不映射（teams-pro / individual-provider 实测 404）→ 调用方回退源自带 URL。
+ */
+export const CC_PLAN_PAGE_SLUG: Record<string, string> = {
+  'individual-go': 'go',
+  'individual-goat': 'goat',
+  'individual-pro': 'pro',
+  'individual-pro-v1': 'pro',
+  'individual-max': 'max',
+  'individual-ultra': 'max'
+}
+
+/**
  * 计算月度额度窗口（官网公式，来源：官网 monthly-usage-meter 模块实测）：
  *   cap = 套餐额度；monthlyCreditsGranted > 0 时 cap = max(granted, 套餐额度)；
  *   org 套餐 cap × 席位（至少 1）。used = cap − 余额（夹在 [0, cap]），used% = used/cap。

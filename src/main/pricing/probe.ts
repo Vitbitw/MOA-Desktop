@@ -10,6 +10,8 @@ import { readAppSettings, updateRawAppSettings } from '../config/appSettings'
 import { getAllProviders, fetchAndCacheModels } from '../providers/providerManager'
 import { getMoaConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
+import { getUsageSnapshot } from '../monitoring/snapshotStore'
+import { CC_PLAN_PAGE_SLUG } from '../monitoring/commandCode'
 import { defaultPricingProbeUrlByName } from '../../shared/defaults'
 import { splitModelKey } from '../../shared/modelKey'
 import type { ProbedPricingEntry, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
@@ -355,6 +357,40 @@ async function getSourceKeywords(source: PricingProbeSource): Promise<string[]> 
   return (provider?.models ?? []).map((m) => m.id).filter((id): id is string => !!id)
 }
 
+// ─── 探查 URL：Command Code 按订阅套餐动态选计划页 ───
+
+/**
+ * 解析源的实际探查 URL。
+ * 绑定厂商为 Command Code（baseUrl 含 api.commandcode.ai）时，读云监控快照里的订阅 planId，
+ * 动态选对应计划页（/docs/plans/<slug>）——每模型 Monthly credits 只在计划页有；
+ * 未登录 / 无订阅 / 未知 planId（teams-pro、provider 等无公开计划页）/ 快照异常 → 回退源自带 URL。
+ * 其余源原样返回（零影响）。多 commandcode 监控源时按配置顺序取第一个能解析出套餐的。
+ */
+export function resolveProbeUrl(source: PricingProbeSource): string {
+  const providerId = resolveSourceProviderId(source)
+  const provider = providerId ? getAllProviders().find((p) => p.id === providerId) : undefined
+  if (!provider?.baseUrl?.includes('api.commandcode.ai')) return source.url
+  try {
+    for (const ms of readAppSettings().monitoring.sources) {
+      if (!ms.enabled || ms.type !== 'commandcode') continue
+      const snap = getUsageSnapshot(ms.id)
+      const planId = snap && 'subscription' in snap ? snap.subscription?.planId : undefined
+      const slug = planId ? CC_PLAN_PAGE_SLUG[planId] : undefined
+      if (slug) {
+        const url = `https://commandcode.ai/docs/plans/${slug}`
+        if (DEBUG) console.log(`[PricingProbe] ${source.name}(${source.id}) 套餐 ${planId} → 计划页 ${url}`)
+        return url
+      }
+      if (DEBUG) {
+        console.log(`[PricingProbe] ${source.name}(${source.id}) 套餐不可用(planId=${planId ?? '无'})，回退源 URL ${source.url}`)
+      }
+    }
+  } catch (err) {
+    if (DEBUG) console.warn(`[PricingProbe] ${source.name}(${source.id}) 套餐解析失败，回退源 URL:`, err)
+  }
+  return source.url
+}
+
 // ─── LLM 提取 ───
 
 function buildProbePrompt(source: PricingProbeSource, keywords: string[], pageText: string): string {
@@ -373,8 +409,9 @@ function buildProbePrompt(source: PricingProbeSource, keywords: string[], pageTe
 1. 价格按页面原样给出数值与币种（USD 或 CNY），用 currency 字段标明币种（中文页面通常为 CNY 元）。
 2. 计费单位按页面实际标注如实填写到 unit 字段（如 "per 1M tokens" / "per 1K tokens" / "per request" / "per hour"）；页面未标注单位时默认 "per 1M tokens"。
 3. 只输出 JSON 数组，每项结构：
-{ "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "windows": [ { "start": "HH:mm", "end": "HH:mm", "input": 数字, "output": 数字, "days": ["mon","tue"] (可选, 适用星期, 缺省=每天; 也接受 "weekday"/"工作日"/"weekend"/"周末" 或 [1,2,3] 数字数组) } ] }
+{ "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "monthlyCredits": 数字(可选), "windows": [ { "start": "HH:mm", "end": "HH:mm", "input": 数字, "output": 数字, "days": ["mon","tue"] (可选, 适用星期, 缺省=每天; 也接受 "weekday"/"工作日"/"weekend"/"周末" 或 [1,2,3] 数字数组) } ] }
    - 页面标注的「输入（缓存命中）」对应 cacheRead，「输入（缓存未命中）」对应 input。
+   - monthlyCredits 是套餐给该模型的「月度额度」（如计划页 Monthly credits 列的 $70），是额度不是单价：取当前生效数值（促销行的划线原价忽略，只取现价）；页面没有该列就省略，不要编造。
 4. windows 用于峰谷/错峰/时段优惠价（如 off-peak、错峰、时段折扣、凌晨低价、工作日/周末差价）。若页面含此类时段价，务必提取到 windows；无则省略该字段。窗口时间为 24 小时制 HH:mm，时区为 ${tz}。
 4.5. 定价表可能延续到片段末尾（如 Inkling、Grok 等表尾模型）。务必把页面上所有已标注价格的模型都提取，不要遗漏表格末尾的行。
 5. 除 JSON 数组外不要输出任何内容，不要使用 markdown 代码块，不要任何解释。
@@ -455,7 +492,7 @@ function buildFillPrompt(pageText: string, missing: string[]): string {
 ${missing.map((m, i) => `${i + 1}. ${m}`).join('\n')}
 
 匹配规则与输出要求同上：
-- 只输出 JSON 数组，每项：{ "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "windows": 数组(可选) }
+- 只输出 JSON 数组，每项：{ "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "monthlyCredits": 数字(可选，该模型月度额度、取现价), "windows": 数组(可选) }
 - 页面里没有明确价格的模型一律不要输出；不确定不要编造。
 - 除 JSON 数组外不要输出任何内容，不要 markdown 代码块。
 
@@ -482,6 +519,8 @@ interface RawProbeEntry {
   windows?: unknown
   /** 窗口适用星期（可选） */
   days?: unknown
+  /** 模型月度额度（计划页 Monthly credits 列；外部数据，严格解析见 toMonthlyCredits） */
+  monthlyCredits?: unknown
 }
 
 /** 宽容数值解析：数字直接取；字符串支持「2.5」「0.27/1M」「$0.27」等带单位/前缀形态 */
@@ -494,6 +533,20 @@ function toFiniteNum(v: unknown): number | undefined {
     if (clean === '' || clean === '-' || clean === '.') return undefined
     const n = Number(clean)
     if (Number.isFinite(n)) return n
+  }
+  return undefined
+}
+
+/** 月度额度严格解析（外部数据防御）：仅 number / "$70" / "70" 形态；
+ *  促销串（"$30 $67"、"67 through Sep 24th"）、负数、空 → undefined（宁缺勿错，条目其余字段照存） */
+function toMonthlyCredits(v: unknown): number | undefined {
+  if (typeof v === 'number') return Number.isFinite(v) && v >= 0 ? v : undefined
+  if (typeof v === 'string') {
+    const m = v.trim().match(/^\$?\s*(\d+(?:\.\d+)?)$/)
+    if (m) {
+      const n = Number(m[1])
+      if (Number.isFinite(n)) return n
+    }
   }
   return undefined
 }
@@ -683,6 +736,10 @@ function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[]): P
     if (cacheRead !== undefined && cacheRead >= 0) entry.cacheRead = cacheRead / rate
     if (cacheCreation !== undefined && cacheCreation >= 0) entry.cacheCreation = cacheCreation / rate
 
+    // 月度额度：严格解析，异常值只丢该字段、不影响条目其余内容
+    const monthlyCredits = toMonthlyCredits(item.monthlyCredits)
+    if (monthlyCredits !== undefined) entry.monthlyCredits = monthlyCredits / rate
+
     if (Array.isArray(item.windows)) {
       const windows: PricingWindow[] = []
       for (const w of item.windows) {
@@ -722,11 +779,13 @@ export async function probeSource(
 ): Promise<ProbeSourceResult> {
   // 关键词自动取所绑定厂商 /models 的模型名
   const keywords = await getSourceKeywords(source)
+  // 实际探查 URL：Command Code 按订阅套餐动态选计划页，其余源原样（后续抓取/来源记录统一用 effSource）
+  const effSource = { ...source, url: resolveProbeUrl(source) }
   if (DEBUG) {
-    console.log(`[PricingProbe] ${source.name}(${source.id}) probe model: ${model.baseUrl} / ${model.modelId}${force ? ' [force]' : ''}`)
+    console.log(`[PricingProbe] ${effSource.name}(${effSource.id}) probe model: ${model.baseUrl} / ${model.modelId}${force ? ' [force]' : ''} url=${effSource.url}`)
   }
   onStage?.('fetching')
-  const fullText = await fetchPageText(source.url, keywords)
+  const fullText = await fetchPageText(effSource.url, keywords)
   if (!fullText) {
     return { ok: false, error: '抓取失败（HTTP 与浏览器均无法获取有效页面文本）' }
   }
@@ -748,7 +807,7 @@ export async function probeSource(
 
   // 定位定价区块（锚句 → 关键词居中 → 整页头部），避免全页送入 LLM
   const pageText = locatePricingFragment(fullText, keywords, cache)
-  const prompt = buildProbePrompt(source, keywords, pageText)
+  const prompt = buildProbePrompt(effSource, keywords, pageText)
   onStage?.('extracting')
   const result = await callProbeLLM(model, prompt)
   if (result.status !== 'success' || !result.content) {
@@ -760,7 +819,7 @@ export async function probeSource(
     )
   }
 
-  let entries = buildProbedEntries(source, extractJsonArray(result.content) ?? [])
+  let entries = buildProbedEntries(effSource, extractJsonArray(result.content) ?? [])
   if (entries.length === 0) {
     // 失败时打印原始响应便于定位（可能是格式不符 / 页面无相关价格）
     console.warn(
@@ -775,7 +834,7 @@ export async function probeSource(
     const fillText = buildMissingFragment(fullText, missing)
     const fill = await callProbeLLM(model, buildFillPrompt(fillText, missing))
     if (fill.status === 'success' && fill.content) {
-      const extra = buildProbedEntries(source, extractJsonArray(fill.content) ?? [])
+      const extra = buildProbedEntries(effSource, extractJsonArray(fill.content) ?? [])
       if (extra.length > 0) {
         const known = new Set(entries.map((e) => e.pattern && normalizeForMatch(e.pattern)))
         let added = 0

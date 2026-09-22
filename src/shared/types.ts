@@ -528,6 +528,8 @@ export interface ProbedPricingEntry {
   cacheCreation?: number
   /** 峰谷时段价（可空 = 无时段价） */
   windows?: PricingWindow[]
+  /** 模型月度额度（订阅计划页 Monthly credits 列，USD）；仅 Command Code 等有该概念的源有值 */
+  monthlyCredits?: number
   /** 窗口时区（IANA），探查时从源写入，默认 Asia/Shanghai */
   timezone?: string
   /** 官方页原始币种（存储价格统一折算为 USD） */

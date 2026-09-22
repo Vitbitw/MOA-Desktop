@@ -1371,6 +1371,8 @@ function ProbeSection() {
   // 探查运行状态放全局 store：切换页面组件卸载后仍能保留"探查中"状态
   const { busy, runningIds, messages, progress, setBusy, setRunningIds, setMessages, setProgress, collapsed, toggleCollapsed, sorts, setSort } =
     useProbeStore()
+  // 模型月额度区块展开状态（按源 ID 集合；map 回调内不能用 hooks，状态放组件顶层）
+  const [mcOpen, setMcOpen] = useState<Set<string>>(new Set())
 
   // 探查运行状态与进度由全局订阅（probeStore.initProbeStateSubscription，App 挂载时建立）
   // 统一维护：后台自动刷新期间打开本页同样能看到「正在刷新」与进度
@@ -1897,6 +1899,69 @@ function ProbeSection() {
                     </table>
                     )}
                   </div>
+
+                  {/* 模型月额度：订阅计划页 Monthly credits 列探查结果（仅 ≥1 条目含该值时显示） */}
+                  {(() => {
+                    const mcEntries = meta.entries
+                      .filter((e) => e.monthlyCredits !== undefined)
+                      .sort(
+                        (a, b) =>
+                          (b.monthlyCredits ?? 0) - (a.monthlyCredits ?? 0) || a.pattern.localeCompare(b.pattern)
+                      )
+                    if (mcEntries.length === 0) return null
+                    const open = mcOpen.has(s.id)
+                    return (
+                      <div className="border-t border-border pt-3">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() =>
+                              setMcOpen((prev) => {
+                                const next = new Set(prev)
+                                if (next.has(s.id)) next.delete(s.id)
+                                else next.add(s.id)
+                                return next
+                              })
+                            }
+                            className="flex items-center gap-1 text-xs font-semibold text-muted-foreground hover:text-foreground"
+                          >
+                            <ChevronDown
+                              className={`w-3.5 h-3.5 transition-transform ${open ? '' : '-rotate-90'}`}
+                            />
+                            模型月额度（{mcEntries.length} 条）
+                          </button>
+                          <a
+                            href={mcEntries[0].sourceUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-xs text-muted-foreground/70 hover:text-primary underline underline-offset-2"
+                            title={`来源（实际抓取的定价页）：${mcEntries[0].sourceUrl}`}
+                          >
+                            来源
+                          </a>
+                        </div>
+                        {open && (
+                          <table className="w-full text-xs table-fixed mt-1.5">
+                            <thead>
+                              <tr className="border-b border-border text-muted-foreground">
+                                <th className="text-left px-2 py-1 font-medium">模型</th>
+                                <th className="text-right px-2 py-1 font-medium w-[96px]">月额度</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {mcEntries.map((e) => (
+                                <tr key={e.pattern} className="border-b border-border/50 last:border-0">
+                                  <td className="px-2 py-1 font-mono truncate" title={e.pattern}>
+                                    {e.pattern}
+                                  </td>
+                                  <td className="px-2 py-1 text-right">${e.monthlyCredits}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </>
               )}
             </div>

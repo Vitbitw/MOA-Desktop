@@ -12,8 +12,11 @@
 //         generateExpertTeam 追问链路（clarify 返回 / force 透传与兜底 / ≥MAX_CLARIFY_ROUNDS 本地强制 / history 清洗）
 // 用法：node test-e2e/expert-team.cjs
 // 加载方式：esbuild bundle 三个被测模块（独立构建）：
-//   - expertTeamGenerator.ts：stub electron / appSettings / providerManager / moaConfig / fetchProxy / streamChat 六个外部模块
-//     （'../pricing/probe' 不 stub，用真实现——被测解析逻辑依赖其 extractJsonObject / extractJsonArray）；
+//   - expertTeamGenerator.ts：stub electron / appSettings / providerManager / moaConfig / fetchProxy / streamChat
+//     / commandCode / snapshotStore 八个外部模块
+//     （'../pricing/probe' 不 stub，用真实现——被测解析逻辑依赖其 extractJsonObject / extractJsonArray；
+//      commandCode / snapshotStore 单独 stub：probe.ts 的 resolveProbeUrl 只用前者的 CC_PLAN_PAGE_SLUG 常量、
+//      后者的 getUsageSnapshot，整模块入 bundle 会拖进 electron session / key-store / database 等未 stub 依赖）；
 //   - expertTeam.ts（渲染端）：零 stub（仅 type import），直接 bundle；
 //   - modelKey.ts（共享）：无依赖，直接 bundle（splitModelKey 直测）。
 //   stub 与用例经 globalThis.__expertTeamTest 通信（bundle 与测试同进程）。
@@ -75,6 +78,8 @@ const stubPlugin = {
     build.onResolve({ filter: /(^|\/)fetchProxy$/ }, () => ({ path: 'fetchProxy', namespace: 'expert-stub' }))
     build.onResolve({ filter: /(^|\/)appSettings$/ }, () => ({ path: 'appSettings', namespace: 'expert-stub' }))
     build.onResolve({ filter: /^electron$/ }, () => ({ path: 'electron', namespace: 'expert-stub' }))
+    build.onResolve({ filter: /(^|\/)commandCode$/ }, () => ({ path: 'commandCode', namespace: 'expert-stub' }))
+    build.onResolve({ filter: /(^|\/)snapshotStore$/ }, () => ({ path: 'snapshotStore', namespace: 'expert-stub' }))
     build.onLoad({ filter: /.*/, namespace: 'expert-stub' }, (args) => {
       const stubs = {
         electron: 'export class BrowserWindow {}\n',
@@ -86,7 +91,12 @@ const stubPlugin = {
           'export async function fetchAndCacheModels() {}\n',
         moaConfig: 'export function getMoaConfig() { return globalThis.__expertTeamTest.moaConfig }\n',
         fetchProxy: "export async function fetchProxy() { throw new Error('fetchProxy 不应被调用（测试仅使用 probe 的纯函数）') }\n",
-        streamChat: 'export async function streamChat(opts) { return globalThis.__expertTeamTest.streamChat(opts) }\n'
+        streamChat: 'export async function streamChat(opts) { return globalThis.__expertTeamTest.streamChat(opts) }\n',
+        commandCode: 'export const CC_PLAN_PAGE_SLUG = {}\n',
+        snapshotStore:
+          'export function getUsageSnapshot() { return null }\n' +
+          'export function saveUsageSnapshot() {}\n' +
+          'export function clearUsageSnapshot() {}\n'
       }
       return { contents: stubs[args.path], loader: 'js' }
     })
