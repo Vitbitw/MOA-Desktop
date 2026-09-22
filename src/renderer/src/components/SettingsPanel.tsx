@@ -798,7 +798,7 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div className="bg-card border border-border rounded-xl p-5 w-96 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-card border border-border rounded-xl p-5 w-96 shadow-2xl max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-sm font-semibold text-foreground mb-4">添加厂商</h3>
 
         <div className="mb-3">

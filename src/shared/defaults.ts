@@ -145,6 +145,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 // 部分厂商条目参考自 cc-switch (MIT) by farion1231
 // https://github.com/farion1231/cc-switch
+// 「hermes-agent 补充批次」条目取自 NousResearch/hermes-agent (MIT) 的
+// plugins/model-providers/ 与 hermes_cli/auth.py 官方注册表（baseUrl 均为源码原值），
+// 仅收录 OpenAI chat/completions 协议 + Bearer API key 直连的 provider；
+// OAuth 登录、Anthropic/Responses 专属协议、无固定端点者不收。
 export const BUILT_IN_PROVIDER_TEMPLATES = [
   // ── 国际主流 ──
   { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
@@ -153,9 +157,19 @@ export const BUILT_IN_PROVIDER_TEMPLATES = [
   { name: 'Mistral AI', baseUrl: 'https://api.mistral.ai/v1' },
   { name: 'Cohere', baseUrl: 'https://api.cohere.com/v1' },
   { name: 'xAI', baseUrl: 'https://api.x.ai/v1' },
+  { name: 'Nous Research', baseUrl: 'https://inference-api.nousresearch.com/v1' },
+  { name: 'Meta Model API', baseUrl: 'https://api.meta.ai/v1' },
+  { name: 'Upstage Solar', baseUrl: 'https://api.upstage.ai/v1' },
+  { name: 'Arcee AI', baseUrl: 'https://api.arcee.ai/api/v1' },
 
-  // ── 云端 Agent 平台 ──
+  // ── 云端 Agent 平台（订阅制 / 编程套餐） ──
   { name: 'Command Code', baseUrl: 'https://api.commandcode.ai/provider/v1' },
+  { name: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/v1' },
+  { name: 'OpenCode Go', baseUrl: 'https://opencode.ai/zen/go/v1' },
+  { name: 'Kilo Code', baseUrl: 'https://api.kilo.ai/api/gateway' },
+  { name: 'Kimi Coding Plan', baseUrl: 'https://api.kimi.com/coding/v1' },
+  { name: '阿里云 Coding Plan', baseUrl: 'https://coding.dashscope.aliyuncs.com/v1' },
+  { name: '阿里云 Coding Plan (国际)', baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1' },
 
   // ── 聚合 / 路由平台 ──
   { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
@@ -164,11 +178,27 @@ export const BUILT_IN_PROVIDER_TEMPLATES = [
   { name: 'NewAPI', baseUrl: 'https://www.newapi.pro' },
   { name: 'TheRouter', baseUrl: 'https://api.therouter.ai' },
   { name: 'CherryIN', baseUrl: 'https://open.cherryin.net' },
+  { name: 'Vercel AI Gateway', baseUrl: 'https://ai-gateway.vercel.sh/v1' },
+  { name: 'Hugging Face', baseUrl: 'https://router.huggingface.co/v1' },
+  { name: 'Tencent TokenHub', baseUrl: 'https://tokenhub.tencentmaas.com/v1' },
+  { name: '阿里云 Token Plan', baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1' },
+  { name: '阿里云 Token Plan (国际)', baseUrl: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1' },
+  { name: '阿里云百炼 (国际)', baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1' },
 
   // ── 高性能推理 ──
   { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
   { name: 'Perplexity', baseUrl: 'https://api.perplexity.ai' },
   { name: 'Replicate', baseUrl: 'https://api.replicate.com/v1' },
+  { name: 'NovitaAI', baseUrl: 'https://api.novita.ai/openai/v1' },
+  { name: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1' },
+  { name: 'DeepInfra', baseUrl: 'https://api.deepinfra.com/v1/openai' },
+  { name: 'Cerebras', baseUrl: 'https://api.cerebras.ai/v1' },
+  { name: 'GMI Cloud', baseUrl: 'https://api.gmi-serving.com/v1' },
+  { name: 'Nebius Token Factory', baseUrl: 'https://api.tokenfactory.nebius.com/v1' },
+  { name: 'Ollama Cloud', baseUrl: 'https://ollama.com/v1' },
+  { name: 'Actual Computer', baseUrl: 'https://api.actual.inc/v1' },
+  { name: 'StepFun', baseUrl: 'https://api.stepfun.com/step_plan/v1' },
+  { name: 'StepFun (国际)', baseUrl: 'https://api.stepfun.ai/step_plan/v1' },
 
   // ── 国内主流 ──
   { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
@@ -180,6 +210,16 @@ export const BUILT_IN_PROVIDER_TEMPLATES = [
   { name: '百度千帆 (ERNIE)', baseUrl: 'https://qianfan.baidubce.com/v2' },
   { name: '火山方舟 (Doubao)', baseUrl: 'https://ark.cn-beijing.volces.com/api/compatible' },
   { name: 'MiniMax', baseUrl: 'https://api.minimax.chat/v1' },
+  { name: 'MiniMax (中国)', baseUrl: 'https://api.minimaxi.com/v1' },
+  { name: 'Xiaomi MiMo', baseUrl: 'https://api.xiaomimimo.com/v1' },
+  { name: 'Z.AI (GLM 国际)', baseUrl: 'https://api.z.ai/api/paas/v4' },
+  { name: 'Moonshot AI (国际)', baseUrl: 'https://api.moonshot.ai/v1' },
+
+  // ── 本地推理 ──
+  { name: 'LM Studio', baseUrl: 'http://127.0.0.1:1234/v1' },
+  { name: 'Ollama', baseUrl: 'http://localhost:11434/v1' },
+  { name: 'LocalAI', baseUrl: 'http://localhost:8080/v1' },
+  { name: 'Jan', baseUrl: 'http://localhost:1337/v1' },
 
   // ── 第三方中转 / 聚合站 ──
   { name: 'PackyCode', baseUrl: 'https://www.packyapi.com' },
