@@ -48,7 +48,7 @@ export interface ProbeModel {
 
 // ─── 探查模型解析 ───
 
-/** 解析探查用模型：显式配置 > 聚合模型 > 首个可用（有 apiKey 或本地地址）的 provider */
+/** 解析探查用模型：显式配置 > 聚合模型 > 首个可用（有 apiKey 或回环地址）的 provider */
 export function resolveProbeModel(): ProbeModel | null {
   const probeModelId = readAppSettings().pricingProbe.probeModelId
   const providers = getAllProviders()

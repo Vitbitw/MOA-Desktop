@@ -189,9 +189,10 @@ function usableProviders(): Provider[] {
   return getAllProviders().filter((p) => p.enabled && hasProviderAccess(p))
 }
 
-/** Find first enabled provider for direct passthrough. */
+/** 直连盲回落：优先已配 Key 的厂商（维持免 Key 改造前的路由语义），无 Key 厂商时任一可用端点兜底。 */
 function firstUsableProvider(): { baseUrl: string; apiKey: string; models: Provider['models'] } | null {
-  const p = usableProviders()[0]
+  const list = usableProviders()
+  const p = list.find((x) => x.apiKey) ?? list[0]
   if (!p) return null
   return { baseUrl: p.baseUrl, apiKey: p.apiKey, models: p.models }
 }
