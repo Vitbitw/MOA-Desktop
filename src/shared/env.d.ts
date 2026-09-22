@@ -76,6 +76,9 @@ interface MoaAPI {
   /** 探查运行状态变更（开始/结束；手动与后台自动刷新共用） */
   onProbeState: (callback: (data: PricingProbeState) => void) => () => void
 
+  /** 厂商模型列表变更（/models 拉取后主进程广播）→ 重拉 providers 同步 UI */
+  onProvidersChanged: (callback: (data: { providerId: string }) => void) => () => void
+
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => () => void
   onAggregationStart: (callback: () => void) => () => void

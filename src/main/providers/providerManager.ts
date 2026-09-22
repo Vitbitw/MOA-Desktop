@@ -4,6 +4,8 @@ import { getProviderKey, saveProviderKey, removeProviderKey } from '../store/key
 import type { Provider, ModelInfo } from '../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES } from '../../shared/defaults'
 import { fetchProxy } from '../local/fetchProxy'
+import { broadcastToUi } from '../uiBridge'
+import { IPC_EVENT } from '../../shared/ipc-channels'
 
 export function getAllProviders(): Provider[] {
   const rows = getDatabase().query<{
@@ -85,7 +87,11 @@ export async function fetchAndCacheModels(providerId: string): Promise<ModelInfo
       providerId
     })).filter((m) => m.id)
 
-    getDatabase().exec('UPDATE providers SET model_list = ? WHERE id = ?', [JSON.stringify(models), providerId])
+    const nextList = JSON.stringify(models)
+    const changed = nextList !== JSON.stringify(provider.models ?? [])
+    getDatabase().exec('UPDATE providers SET model_list = ? WHERE id = ?', [nextList, providerId])
+    // 列表有变化才广播（探查可能连续刷新多个厂商，渲染进程合并为一次重拉）
+    if (changed) broadcastToUi(IPC_EVENT.CONFIG_PROVIDERS_CHANGED, { providerId })
     return models
   } catch {
     return []

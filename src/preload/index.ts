@@ -72,6 +72,13 @@ contextBridge.exposeInMainWorld('moaAPI', {
     return () => ipcRenderer.removeListener(IPC_EVENT.PRICING_PROBE_STATE, handler)
   },
 
+  // 厂商模型列表变更（/models 拉取后主进程广播；探查与手动刷新共用）
+  onProvidersChanged: (callback: (data: { providerId: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { providerId: string }) => callback(data)
+    ipcRenderer.on(IPC_EVENT.CONFIG_PROVIDERS_CHANGED, handler)
+    return () => ipcRenderer.removeListener(IPC_EVENT.CONFIG_PROVIDERS_CHANGED, handler)
+  },
+
   // MoA Event Listeners (streaming)
   onSubOutputUpdate: (callback: (data: SubOutputUpdate) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: SubOutputUpdate) => callback(data)

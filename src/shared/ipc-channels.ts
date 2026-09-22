@@ -60,6 +60,10 @@ export const IPC_EVENT = {
   // 定价探查运行状态变更（开始/结束；手动与后台自动刷新共用，UI 据此显示「正在刷新」）
   PRICING_PROBE_STATE: 'pricing:probeState',
 
+  // 厂商模型列表变更（主进程 /models 拉取后广播：定价探查 fetchModelsBeforeProbe 与手动「获取模型列表」共用）
+  // 渲染进程据此重拉 providers，设置页厂商卡片 / 定价源模型列表实时同步
+  CONFIG_PROVIDERS_CHANGED: 'config:providersChanged',
+
   // Menu events
   MENU_NEW_CONVERSATION: 'menu:newConversation',
   MENU_COPY_GATEWAY_URL: 'menu:copyGatewayUrl',

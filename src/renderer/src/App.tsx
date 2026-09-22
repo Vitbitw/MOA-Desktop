@@ -113,6 +113,29 @@ function App() {
     return initProbeStateSubscription()
   }, [])
 
+  // 厂商模型列表变更（主进程 /models 拉取后广播：探查 fetchModelsBeforeProbe 与手动「获取模型列表」共用）
+  // → 重拉 providers，使设置页厂商卡片、定价源模型列表、模型下拉实时同步（原先仅启动时拉一次）
+  // 一次探查可能连续变更多个厂商，500ms 内的多次广播合并为一次重拉
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const reload = () => {
+      window.moaAPI.getProviders().then((res: { success: boolean; data: unknown }) => {
+        if (res.success) setProviders(res.data as any)
+      })
+    }
+    const unsub = window.moaAPI.onProvidersChanged(() => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        reload()
+      }, 500)
+    })
+    return () => {
+      if (timer) clearTimeout(timer)
+      unsub()
+    }
+  }, [setProviders])
+
   return (
     <ErrorBoundary>
       <div className="flex h-screen overflow-hidden bg-background">
