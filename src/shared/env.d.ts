@@ -4,12 +4,12 @@ import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStart
 interface MoaAPI {
   // Config / Providers
   getProviders: () => Promise<{ success: boolean; data: unknown; error?: string }>
-  addProvider: (data: { name: string; baseUrl: string; apiKey: string; vendorKey?: string; billing?: 'usage' | 'plan'; plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } }) => Promise<{ success: boolean; data: unknown; error?: string }>
+  addProvider: (data: { name: string; baseUrl: string; apiKey: string; billing?: 'usage' | 'plan'; plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } }) => Promise<{ success: boolean; data: unknown; error?: string }>
   removeProvider: (id: string) => Promise<{ success: boolean; error?: string }>
   getModels: (providerId: string) => Promise<{ success: boolean; data: unknown; error?: string }>
   /** T1：编辑厂商（仅传入字段更新；plan 传 null 清空订阅费三列） */
   updateProvider: (id: string, patch: ProviderUpdatePatch) => Promise<{ success: boolean; error?: string }>
-  /** T1：改 API 密钥 —— 同 vendor_key 分组内全部记录同步为同一值 */
+  /** T1：改 API 密钥 —— 只写本条厂商记录（v4 B 方案移除厂商分组） */
   updateProviderKey: (id: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
 
   // Conversations

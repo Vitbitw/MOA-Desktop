@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('moaAPI', {
   addProvider: (data: unknown) => ipcRenderer.invoke('config:addProvider', data),
   removeProvider: (id: string) => ipcRenderer.invoke('config:removeProvider', id),
   getModels: (providerId: string) => ipcRenderer.invoke('config:getModels', providerId),
-  // T1：编辑厂商 / 改 API 密钥（同 vendor_key 组内共享）
+  // T1：编辑厂商 / 改 API 密钥（只写本条记录）
   updateProvider: (id: string, patch: unknown) => ipcRenderer.invoke(IPC.PROVIDERS_UPDATE, id, patch),
   updateProviderKey: (id: string, apiKey: string) => ipcRenderer.invoke(IPC.PROVIDERS_UPDATE_KEY, id, apiKey),
 

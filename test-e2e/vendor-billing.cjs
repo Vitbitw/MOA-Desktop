@@ -1,10 +1,10 @@
-// 纯 Node 测试：src/main/providers/providerManager.ts（T1 同厂商分组 / 按量-Plan 通道 / 组 key 同步）
+// 纯 Node 测试：src/main/providers/providerManager.ts（按量-Plan 通道；v4 B 方案：厂商分组已移除）
 // 覆盖：① addProvider 三件套写入 + getAllProviders 映射（plan 缺省语义）
 //      ② updateProvider 逐字段更新 + plan:null 清空
-//      ③ updateProviderKey：组内同步 / 独立厂商只写自身 / 不存在 id 抛错
-//      ④ **MF-1 回归**：第 2 个 key 写入失败 → 异常上抛且已写项回滚（组内无新旧混存）
-//      ⑤ backfill：默认态标记 / 用户改过不覆盖 / 幂等
-//      ⑥ seed 预设：清单命中 → plan / 组名
+//      ③ updateProviderKey：只写本条 / 不存在 id 抛错（v4 单条语义，组同步已退役）
+//      ④ **MF-1 回归**：key 写入失败 → 异常上抛且本条回滚（无新旧混存）
+//      ⑤ backfill：清单命中补 plan / 非清单名不动 / 幂等
+//      ⑥ seed 预设：清单命中 → plan
 //      ⑦ Plan 比值摊销（T2）：跨 anchor 分桶 / 桶内 Σ=消费 / 未配订阅费单价链回退 / manual 优先 / CNY 折算 / 零 token 不除零
 //      ⑧ 探查条目按通道过滤（T2 §5）：绑定条目仅同厂商命中、无标记条目全通道命中
 //      ⑨ 查询范围汇聚重算（T2.1 评审 MF-1）：多行同桶 Σ=amountUSD（非行数×amountUSD）/ 跨 provider 独立桶 / 无 plan 行 null
@@ -49,7 +49,7 @@ function makeFakeDb() {
   const rows = []
   const def = (o) => ({
     model_list: '[]', enabled: 1, created_at: Date.now(),
-    vendor_key: '', billing: 'usage', plan_amount: null, plan_currency: 'CNY', plan_anchor_ts: null,
+    billing: 'usage', plan_amount: null, plan_currency: 'CNY', plan_anchor_ts: null,
     ...o
   })
   const applySet = (row, setClause, params) => {
@@ -96,18 +96,15 @@ function makeFakeDb() {
     },
     query(sql) {
       const s = sql.trim()
-      if (/^SELECT id, name, base_url, model_list, enabled, vendor_key, billing, plan_amount, plan_currency, plan_anchor_ts FROM providers ORDER BY name$/i.test(s)) {
+      if (/^SELECT id, name, base_url, model_list, enabled, billing, plan_amount, plan_currency, plan_anchor_ts FROM providers ORDER BY name$/i.test(s)) {
         return rows.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)))
       }
       if (/^SELECT id, name, base_url, model_list, enabled FROM providers ORDER BY name$/i.test(s)) {
         // T1 之前的旧列形态（不应出现，防御）
         return rows.slice()
       }
-      if (/^SELECT id FROM providers WHERE vendor_key = \?$/i.test(s)) {
-        return rows.filter((r) => r.vendor_key === params0(s, arguments)).map((r) => ({ id: r.id }))
-      }
-      if (/^SELECT id, name FROM providers WHERE billing = 'usage' AND vendor_key = ''$/i.test(s)) {
-        return rows.filter((r) => r.billing === 'usage' && r.vendor_key === '').map((r) => ({ id: r.id, name: r.name }))
+      if (/^SELECT id, name FROM providers WHERE billing = 'usage'$/i.test(s)) {
+        return rows.filter((r) => r.billing === 'usage').map((r) => ({ id: r.id, name: r.name }))
       }
       if (/^SELECT name FROM providers$/i.test(s)) {
         return rows.map((r) => ({ name: r.name }))
@@ -116,28 +113,17 @@ function makeFakeDb() {
     },
     queryOne(sql, params = []) {
       const s = sql.trim()
-      if (/^SELECT id, vendor_key FROM providers WHERE id = \?$/i.test(s)) {
+      if (/^SELECT id FROM providers WHERE id = \?$/i.test(s)) {
         const r = rows.find((x) => x.id === params[0])
-        return r ? { id: r.id, vendor_key: r.vendor_key } : null
+        return r ? { id: r.id } : null
       }
       throw new Error('unexpected queryOne sql: ' + s)
     }
   }
-  // query 里 vendor_key 过滤的参数取用（避免闭包外 arguments 混淆，单独实现）
-  function params0() { return undefined }
 }
 
-// query 的 vendor_key 过滤需要 params——query(sql, params) 签名在 db.query 中支持第二参
-function patchQueryParams(db) {
-  const rawQuery = db.query.bind(db)
-  db.query = (sql, params = []) => {
-    const s = sql.trim()
-    if (/^SELECT id FROM providers WHERE vendor_key = \?$/i.test(s)) {
-      return db.rows.filter((r) => r.vendor_key === params[0]).map((r) => ({ id: r.id }))
-    }
-    return rawQuery(sql, params)
-  }
-}
+// v4：带参过滤查询已随分组移除——query 单参即可，此处保留空包装兼容既有调用点
+function patchQueryParams(db) {}
 
 // ── stub key-store：内存明文 map + 可注入「第 N 次 save 失败」 ──
 function makeFakeKeyStore() {
@@ -203,19 +189,17 @@ function main() {
     const defaults = load(defaultsPath)
 
     const a = pm.addProvider('阿里云百炼 (Qwen)', 'https://dashscope.aliyuncs.com/v1', '***', {
-      vendorKey: '阿里云', billing: 'usage'
+      billing: 'usage'
     })
     const b = pm.addProvider('阿里云 Token Plan', 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', '***', {
-      vendorKey: '阿里云', billing: 'plan',
+      billing: 'plan',
       plan: { amount: 68, currency: 'CNY', anchorTs: 1757000000000 }
     })
     const c = pm.addProvider('OpenAI', '', '***') // 无 opts → 默认态
     eq(db.rows.find((r) => r.id === c.id).billing, 'usage', '缺省 billing = usage')
-    eq(db.rows.find((r) => r.id === c.id).vendor_key, '', '缺省 vendor_key 为空')
 
     const all = pm.getAllProviders()
     eq(all.find((p) => p.id === b.id).billing, 'plan', 'billing 映射 plan')
-    eq(all.find((p) => p.id === b.id).vendorKey, '阿里云', 'vendorKey 映射')
     eq(all.find((p) => p.id === b.id).plan, { amount: 68, currency: 'CNY', anchorTs: 1757000000000 }, 'plan 三件套映射')
     eq(all.find((p) => p.id === a.id).plan, undefined, 'plan_amount NULL → plan 省略（未配置订阅费）')
     eq(all.find((p) => p.id === c.id).plan, undefined, '独立记录 plan 省略')
@@ -223,53 +207,42 @@ function main() {
     console.log('[2] updateProvider 逐字段 + plan:null 清空')
     pm.updateProvider(b.id, { billing: 'usage' })
     eq(pm.getAllProviders().find((p) => p.id === b.id).billing, 'usage', '单字段更新 billing')
-    eq(pm.getAllProviders().find((p) => p.id === b.id).vendorKey, '阿里云', '未传字段保持原值')
+    eq(pm.getAllProviders().find((p) => p.id === b.id).name, '阿里云 Token Plan', '未传字段保持原值')
     pm.updateProvider(b.id, { plan: null })
     eq(pm.getAllProviders().find((p) => p.id === b.id).plan, undefined, 'plan:null 清空订阅费')
     throws(() => pm.updateProvider(b.id, { billing: 'annual' }), '计费通道无效', '非法 billing 抛错')
     throws(() => pm.updateProvider(b.id, { baseUrl: 'ftp://x' }), 'API 地址无效', '非法 baseUrl 抛错')
 
-    console.log('[3] updateProviderKey：组同步 / 独立 / 不存在 id')
+    console.log('[3] updateProviderKey（v4 单条语义）：只写本条 / 不存在 id')
     pm.updateProviderKey(a.id, 'NEW-KEY')
-    eq([ks.state.map[a.id], ks.state.map[b.id]], ['NEW-KEY', 'NEW-KEY'], '同组两条同步为新值')
+    eq(ks.state.map[a.id], 'NEW-KEY', '写入本条生效')
+    ok(ks.state.map[b.id] !== 'NEW-KEY', '同名厂商另一条不被同步（组同步已移除）', ks.state.map[b.id])
     pm.updateProviderKey(c.id, 'OPENAI-KEY')
-    eq(ks.state.map[c.id], 'OPENAI-KEY', '独立厂商只写自身')
-    eq([ks.state.map[a.id], ks.state.map[b.id]], ['NEW-KEY', 'NEW-KEY'], '独立厂商写入不影响他组')
+    eq(ks.state.map[c.id], 'OPENAI-KEY', '另一条只写自身')
+    eq(ks.state.map[a.id], 'NEW-KEY', '写他条不影响已写条')
     throws(() => pm.updateProviderKey('no-such-id', 'X'), 'not found', '不存在 id 抛错')
 
-    console.log('[4] MF-1 回归：第 2 个 key 写入失败 → 上抛且无新旧混存')
-    // 此刻组内均为 NEW-KEY；注入第 2 次 saveProviderKey 失败
+    console.log('[4] MF-1 回归（v4 单条）：key 写入失败 → 上抛且本条无新旧混存')
+    // 此刻 a.key = NEW-KEY；注入第 1 次 saveProviderKey 失败
     ks.state.saveCalls = 0
-    ks.state.failAt = 2
+    ks.state.failAt = 1
     throws(() => pm.updateProviderKey(a.id, 'MIXED-NEW'), 'injected key-store failure', '写入失败向上抛出')
     ks.state.failAt = 0
-    eq(
-      [ks.state.map[a.id], ks.state.map[b.id]],
-      ['NEW-KEY', 'NEW-KEY'],
-      '已写项回滚为旧值：组内无新旧 key 混存'
-    )
+    eq(ks.state.map[a.id], 'NEW-KEY', '失败后本条仍为旧值（不部分写）')
 
-    console.log('[5] backfill：默认态标记 / 改过不覆盖 / 幂等')
-    // 造三类记录：默认态命中 plan+组 / 默认态仅组 / 用户已改过（billing=plan, vendor_key=''）
-    const d = pm.addProvider('StepFun', 'https://api.stepfun.com/step_plan/v1', '')       // 命中 plan + 组 StepFun
-    const e = pm.addProvider('MiniMax (中国)', 'https://api.minimaxi.com/v1', '')         // 仅组 MiniMax
-    const f = pm.addProvider('Kilo Code', 'https://api.kilo.ai/api/gateway', '')          // 命中 plan，无组清单
-    // f：用户已手动改过（vendor_key 已有值 → 不在默认态）
-    pm.updateProvider(f.id, { vendorKey: '用户自建组' })
-    // d、e 用 seed 预设？addProvider 无 opts → 默认态 ✓
+    console.log('[5] backfill：清单命中补 plan / 非清单名不动 / 幂等')
+    // 造两类记录：清单命中（StepFun → plan）/ 非清单名（保持 usage）
+    const d = pm.addProvider('StepFun', 'https://api.stepfun.com/step_plan/v1', '')       // 命中 PLAN_BILLING_NAMES
+    const e = pm.addProvider('MiniMax (中国)', 'https://api.minimaxi.com/v1', '')         // 非清单名
     pm.backfillProviderBilling()
     const g = (id) => pm.getAllProviders().find((p) => p.id === id)
-    eq(g(d.id).billing, 'plan', 'backfill：默认态命中 → plan')
-    eq(g(d.id).vendorKey, 'StepFun', 'backfill：默认态命中 → 组名')
-    eq(g(e.id).billing, 'usage', 'backfill：仅组命中 → billing 不动')
-    eq(g(e.id).vendorKey, 'MiniMax', 'backfill：组名补齐')
-    eq(g(f.id).billing, 'usage', 'backfill：用户已改过（vendor_key 非空）→ billing 不覆盖')
-    eq(g(f.id).vendorKey, '用户自建组', 'backfill：用户分组保留')
+    eq(g(d.id).billing, 'plan', 'backfill：清单命中 → plan')
+    eq(g(e.id).billing, 'usage', 'backfill：非清单名 → billing 不动')
     pm.backfillProviderBilling()
     eq(g(d.id).billing, 'plan', '二次运行幂等（billing 不变）')
-    eq(g(d.id).vendorKey, 'StepFun', '二次运行幂等（vendor_key 不变）')
+    eq(g(e.id).billing, 'usage', '二次运行幂等（非清单名仍不动）')
 
-    console.log('[6] seed 预设：清单命中 → plan / 组名')
+    console.log('[6] seed 预设：清单命中 → plan')
     const emptyDb = makeFakeDb(); patchQueryParams(emptyDb)
     const seedPm = makeLoader({ getDatabase: () => emptyDb }, makeFakeKeyStore().module)
     seedPm(pmPath).seedBuiltInProviders()
@@ -278,13 +251,13 @@ function main() {
     const nonLocal = defaults.BUILT_IN_PROVIDER_TEMPLATES.filter((t) => !pa.isLocalBaseUrl(t.baseUrl))
     ok(names.length === nonLocal.length, 'seed 条数 = 非本地模板数（本地回环模板不预置）', { got: names.length, want: nonLocal.length })
     const cc = emptyDb.rows.find((r) => r.name === 'Command Code')
-    eq(cc && [cc.billing, cc.vendor_key], ['plan', ''], 'Command Code → plan、无组（单条厂商）')
+    eq(cc && cc.billing, 'plan', 'Command Code → plan')
     const ali = emptyDb.rows.find((r) => r.name === '阿里云 Token Plan')
-    eq(ali && [ali.billing, ali.vendor_key], ['plan', '阿里云'], '阿里云 Token Plan → plan + 组阿里云')
+    eq(ali && ali.billing, 'plan', '阿里云 Token Plan → plan')
     const qwen = emptyDb.rows.find((r) => r.name === '阿里云百炼 (Qwen)')
-    eq(qwen && [qwen.billing, qwen.vendor_key], ['usage', '阿里云'], '阿里云百炼 → usage + 组阿里云')
+    eq(qwen && qwen.billing, 'usage', '阿里云百炼 → usage')
     const oai = emptyDb.rows.find((r) => r.name === 'OpenAI')
-    eq(oai && [oai.billing, oai.vendor_key], ['usage', ''], 'OpenAI → 默认态')
+    eq(oai && oai.billing, 'usage', 'OpenAI → 默认 usage')
     const planCount = emptyDb.rows.filter((r) => r.billing === 'plan').length
     eq(planCount, defaults.PLAN_BILLING_NAMES.length, 'seed 后 plan 记录数 = 清单数')
   }
@@ -302,10 +275,10 @@ function main() {
   const upm = uload(pmPath)
   const usage = uload(path.resolve(__dirname, '../src/main/moa/usage.ts'))
   const planId = upm.addProvider('阿里云 Token Plan', 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', '***', {
-    vendorKey: '阿里云', billing: 'plan', plan: { amount: 10, currency: 'USD', anchorTs: ANCHOR }
+    billing: 'plan', plan: { amount: 10, currency: 'USD', anchorTs: ANCHOR }
   }).id
   const paygoId = upm.addProvider('阿里云百炼 (Qwen)', 'https://dashscope.aliyuncs.com/v1', '***', {
-    vendorKey: '阿里云', billing: 'usage'
+    billing: 'usage'
   }).id
   const noAmtId = upm.addProvider('未配订阅费 Plan', 'https://plan.example.com/v1', '***', { billing: 'plan' }).id
   const cnyId = upm.addProvider('CNY 摊销 Plan', 'https://cny.example.com/v1', '***', {
@@ -460,6 +433,11 @@ function main() {
     ok(summarySeg.includes('computeRangePlanCosts('), 'USAGE_GET_SUMMARY 挂接范围汇聚重算（禁用该挂接 → 本断言红）')
     ok(todaySeg.includes('computeRangePlanCosts('), 'USAGE_GET_TODAY 挂接范围汇聚重算（禁用该挂接 → 本断言红）')
     ok(!summarySeg.includes('computePlanEntryCosts(') && !todaySeg.includes('computePlanEntryCosts('), '两 handler 未回退单行入口 computePlanEntryCosts（防分母作用域回归）')
+    // v4 B 方案：groupBy=provider 拆行 key = 「来源名·通道」恒带后缀（分组字段公式已退役）
+    ok(summarySeg.includes("info.name}·${info.billing === 'plan' ? 'Plan' : '按量'}"), 'SUMMARY 拆行 key = 来源名·通道（恒带后缀）')
+    const legacyGroupField = ['vendor', 'Key'].join('')
+    const legacyGroupCol = ['vendor', 'key'].join('_')
+    ok(!idxSrc.includes(legacyGroupField) && !idxSrc.includes(legacyGroupCol), 'index.ts 无分组字段残留（v4 移除）')
   }
 
   console.log('')

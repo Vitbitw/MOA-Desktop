@@ -6,9 +6,9 @@ export const IPC = {
   CONFIG_ADD_PROVIDER: 'config:addProvider',
   CONFIG_REMOVE_PROVIDER: 'config:removeProvider',
   CONFIG_GET_MODELS: 'config:getModels',
-  /** 编辑厂商（名称 / API 地址 / 分组 / 计费通道 / Plan 三件套；仅传入字段更新） */
+  /** 编辑厂商（名称 / API 地址 / 计费通道 / Plan 三件套；仅传入字段更新） */
   PROVIDERS_UPDATE: 'providers:update',
-  /** 改 API 密钥：同 vendor_key 分组内全部记录同步为同一值（组内共享） */
+  /** 改 API 密钥：只写本条厂商记录（v4 B 方案移除厂商分组） */
   PROVIDERS_UPDATE_KEY: 'providers:updateKey',
 
   // Conversations

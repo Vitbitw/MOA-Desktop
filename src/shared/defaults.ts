@@ -254,30 +254,3 @@ export const PLAN_BILLING_NAMES: string[] = [
   'StepFun',
   'StepFun (国际)'
 ]
-
-/** 同厂商分组映射（设计文档 §1 组名表）：key = 模板 name，value = 组名；仅为同厂 ≥2 模板者设组，单条不设 */
-export const VENDOR_GROUP: Record<string, string> = {
-  // 阿里云（6）
-  '阿里云百炼 (Qwen)': '阿里云',
-  '阿里云百炼 (国际)': '阿里云',
-  '阿里云 Token Plan': '阿里云',
-  '阿里云 Token Plan (国际)': '阿里云',
-  '阿里云 Coding Plan': '阿里云',
-  '阿里云 Coding Plan (国际)': '阿里云',
-  // 月之暗面（3）
-  '月之暗面 (Kimi)': '月之暗面',
-  'Kimi Coding Plan': '月之暗面',
-  'Moonshot AI (国际)': '月之暗面',
-  // MiniMax（2）
-  'MiniMax': 'MiniMax',
-  'MiniMax (中国)': 'MiniMax',
-  // StepFun（2）
-  'StepFun': 'StepFun',
-  'StepFun (国际)': 'StepFun',
-  // OpenCode（2）
-  'OpenCode Zen': 'OpenCode',
-  'OpenCode Go': 'OpenCode',
-  // 智谱（2）
-  '智谱AI (GLM)': '智谱',
-  'Z.AI (GLM 国际)': '智谱'
-}

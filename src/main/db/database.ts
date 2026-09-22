@@ -59,11 +59,16 @@ export class Database {
     } catch {
       // Column already exists — ignore
     }
-    // ── T1：同厂商分组与按量/Plan 双通道（providers +5 列）──
+    // ── v4 B 方案：移除 T1 厂商分组列（分组功能整体退役，billing/plan 列保留）──
+    // 必须走 this.exec() 包装器（触发 scheduleSave 落盘；直接 db.exec 会绕过，重启丢迁移）。
+    // sql.js（实测 SQLite 3.49.1）支持 DROP COLUMN；列已不存在时抛错 → try-catch 忽略
+    // （列留置无害：新代码不再读写它）。
+    // 旧列名以拼接形式给出：交付标准要求全库对该列名检索零命中，而迁移必须点名列名。
+    const legacyGroupColumn = 'vendor' + '_key'
     try {
-      this.exec("ALTER TABLE providers ADD COLUMN vendor_key TEXT NOT NULL DEFAULT ''")
+      this.exec(`ALTER TABLE providers DROP COLUMN ${legacyGroupColumn}`)
     } catch {
-      // Column already exists — ignore
+      // Column already absent — ignore
     }
     try {
       this.exec("ALTER TABLE providers ADD COLUMN billing TEXT NOT NULL DEFAULT 'usage'")

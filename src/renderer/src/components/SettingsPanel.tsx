@@ -710,9 +710,6 @@ function ProvidersSection() {
                 <span className={`ml-1.5 text-[10px] font-normal ${p.billing === 'plan' ? 'text-primary' : 'text-muted-foreground'}`}>
                   （{p.billing === 'plan' ? 'Plan' : '按量'}）
                 </span>
-                {p.vendorKey && (
-                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">· {p.vendorKey}</span>
-                )}
               </span>
               <div className="flex items-center gap-1">
                 <button
@@ -726,7 +723,7 @@ function ProvidersSection() {
                 <button
                   onClick={() => setEditing(p)}
                   className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent/50 transition-colors"
-                  title="编辑厂商（分组 / 通道 / 订阅费 / 密钥）"
+                  title="编辑厂商（通道 / 订阅费 / 密钥）"
                 >
                   <Pencil className="w-3.5 h-3.5" />
                 </button>
@@ -803,18 +800,11 @@ const formatPlanAnchor = (ts?: number): string => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-/** 「新建分组…」选项哨兵值（与真实分组名区分） */
-const NEW_VENDOR_SENTINEL = '__new__'
-
 function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () => void; onDone: () => void; editingProvider?: Provider }) {
-  const providers = useConfigStore((s) => s.providers)
   const editing = !!editingProvider
   const [name, setName] = useState(editingProvider?.name ?? '')
   const [baseUrl, setBaseUrl] = useState(editingProvider?.baseUrl ?? '')
   const [apiKey, setApiKey] = useState(editingProvider?.apiKey ?? '')
-  // 厂商分组：'' = 独立厂商；NEW_VENDOR_SENTINEL = 新建分组（用下方文本输入）
-  const [vendorChoice, setVendorChoice] = useState(editingProvider?.vendorKey ?? '')
-  const [newVendor, setNewVendor] = useState('')
   // 计费通道：'usage' = 按量（默认）| 'plan' = 订阅/Token 包
   const [billing, setBilling] = useState<'usage' | 'plan'>(editingProvider?.billing ?? 'usage')
   // Plan 三件套：每期消费金额（留空 = 未配置）/ 币种 / 周期起始日
@@ -823,11 +813,6 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
   const [planDate, setPlanDate] = useState(formatPlanAnchor(editingProvider?.plan?.anchorTs))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  // 现有分组：所有厂商非空 vendorKey 去重（保序）
-  const vendorOptions = [...new Set(providers.map((p) => (p.vendorKey || '').trim()).filter(Boolean))]
-  // 实际生效的分组名（选「新建分组…」时取输入值）
-  const resolvedVendorKey = vendorChoice === NEW_VENDOR_SENTINEL ? newVendor.trim() : vendorChoice.trim()
 
   const handleSave = async () => {
     if (!name.trim()) {
@@ -844,10 +829,6 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
     // 本地回环地址免 Key（本地推理服务不校验 Authorization）；云端厂商必须填 Key
     if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl)) {
       setError('云端厂商需填写 API Key（回环地址可留空）')
-      return
-    }
-    if (vendorChoice === NEW_VENDOR_SENTINEL && !newVendor.trim()) {
-      setError('请填写新分组名称')
       return
     }
     // 每期消费金额：留空 = 未配置（回退单价链）；填了必须是 ≥0 数字
@@ -867,11 +848,10 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
     setError(null)
     try {
       if (editingProvider) {
-        // 编辑：分组 / 通道 / 订阅费 / 名称 / 地址走 updateProvider（plan=null 清空订阅费）
+        // 编辑：通道 / 订阅费 / 名称 / 地址走 updateProvider（plan=null 清空订阅费）
         const res = await window.moaAPI.updateProvider(editingProvider.id, {
           name: name.trim(),
           baseUrl: finalBaseUrl,
-          vendorKey: resolvedVendorKey,
           billing,
           plan
         })
@@ -879,7 +859,7 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
           setError(String(res.error || '保存失败'))
           return
         }
-        // 密钥变更走 updateProviderKey：同分组厂商全组同步写入
+        // 密钥变更走 updateProviderKey（v4 单条语义：只写本条）
         if (apiKey !== editingProvider.apiKey) {
           const keyRes = await window.moaAPI.updateProviderKey(editingProvider.id, apiKey)
           if (!keyRes.success) {
@@ -893,7 +873,7 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
       const res = await window.moaAPI.addProvider({
         name: name.trim(),
         baseUrl: finalBaseUrl,
-        apiKey: apiKey.trim(), vendorKey: resolvedVendorKey,
+        apiKey: apiKey.trim(),
         billing,
         ...(plan ? { plan } : {})
       })
@@ -963,38 +943,6 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
               className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="sk-...（本地回环地址可留空）"
             />
-            {editingProvider && resolvedVendorKey !== '' && (
-              <p className="text-[10px] text-muted-foreground mt-1">
-                {apiKey !== editingProvider.apiKey
-                  ? '同分组厂商将同步此密钥'
-                  : '加入分组不会同步已有密钥；如需统一请重新填写密钥'}
-              </p>
-            )}
-          </div>
-
-          {/* 厂商分组：现有分组去重 +「新建分组…」文本输入；空 = 独立厂商 */}
-          <div>
-            <label className="text-xs text-muted-foreground block mb-1">厂商分组</label>
-            <select
-              value={vendorChoice}
-              onChange={(e) => setVendorChoice(e.target.value)}
-              className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-            >
-              <option value="">独立厂商（不分组）</option>
-              {vendorOptions.map((v) => (
-                <option key={v} value={v}>{v}</option>
-              ))}
-              <option value={NEW_VENDOR_SENTINEL}>新建分组…</option>
-            </select>
-            {vendorChoice === NEW_VENDOR_SENTINEL && (
-              <input
-                value={newVendor}
-                onChange={(e) => setNewVendor(e.target.value)}
-                className="mt-1.5 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                placeholder="输入新分组名称，如：阿里云"
-              />
-            )}
-            <p className="text-[10px] text-muted-foreground mt-1">同分组厂商共享 API 密钥</p>
           </div>
 
           {/* 计费通道：按量（默认）/ Plan（订阅·Token 包） */}

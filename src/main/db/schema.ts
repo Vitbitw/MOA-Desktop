@@ -6,8 +6,7 @@ CREATE TABLE IF NOT EXISTS providers (
   model_list  TEXT NOT NULL DEFAULT '[]',
   enabled     INTEGER NOT NULL DEFAULT 1,
   created_at  INTEGER NOT NULL,
-  -- ── T1 同厂商分组与按量/Plan 双通道 ──
-  vendor_key     TEXT NOT NULL DEFAULT '',      -- 厂商分组名：'' = 独立厂商，同组记录共享 API 密钥
+  -- ── T1 按量/Plan 双通道（v4 B 方案：厂商分组列已移除）──
   billing        TEXT NOT NULL DEFAULT 'usage', -- 计费通道：'usage' = 按量 | 'plan' = 订阅/Token 包
   plan_amount    REAL,                          -- 每期（月）实际消费金额；NULL/0 = 未配置（回退单价链估算）
   plan_currency  TEXT NOT NULL DEFAULT 'CNY',   -- 消费币种：'USD' | 'CNY'（CNY→USD 折算率 7.2）

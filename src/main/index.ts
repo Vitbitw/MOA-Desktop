@@ -282,9 +282,8 @@ function registerIpcHandlers() {
   // ── Config / Providers ──
   handleIpc(IPC.CONFIG_GET_PROVIDERS, () => getAllProviders())
 
-  handleIpc(IPC.CONFIG_ADD_PROVIDER, (_e, data: { name: string; baseUrl: string; apiKey: string; vendorKey?: string; billing?: 'usage' | 'plan'; plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } }) =>
+  handleIpc(IPC.CONFIG_ADD_PROVIDER, (_e, data: { name: string; baseUrl: string; apiKey: string; billing?: 'usage' | 'plan'; plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } }) =>
     addProvider(data.name, data.baseUrl, data.apiKey, {
-      vendorKey: data.vendorKey,
       billing: data.billing,
       plan: data.plan
     })
@@ -303,7 +302,7 @@ function registerIpcHandlers() {
     updateProvider(id, patch)
   )
 
-  // T1：改 API 密钥 —— 同 vendor_key 分组内全部记录写入同一值（组内共享），独立厂商只写自身
+  // T1：改 API 密钥 —— 只写本条记录（v4 B 方案：厂商分组已移除，组同步退役）
   handleIpc(IPC.PROVIDERS_UPDATE_KEY, (_e, id: string, apiKey: string) => {
     updateProviderKey(id, apiKey)
   })
@@ -684,10 +683,10 @@ function registerIpcHandlers() {
       : getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
 
     // 厂商信息（getAllProviders 依赖 DB 已初始化，故在 handler 内调用）：
-    // name = 现状 key；vendorKey/billing = 「厂商×通道」拆行（设计 §4）；全量列表供 Plan 摊销重算（设计 §3）
+    // name/billing = 「来源名·通道」拆行 key（设计 §4，v4 恒带通道后缀）；全量列表供 Plan 摊销重算（设计 §3）
     const allProviders: Provider[] = getAllProviders()
     const providerNameMap = new Map(
-      allProviders.map((p) => [p.id, { name: p.name, vendorKey: p.vendorKey, billing: p.billing }] as const)
+      allProviders.map((p) => [p.id, { name: p.name, billing: p.billing }] as const)
     )
     const MODE_LABELS: Record<string, string> = {
       aggregate: '聚合',
@@ -737,7 +736,7 @@ function registerIpcHandlers() {
         continue
       }
 
-      // 按 groupBy 归组：model→modelId；provider→厂商×通道拆行（有分组）/厂商名（无分组，现状兼容）；mode→中文模式标签
+      // 按 groupBy 归组：model→modelId；provider→「来源名·通道」拆行（恒带后缀，v4 B 方案）；mode→中文模式标签
       for (let i = 0; i < models.length; i++) {
         const m = models[i]
         let key: string
@@ -747,9 +746,7 @@ function registerIpcHandlers() {
           // providerId 缺失或厂商已删除 → 兜底显示模型名，避免 UUID
           const info = m.providerId ? providerNameMap.get(m.providerId) : undefined
           key = info
-            ? info.vendorKey
-              ? `${info.vendorKey}·${info.billing === 'plan' ? 'Plan' : '按量'}`
-              : info.name
+            ? `${info.name}·${info.billing === 'plan' ? 'Plan' : '按量'}`
             : m.modelId
         } else {
           // 标题生成日志（source='title'）单独归组，避免污染「直通」模式
