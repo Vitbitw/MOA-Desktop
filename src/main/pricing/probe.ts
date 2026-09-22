@@ -11,7 +11,7 @@ import { getAllProviders, fetchAndCacheModels } from '../providers/providerManag
 import { getMoaConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
 import { getUsageSnapshot } from '../monitoring/snapshotStore'
-import { CC_PLAN_PAGE_SLUG } from '../monitoring/commandCode'
+import { CC_PLAN_PAGE } from '../monitoring/commandCode'
 import { defaultPricingProbeUrlByName } from '../../shared/defaults'
 import { splitModelKey } from '../../shared/modelKey'
 import type { ProbedPricingEntry, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
@@ -357,29 +357,38 @@ async function getSourceKeywords(source: PricingProbeSource): Promise<string[]> 
   return (provider?.models ?? []).map((m) => m.id).filter((id): id is string => !!id)
 }
 
-// ─── 探查 URL：Command Code 按订阅套餐动态选计划页 ───
+// ─── 探查目标：Command Code 按订阅套餐动态选计划页 + 额度列 ───
+
+/** 探查目标：实际 URL + （仅 commandcode）月度额度列标题 */
+export interface ProbeTarget {
+  url: string
+  /** 月度额度列标题；注入 prompt 防多列套餐页（如 max 页双列）取错列。套餐不可解析时缺省 */
+  creditsColumn?: string
+}
 
 /**
- * 解析源的实际探查 URL。
+ * 解析源的探查目标。
  * 绑定厂商为 Command Code（baseUrl 含 api.commandcode.ai）时，读云监控快照里的订阅 planId，
- * 动态选对应计划页（/docs/plans/<slug>）——每模型 Monthly credits 只在计划页有；
+ * 动态选对应计划页（URL 与额度列标题见 CC_PLAN_PAGE——每模型 Monthly credits 只在计划页有，
+ * 且 max 页为双列、必须指列）；
  * 未登录 / 无订阅 / 未知 planId（teams-pro、provider 等无公开计划页）/ 快照异常 → 回退源自带 URL。
  * 其余源原样返回（零影响）。多 commandcode 监控源时按配置顺序取第一个能解析出套餐的。
  */
-export function resolveProbeUrl(source: PricingProbeSource): string {
+export function resolveProbeTarget(source: PricingProbeSource): ProbeTarget {
   const providerId = resolveSourceProviderId(source)
   const provider = providerId ? getAllProviders().find((p) => p.id === providerId) : undefined
-  if (!provider?.baseUrl?.includes('api.commandcode.ai')) return source.url
+  if (!provider?.baseUrl?.includes('api.commandcode.ai')) return { url: source.url }
   try {
     for (const ms of readAppSettings().monitoring.sources) {
       if (!ms.enabled || ms.type !== 'commandcode') continue
       const snap = getUsageSnapshot(ms.id)
       const planId = snap && 'subscription' in snap ? snap.subscription?.planId : undefined
-      const slug = planId ? CC_PLAN_PAGE_SLUG[planId] : undefined
-      if (slug) {
-        const url = `https://commandcode.ai/docs/plans/${slug}`
-        if (DEBUG) console.log(`[PricingProbe] ${source.name}(${source.id}) 套餐 ${planId} → 计划页 ${url}`)
-        return url
+      const page = planId ? CC_PLAN_PAGE[planId] : undefined
+      if (page) {
+        if (DEBUG) {
+          console.log(`[PricingProbe] ${source.name}(${source.id}) 套餐 ${planId} → 计划页 ${page.url}（额度列「${page.creditsColumn}」）`)
+        }
+        return { url: page.url, creditsColumn: page.creditsColumn }
       }
       if (DEBUG) {
         console.log(`[PricingProbe] ${source.name}(${source.id}) 套餐不可用(planId=${planId ?? '无'})，回退源 URL ${source.url}`)
@@ -388,14 +397,23 @@ export function resolveProbeUrl(source: PricingProbeSource): string {
   } catch (err) {
     if (DEBUG) console.warn(`[PricingProbe] ${source.name}(${source.id}) 套餐解析失败，回退源 URL:`, err)
   }
-  return source.url
+  return { url: source.url }
 }
 
 // ─── LLM 提取 ───
 
-function buildProbePrompt(source: PricingProbeSource, keywords: string[], pageText: string): string {
+function buildProbePrompt(
+  source: PricingProbeSource,
+  keywords: string[],
+  pageText: string,
+  creditsColumn?: string
+): string {
   const keywordText = keywords.length > 0 ? keywords.join('、') : '页面上所有已定价模型'
   const tz = source.timezone || 'Asia/Shanghai'
+  // 指列规则：仅按套餐解析出列标题时注入（多列套餐页必须指列；无该列的页面靠「没有此列就省略」兜底）
+  const columnRule = creditsColumn
+    ? `\n   - 本页是该套餐的计划页：monthlyCredits 只取列标题为「${creditsColumn}」的那一列（同页有多个额度列时其余一律忽略）；页面没有此列就省略。`
+    : ''
   return `你是一个模型定价解析器。下面是某厂商官方定价页面的文本（可能是原始 HTML，含无关标记，请忽略它们只找价格）。
 
 请提取与该页面模型相关的定价。重点关注以下关键词（模型名或名称片段）：${keywordText}
@@ -411,7 +429,7 @@ function buildProbePrompt(source: PricingProbeSource, keywords: string[], pageTe
 3. 只输出 JSON 数组，每项结构：
 { "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "monthlyCredits": 数字(可选), "windows": [ { "start": "HH:mm", "end": "HH:mm", "input": 数字, "output": 数字, "days": ["mon","tue"] (可选, 适用星期, 缺省=每天; 也接受 "weekday"/"工作日"/"weekend"/"周末" 或 [1,2,3] 数字数组) } ] }
    - 页面标注的「输入（缓存命中）」对应 cacheRead，「输入（缓存未命中）」对应 input。
-   - monthlyCredits 是套餐给该模型的「月度额度」（如计划页 Monthly credits 列的 $70），是额度不是单价：取当前生效数值（促销行的划线原价忽略，只取现价）；页面没有该列就省略，不要编造。
+   - monthlyCredits 是套餐给该模型的「月度额度」（如计划页 Monthly credits 列的 $70），是额度不是单价：取当前生效数值（促销行的划线原价忽略，只取现价）；页面没有该列就省略，不要编造。${columnRule}
 4. windows 用于峰谷/错峰/时段优惠价（如 off-peak、错峰、时段折扣、凌晨低价、工作日/周末差价）。若页面含此类时段价，务必提取到 windows；无则省略该字段。窗口时间为 24 小时制 HH:mm，时区为 ${tz}。
 4.5. 定价表可能延续到片段末尾（如 Inkling、Grok 等表尾模型）。务必把页面上所有已标注价格的模型都提取，不要遗漏表格末尾的行。
 5. 除 JSON 数组外不要输出任何内容，不要使用 markdown 代码块，不要任何解释。
@@ -485,7 +503,10 @@ function buildMissingFragment(fullText: string, missing: string[]): string {
 }
 
 /** 补漏 prompt：只要求从片段中提取指定模型的定价 */
-function buildFillPrompt(pageText: string, missing: string[]): string {
+function buildFillPrompt(pageText: string, missing: string[], creditsColumn?: string): string {
+  const columnRule = creditsColumn
+    ? `\n- monthlyCredits 只取列标题为「${creditsColumn}」的那一列（同页多个额度列时其余忽略）；页面没有此列就省略。`
+    : ''
   return `你是模型定价解析器。以下是某厂商官方定价页的文本片段（HTML/纯文本混合，忽略无关标记）。
 
 ⚠️ 上一轮解析遗漏了以下模型，请从片段中重点找到它们的定价并提取：
@@ -493,7 +514,7 @@ ${missing.map((m, i) => `${i + 1}. ${m}`).join('\n')}
 
 匹配规则与输出要求同上：
 - 只输出 JSON 数组，每项：{ "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "monthlyCredits": 数字(可选，该模型月度额度、取现价), "windows": 数组(可选) }
-- 页面里没有明确价格的模型一律不要输出；不确定不要编造。
+- 页面里没有明确价格的模型一律不要输出；不确定不要编造。${columnRule}${columnRule}
 - 除 JSON 数组外不要输出任何内容，不要 markdown 代码块。
 
 页面片段：
@@ -700,6 +721,8 @@ function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[]): P
   const tz = source.timezone || 'Asia/Shanghai'
   const now = Date.now()
   const entries: ProbedPricingEntry[] = []
+  // 同页重复 pattern（LLM 输出抖动）只留首条：外部边界一次去重，避免下游重复行 / 重复 React key
+  const seen = new Set<string>()
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue
     const patternRaw =
@@ -717,6 +740,9 @@ function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[]): P
     // 无模型标识则丢弃；负数视为异常数据丢弃（缺失数值按 0 处理：页面标注免费）
     if (!pattern) continue
     if ((input !== undefined && input < 0) || (output !== undefined && output < 0)) continue
+    const dupKey = normalizeForMatch(pattern)
+    if (seen.has(dupKey)) continue
+    seen.add(dupKey)
 
     const rate = currency === 'CNY' ? CNY_TO_USD_RATE : 1
     const entry: ProbedPricingEntry = {
@@ -779,8 +805,9 @@ export async function probeSource(
 ): Promise<ProbeSourceResult> {
   // 关键词自动取所绑定厂商 /models 的模型名
   const keywords = await getSourceKeywords(source)
-  // 实际探查 URL：Command Code 按订阅套餐动态选计划页，其余源原样（后续抓取/来源记录统一用 effSource）
-  const effSource = { ...source, url: resolveProbeUrl(source) }
+  // 探查目标：Command Code 按订阅套餐动态选计划页（含额度列标题），其余源原样（后续抓取/来源记录统一用 effSource）
+  const target = resolveProbeTarget(source)
+  const effSource = { ...source, url: target.url }
   if (DEBUG) {
     console.log(`[PricingProbe] ${effSource.name}(${effSource.id}) probe model: ${model.baseUrl} / ${model.modelId}${force ? ' [force]' : ''} url=${effSource.url}`)
   }
@@ -807,7 +834,7 @@ export async function probeSource(
 
   // 定位定价区块（锚句 → 关键词居中 → 整页头部），避免全页送入 LLM
   const pageText = locatePricingFragment(fullText, keywords, cache)
-  const prompt = buildProbePrompt(effSource, keywords, pageText)
+  const prompt = buildProbePrompt(effSource, keywords, pageText, target.creditsColumn)
   onStage?.('extracting')
   const result = await callProbeLLM(model, prompt)
   if (result.status !== 'success' || !result.content) {
@@ -832,7 +859,7 @@ export async function probeSource(
   const missing = findMissingModels(fullText, keywords, entries)
   if (missing.length > 0 && missing.length <= 20) {
     const fillText = buildMissingFragment(fullText, missing)
-    const fill = await callProbeLLM(model, buildFillPrompt(fillText, missing))
+    const fill = await callProbeLLM(model, buildFillPrompt(fillText, missing, target.creditsColumn))
     if (fill.status === 'success' && fill.content) {
       const extra = buildProbedEntries(effSource, extractJsonArray(fill.content) ?? [])
       if (extra.length > 0) {

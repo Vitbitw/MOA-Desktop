@@ -92,7 +92,7 @@ const stubPlugin = {
         moaConfig: 'export function getMoaConfig() { return globalThis.__expertTeamTest.moaConfig }\n',
         fetchProxy: "export async function fetchProxy() { throw new Error('fetchProxy 不应被调用（测试仅使用 probe 的纯函数）') }\n",
         streamChat: 'export async function streamChat(opts) { return globalThis.__expertTeamTest.streamChat(opts) }\n',
-        commandCode: 'export const CC_PLAN_PAGE_SLUG = {}\n',
+        commandCode: 'export const CC_PLAN_PAGE = {}\n',
         snapshotStore:
           'export function getUsageSnapshot() { return null }\n' +
           'export function saveUsageSnapshot() {}\n' +

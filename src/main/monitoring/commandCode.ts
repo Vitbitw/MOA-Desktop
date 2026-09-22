@@ -934,17 +934,21 @@ export const CC_PLAN_TIERS: Record<string, { credits: number; type: 'individual'
 }
 
 /**
- * planId → 计划文档页 slug（https://commandcode.ai/docs/plans/<slug>）。
- * 供定价探查按当前订阅套餐动态选计划页（probe.ts resolveProbeUrl）。
+ * planId → 计划文档页（完整 URL + 该页「月度额度」列标题）。
+ * 供定价探查按当前订阅套餐动态选计划页并给 LLM 指列（probe.ts resolveProbeTarget）。
+ * 列标题随套餐页结构不同（2026-09-22 四页实抓核对）：
+ *   - go/goat/pro 页为「Monthly credits」单列；go 页当前无每模型额度列（探不到就省略，单价仍有效）
+ *   - max 页是「Max 10× credits」「Max 20× credits」双列且无 Monthly credits 列，
+ *     individual-max 取 10× 列、individual-ultra 取 20× 列（两列值差 2 倍，不指列会取错）
  * 无公开计划页的套餐不映射（teams-pro / individual-provider 实测 404）→ 调用方回退源自带 URL。
  */
-export const CC_PLAN_PAGE_SLUG: Record<string, string> = {
-  'individual-go': 'go',
-  'individual-goat': 'goat',
-  'individual-pro': 'pro',
-  'individual-pro-v1': 'pro',
-  'individual-max': 'max',
-  'individual-ultra': 'max'
+export const CC_PLAN_PAGE: Record<string, { url: string; creditsColumn: string }> = {
+  'individual-go': { url: 'https://commandcode.ai/docs/plans/go', creditsColumn: 'Monthly credits' },
+  'individual-goat': { url: 'https://commandcode.ai/docs/plans/goat', creditsColumn: 'Monthly credits' },
+  'individual-pro': { url: 'https://commandcode.ai/docs/plans/pro', creditsColumn: 'Monthly credits' },
+  'individual-pro-v1': { url: 'https://commandcode.ai/docs/plans/pro', creditsColumn: 'Monthly credits' },
+  'individual-max': { url: 'https://commandcode.ai/docs/plans/max', creditsColumn: 'Max 10× credits' },
+  'individual-ultra': { url: 'https://commandcode.ai/docs/plans/max', creditsColumn: 'Max 20× credits' }
 }
 
 /**

@@ -3,6 +3,7 @@ import { useSettingsStore } from '../store/settingsStore'
 import { useConfigStore } from '../store/configStore'
 import { useProbeStore, probeResultsToMessages, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
+import { formatCost } from '../lib/usageFormat'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
@@ -1903,11 +1904,8 @@ function ProbeSection() {
                   {/* 模型月额度：订阅计划页 Monthly credits 列探查结果（仅 ≥1 条目含该值时显示） */}
                   {(() => {
                     const mcEntries = meta.entries
-                      .filter((e) => e.monthlyCredits !== undefined)
-                      .sort(
-                        (a, b) =>
-                          (b.monthlyCredits ?? 0) - (a.monthlyCredits ?? 0) || a.pattern.localeCompare(b.pattern)
-                      )
+                      .filter((e): e is ProbedPricingEntry & { monthlyCredits: number } => e.monthlyCredits !== undefined)
+                      .sort((a, b) => b.monthlyCredits - a.monthlyCredits || a.pattern.localeCompare(b.pattern))
                     if (mcEntries.length === 0) return null
                     const open = mcOpen.has(s.id)
                     return (
@@ -1953,7 +1951,9 @@ function ProbeSection() {
                                   <td className="px-2 py-1 font-mono truncate" title={e.pattern}>
                                     {e.pattern}
                                   </td>
-                                  <td className="px-2 py-1 text-right">${e.monthlyCredits}</td>
+                                  <td className="px-2 py-1 text-right tabular-nums">
+                                    {formatCost(e.monthlyCredits, settings.currency)}
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
