@@ -15,7 +15,7 @@ import type { ChatMessage, ToolCallResult } from '../moa/streamChat'
 import { anthropicToOpenAI, createAnthropicStreamState, formatAnthropicSse, openAIToAnthropic } from './anthropicAdapter'
 import { getDatabase } from '../db/database'
 import { readAppSettings } from '../config/appSettings'
-import { buildUsageEntries, sumUsage } from '../moa/usage'
+import { buildUsageEntries, sumUsage, applyPlanWritePricing } from '../moa/usage'
 import type { Provider, SubModelOutput } from '../../shared/types'
 import type { MoaResponse } from '../moa/moaEngine'
 import type { MoaRuntimeConfig } from '../moa/moaConfig'
@@ -137,8 +137,10 @@ interface GatewayLogEntry {
 function logGatewayRequest(entry: GatewayLogEntry): void {
   try {
     const entries = buildUsageEntries((entry.models || []).map((m) => ({ ...m, cost: 0 })))
-    const totals = sumUsage(entries)
-    const storedModels = readAppSettings().gateway.recording === 'full' ? entries : []
+    // T2 Plan 写入端后处理：未配订阅费 → 单价链估算；已配 → 保持 0 占位（读取端摊销重算，设计 §3）
+    const billedEntries = applyPlanWritePricing(entries)
+    const totals = sumUsage(billedEntries)
+    const storedModels = readAppSettings().gateway.recording === 'full' ? billedEntries : []
     getDatabase().exec(
       `INSERT INTO request_logs (request_id, timestamp, client_ip, source, moa_mode, sub_count, prompt_tokens, completion_tokens, cost, duration_ms, success, error_detail, models)
        VALUES (?, ?, '127.0.0.1', 'gateway', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1023,7 +1025,7 @@ export function createGatewayServer(): Express {
     // 用量明细（成功子模型 + 聚合器）统一计账
     const moaInputs = usageInputsFromMoa(result)
     const moaEntries = moaInputs.map((m) => ({ ...m, cost: 0 }))
-    const moaTotals = sumUsage(buildUsageEntries(moaEntries))
+    const moaTotals = sumUsage(applyPlanWritePricing(buildUsageEntries(moaEntries)))
 
     // 中止判定：客户端断开（close 且未正常结束）→ abort 已发生；success 恒 false（§4.4.4/§4.7）
     const aborted = controller.signal.aborted
@@ -1124,7 +1126,7 @@ export function createGatewayServer(): Express {
 
     // 用量明细（成功子模型 + 聚合器）统一计账（口径与 chat/completions 相同）
     const moaInputs = usageInputsFromMoa(result)
-    const moaTotals = sumUsage(buildUsageEntries(moaInputs.map((m) => ({ ...m, cost: 0 }))))
+    const moaTotals = sumUsage(applyPlanWritePricing(buildUsageEntries(moaInputs.map((m) => ({ ...m, cost: 0 })))))
     const aborted = controller.signal.aborted
     const ok = result.success && !aborted
 

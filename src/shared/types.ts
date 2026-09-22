@@ -553,6 +553,10 @@ export interface ProbedPricingEntry {
   currency?: 'USD' | 'CNY'
   /** 官方页计费单位描述（如 "per 1M tokens" / "per 1K tokens" / "per request"）；空则按 1M tokens */
   unit?: string
+  /** 绑定的厂商记录 ID（探查源绑定 provider 时写入，设计 §5）：命中时仅对该厂商的调用生效；缺省 = 通用条目（旧数据天然兼容），对所有通道命中 */
+  providerId?: string
+  /** 绑定厂商的计费通道（探查写入时快照，用于 UI 通道徽标）：'usage' = 按量 | 'plan' = Plan */
+  billing?: 'usage' | 'plan'
   /** 来源与时间元数据（UI 展示 + 自动刷新判断） */
   sourceId: string
   sourceUrl: string

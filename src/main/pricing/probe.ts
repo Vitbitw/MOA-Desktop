@@ -721,6 +721,8 @@ function normalizeWindow(w: unknown, currency: 'USD' | 'CNY'): PricingWindow | n
 function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[]): ProbedPricingEntry[] {
   const tz = source.timezone || 'Asia/Shanghai'
   const now = Date.now()
+  // T2 探查分绑（设计 §5）：源绑定了 provider → 条目带 providerId/billing，命中时按通道过滤；未绑 → 通用条目（两字段不写）
+  const boundProvider = source.providerId ? getAllProviders().find((p) => p.id === source.providerId) : undefined
   const entries: ProbedPricingEntry[] = []
   // 同页重复 pattern（LLM 输出抖动）只留首条：外部边界一次去重，避免下游重复行 / 重复 React key
   const seen = new Set<string>()
@@ -756,6 +758,10 @@ function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[]): P
       sourceId: source.id,
       sourceUrl: source.url,
       fetchedAt: now
+    }
+    if (boundProvider) {
+      entry.providerId = boundProvider.id
+      entry.billing = boundProvider.billing
     }
 
     const cacheRead = toFiniteNum(item.cacheRead)

@@ -5,7 +5,7 @@ import { getDatabase } from './db/database'
 import { readAppSettings, updateRawAppSettings } from './config/appSettings'
 import { handleIpc, handleIpcRaw } from './ipc/handle'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, PricingProbeState, PricingProbeResultItem, ProbeProgressEvent, ToastData, GenerateExpertsRequest, ProviderUpdatePatch } from '../shared/types'
+import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, PricingProbeState, PricingProbeResultItem, ProbeProgressEvent, ToastData, GenerateExpertsRequest, ProviderUpdatePatch, Provider } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { applyGatewayServer, stopGatewayServer } from './gateway/server'
 import { initUiBridge } from './uiBridge'
@@ -17,7 +17,7 @@ import { generateExpertTeam } from './moa/expertTeamGenerator'
 import { createThrottledEmitter, STREAM_PUSH_INTERVAL_MS } from './moa/streamThrottle'
 import type { ThrottledEmitter } from './moa/streamThrottle'
 import { generateTitle } from './title/titleGenerator'
-import { buildUsageEntries, sumUsage } from './moa/usage'
+import { buildUsageEntries, sumUsage, computePlanEntryCosts } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
 import { invalidateProxyCache } from './local/fetchProxy'
 import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
@@ -672,8 +672,12 @@ function registerIpcHandlers() {
       ? getDatabase().query<RequestLogRow>('SELECT * FROM request_logs')
       : getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
 
-    // 厂商 ID → 厂商名称（getAllProviders 依赖 DB 已初始化，故在 handler 内调用）
-    const providerNameMap = new Map(getAllProviders().map((p) => [p.id, p.name] as const))
+    // 厂商信息（getAllProviders 依赖 DB 已初始化，故在 handler 内调用）：
+    // name = 现状 key；vendorKey/billing = 「厂商×通道」拆行（设计 §4）；全量列表供 Plan 摊销重算（设计 §3）
+    const allProviders: Provider[] = getAllProviders()
+    const providerNameMap = new Map(
+      allProviders.map((p) => [p.id, { name: p.name, vendorKey: p.vendorKey, billing: p.billing }] as const)
+    )
     const MODE_LABELS: Record<string, string> = {
       aggregate: '聚合',
       compare: '对比',
@@ -691,7 +695,6 @@ function registerIpcHandlers() {
       if (row.success === 1) totals.success += 1
       totals.prompt += row.prompt_tokens || 0
       totals.completion += row.completion_tokens || 0
-      totals.cost += row.cost || 0
 
       // 解析 models 列；null/空/损坏则跳过明细（仅计入 totals）
       let models: Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null = null
@@ -700,6 +703,9 @@ function registerIpcHandlers() {
       } catch {
         models = null
       }
+      // T2 Plan 比值摊销（设计 §3）：有 plan 明细的行 → totals 与明细同用重算值；其余行沿用写入值
+      const planCosts = models && models.length ? computePlanEntryCosts(models, row.timestamp, allProviders) : null
+      totals.cost += planCosts ? planCosts.reduce((s, c) => s + c, 0) : row.cost || 0
       if (!models || models.length === 0) {
         // 无明细行（网关 stats 模式写 models='[]'）：按行级字段补一条分组，保证 rows 合计与 totals 可对账
         const noDetailKey = groupBy === 'mode'
@@ -715,14 +721,20 @@ function registerIpcHandlers() {
         continue
       }
 
-      // 按 groupBy 归组：model→modelId；provider→真实厂商名（providerId 缺失时兜底 modelId）；mode→中文模式标签
-      for (const m of models) {
+      // 按 groupBy 归组：model→modelId；provider→厂商×通道拆行（有分组）/厂商名（无分组，现状兼容）；mode→中文模式标签
+      for (let i = 0; i < models.length; i++) {
+        const m = models[i]
         let key: string
         if (groupBy === 'model') {
           key = m.modelId
         } else if (groupBy === 'provider') {
           // providerId 缺失或厂商已删除 → 兜底显示模型名，避免 UUID
-          key = m.providerId ? (providerNameMap.get(m.providerId) ?? m.modelId) : m.modelId
+          const info = m.providerId ? providerNameMap.get(m.providerId) : undefined
+          key = info
+            ? info.vendorKey
+              ? `${info.vendorKey}·${info.billing === 'plan' ? 'Plan' : '按量'}`
+              : info.name
+            : m.modelId
         } else {
           // 标题生成日志（source='title'）单独归组，避免污染「直通」模式
           key = row.source === 'title' ? '标题' : (MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct')
@@ -732,7 +744,8 @@ function registerIpcHandlers() {
         agg.success += row.success === 1 ? 1 : 0
         agg.prompt += m.prompt || 0
         agg.completion += m.completion || 0
-        agg.cost += m.cost || 0
+        // T2：plan 明细行用摊销重算值，其余沿用写入值（与 totals 同源）
+        agg.cost += planCosts ? planCosts[i] : m.cost || 0
         rowMap.set(key, agg)
       }
     }
@@ -749,13 +762,22 @@ function registerIpcHandlers() {
     // today 范围：当天 0 点起
     const since = new Date().setHours(0, 0, 0, 0)
     const rows = getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
+    const allProviders: Provider[] = getAllProviders()
     let prompt = 0
     let completion = 0
     let cost = 0
     for (const row of rows) {
       prompt += row.prompt_tokens || 0
       completion += row.completion_tokens || 0
-      cost += row.cost || 0
+      // T2 Plan 比值摊销（与 USAGE_GET_SUMMARY 同源）：有 plan 明细 → 重算值；无明细/损坏 → 沿用写入值
+      let models: Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null = null
+      try {
+        models = row.models ? JSON.parse(row.models) : null
+      } catch {
+        models = null
+      }
+      const planCosts = models && models.length ? computePlanEntryCosts(models, row.timestamp, allProviders) : null
+      cost += planCosts ? planCosts.reduce((s, c) => s + c, 0) : row.cost || 0
     }
     return { prompt, completion, cost, running: moaRunning } satisfies UsageToday
   })

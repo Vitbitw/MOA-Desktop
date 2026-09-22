@@ -5,8 +5,10 @@
 //      ④ **MF-1 回归**：第 2 个 key 写入失败 → 异常上抛且已写项回滚（组内无新旧混存）
 //      ⑤ backfill：默认态标记 / 用户改过不覆盖 / 幂等
 //      ⑥ seed 预设：清单命中 → plan / 组名
+//      ⑦ Plan 比值摊销（T2）：跨 anchor 分桶 / 桶内 Σ=消费 / 未配订阅费单价链回退 / manual 优先 / CNY 折算 / 零 token 不除零
+//      ⑧ 探查条目按通道过滤（T2 §5）：绑定条目仅同厂商命中、无标记条目全通道命中
 // 用法：node test-e2e/vendor-billing.cjs
-// 加载方式：esbuild transform 各 TS 模块 → CJS，new Function 注入 stub require（db / key-store / fetchProxy / uiBridge）
+// 加载方式：esbuild transform 各 TS 模块 → CJS，new Function 注入 stub require（db / key-store / fetchProxy / uiBridge / appSettings）
 // 返回码：全部通过 0，有失败 1
 const fs = require('fs')
 const path = require('path')
@@ -34,6 +36,10 @@ function throws(fn, includes, label) {
     const msg = err instanceof Error ? err.message : String(err)
     ok(includes === undefined || msg.includes(includes), label, { msg })
   }
+}
+/** 浮点等值断言（默认容差 1e-6）：摊销金额按 6 位小数舍入，需带容差比较 */
+function near(actual, expected, label, tol = 1e-6) {
+  ok(typeof actual === 'number' && Math.abs(actual - expected) <= tol, label, { actual, expected, tol })
 }
 
 // ── stub DB：内存 providers 行数组，按 SQL 文本分发 ──
@@ -148,8 +154,9 @@ function makeFakeKeyStore() {
   }
 }
 
-// ── 模块加载（stub db / key-store / fetchProxy / uiBridge；defaults / ipc-channels 真实 transform） ──
-function makeLoader(dbModule, keyStoreModule) {
+// ── 模块加载（stub db / key-store / fetchProxy / uiBridge / extraStubs；defaults / ipc-channels 真实 transform） ──
+// extraStubs：{ [require 子串]: module }，在相对路径解析之前命中（如 usage.ts 依赖的 config/appSettings）
+function makeLoader(dbModule, keyStoreModule, extraStubs = {}) {
   const cache = new Map()
   function loadTs(abs) {
     if (cache.has(abs)) return cache.get(abs)
@@ -164,6 +171,9 @@ function makeLoader(dbModule, keyStoreModule) {
       if (s.includes('store/key-store')) return keyStoreModule
       if (s.includes('local/fetchProxy')) return { fetchProxy: async () => { throw new Error('fetchProxy not expected in this test') } }
       if (s.includes('uiBridge')) return { broadcastToUi: () => {} }
+      for (const needle of Object.keys(extraStubs)) {
+        if (s.includes(needle)) return extraStubs[needle]
+      }
       if (s.startsWith('.') || s.includes('shared')) {
         let p = path.resolve(path.dirname(abs), s)
         if (!fs.existsSync(p) && fs.existsSync(p + '.ts')) p += '.ts'
@@ -275,6 +285,135 @@ function main() {
     eq(oai && [oai.billing, oai.vendor_key], ['usage', ''], 'OpenAI → 默认态')
     const planCount = emptyDb.rows.filter((r) => r.billing === 'plan').length
     eq(planCount, defaults.PLAN_BILLING_NAMES.length, 'seed 后 plan 记录数 = 清单数')
+  }
+
+  // ══ T2：Plan 比值摊销 + 通道单价分支 + 探查条目按通道过滤（usage.ts） ══
+  const DAY = 86400000
+  const ANCHOR = Date.UTC(2026, 0, 1) // anchorTs：2026-01-01T00:00:00Z
+  const T0 = Date.UTC(2026, 5, 15) // 2026-06-15：自然月分桶用例
+  const settings = { pricing: {}, probedPricing: [] } // stub appSettings（usage.ts 只读 pricing / probedPricing）
+  const udb = makeFakeDb()
+  patchQueryParams(udb)
+  const uload = makeLoader({ getDatabase: () => udb }, makeFakeKeyStore().module, {
+    'config/appSettings': { readAppSettings: () => settings }
+  })
+  const upm = uload(pmPath)
+  const usage = uload(path.resolve(__dirname, '../src/main/moa/usage.ts'))
+  const planId = upm.addProvider('阿里云 Token Plan', 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', '***', {
+    vendorKey: '阿里云', billing: 'plan', plan: { amount: 10, currency: 'USD', anchorTs: ANCHOR }
+  }).id
+  const paygoId = upm.addProvider('阿里云百炼 (Qwen)', 'https://dashscope.aliyuncs.com/v1', '***', {
+    vendorKey: '阿里云', billing: 'usage'
+  }).id
+  const noAmtId = upm.addProvider('未配订阅费 Plan', 'https://plan.example.com/v1', '***', { billing: 'plan' }).id
+  const cnyId = upm.addProvider('CNY 摊销 Plan', 'https://cny.example.com/v1', '***', {
+    billing: 'plan', plan: { amount: 72, currency: 'CNY' } // 无 anchorTs → 当月 1 号分桶
+  }).id
+  const provs = upm.getAllProviders()
+
+  console.log('[7] Plan 摊销分桶：跨 anchor 两桶独立 + 桶内 Σ = amountUSD')
+  {
+    const rows = [
+      { modelId: 'qwen-turbo', providerId: planId, prompt: 100, completion: 0, timestamp: ANCHOR + DAY, cost: 0 },
+      { modelId: 'qwen-turbo', providerId: planId, prompt: 300, completion: 0, timestamp: ANCHOR + 2 * DAY, cost: 0 },
+      { modelId: 'qwen-turbo', providerId: planId, prompt: 50, completion: 50, timestamp: ANCHOR + 31 * DAY, cost: 0 },
+      { modelId: 'qwen-turbo', providerId: paygoId, prompt: 1000, completion: 0, timestamp: ANCHOR + DAY, cost: 0.42 }
+    ]
+    const costs = usage.computePlanAllocatedCosts(rows, provs)
+    eq(costs.length, 4, '摊销返回与输入等长数组')
+    near(costs[0], 2.5, '桶0：amountUSD × 100/400 = 2.5')
+    near(costs[1], 7.5, '桶0：amountUSD × 300/400 = 7.5')
+    near(costs[0] + costs[1], 10, '桶0 Σcost = amountUSD（10 USD）')
+    near(costs[2], 10, '跨 anchor 31 天 → 独立成桶，桶1 Σ = amountUSD（不受桶0 影响）')
+    eq(costs[3], 0.42, 'usage 通道行 cost 原样保留（不参与摊销）')
+  }
+
+  console.log('[8] plan_amount 缺失 → 单价链回退（写入端 cost 非 0 占位）')
+  {
+    const unitRows = [{ modelId: 'gpt-4o-mini', providerId: noAmtId, prompt: 1_000_000, completion: 0, timestamp: T0, cost: 0 }]
+    near(usage.computePlanAllocatedCosts(unitRows, provs, 'read')[0], 0.15, '读时未配订阅费 → 单价链（gpt-4o-mini 0.15 USD/1M）')
+    near(usage.computePlanAllocatedCosts(unitRows, provs, 'write')[0], 0.15, '写入端（gateway 后处理）→ 单价链回退，cost ≠ 0 占位')
+
+    const noAmtEntries = usage.buildUsageEntries(
+      [{ modelId: 'gpt-4o-mini', providerId: noAmtId, role: 'sub', prompt: 1_000_000, completion: 0 }],
+      T0
+    )
+    eq(noAmtEntries[0].cost, 0, 'buildUsageEntries：plan 无 manual → cost=0 占位（写入不定值）')
+    near(usage.applyPlanWritePricing(noAmtEntries, undefined, T0)[0].cost, 0.15, 'applyPlanWritePricing 把占位补成单价链估算')
+
+    const withAmtEntries = usage.buildUsageEntries(
+      [{ modelId: 'qwen-turbo', providerId: planId, role: 'sub', prompt: 100, completion: 0 }],
+      T0
+    )
+    eq(withAmtEntries[0].cost, 0, 'plan 已配订阅费 → 写入 0 占位（读时摊销重算）')
+    near(usage.applyPlanWritePricing(withAmtEntries, undefined, T0)[0].cost, 0, '写入端保持占位：单请求作用域不做摊销')
+  }
+
+  console.log('[9] manual 定价优先于占位 / 摊销')
+  {
+    settings.pricing['gpt-4o-mini'] = { input: 3, output: 6 }
+    const manualEntries = usage.buildUsageEntries(
+      [{ modelId: 'gpt-4o-mini', providerId: planId, role: 'sub', prompt: 1_000_000, completion: 0 }],
+      T0
+    )
+    near(manualEntries[0].cost, 3, 'plan + manual 命中 → manual 价（最高优先级）')
+    const manualRows = [{ modelId: 'gpt-4o-mini', providerId: planId, prompt: 1_000_000, completion: 0, timestamp: T0, cost: 3 }]
+    near(usage.computePlanAllocatedCosts(manualRows, provs, 'read')[0], 3, '读时 manual 行保留 manual 值（不被摊销覆盖为 10）')
+    delete settings.pricing['gpt-4o-mini']
+    eq(settings.pricing['gpt-4o-mini'], undefined, 'manual 配置清理后回退摊销链')
+  }
+
+  console.log('[10] CNY → USD 7.2 折算 + anchorTs 缺省按自然月分桶')
+  {
+    const cnyRows = [
+      { modelId: 'm', providerId: cnyId, prompt: 700, completion: 0, timestamp: T0, cost: 0 }, // 2026-06
+      { modelId: 'm', providerId: cnyId, prompt: 300, completion: 0, timestamp: T0 + DAY, cost: 0 }, // 2026-06
+      { modelId: 'm', providerId: cnyId, prompt: 100, completion: 0, timestamp: T0 + 20 * DAY, cost: 0 } // 2026-07
+    ]
+    const cnyCosts = usage.computePlanAllocatedCosts(cnyRows, provs)
+    near(usage.CNY_TO_USD_RATE, 7.2, '折算率 = 7.2（与 probe.ts 的 CNY_TO_USD_RATE 同值）')
+    near(cnyCosts[0], 7, '72 CNY ÷ 7.2 = 10 USD × 700/1000 = 7')
+    near(cnyCosts[0] + cnyCosts[1], 10, '6 月桶 Σcost = 10 USD（CNY 折算后）')
+    near(cnyCosts[2], 10, 'anchorTs 缺省 → 当月 1 号分桶：7 月独立成桶')
+  }
+
+  console.log('[11] Σtokens = 0 → cost=0，不除零不抛错')
+  {
+    let zeroCosts = null
+    let zeroThrew = false
+    try {
+      zeroCosts = usage.computePlanAllocatedCosts(
+        [
+          { modelId: 'm', providerId: planId, prompt: 0, completion: 0, timestamp: ANCHOR + DAY, cost: 0 },
+          { modelId: 'm', providerId: planId, prompt: 0, completion: 0, timestamp: ANCHOR + 2 * DAY, cost: 0 }
+        ],
+        provs
+      )
+    } catch (err) {
+      zeroThrew = true
+      console.log('    unexpectedly threw: ' + err)
+    }
+    ok(!zeroThrew, '零 token 桶不抛错')
+    eq(zeroCosts, [0, 0], 'Σtokens=0 → 桶内全 0')
+  }
+
+  console.log('[12] 探查条目按通道过滤（设计 §5）')
+  {
+    settings.probedPricing = [
+      { pattern: 'zzz-probe', input: 1, output: 1, providerId: planId, sourceId: 's1', sourceUrl: 'https://a.example.com', fetchedAt: 1 },
+      { pattern: 'zzz-probe', input: 2, output: 2, providerId: paygoId, sourceId: 's2', sourceUrl: 'https://b.example.com', fetchedAt: 2 },
+      { pattern: 'zzz-legacy', input: 3, output: 3, sourceId: 's3', sourceUrl: 'https://c.example.com', fetchedAt: 1 }
+    ]
+    near(usage.computeCost('zzz-probe-x', 1_000_000, 0, T0, planId), 1, '绑定 plan 记录的条目仅对该厂商命中')
+    near(usage.computeCost('zzz-probe-x', 1_000_000, 0, T0, paygoId), 2, '绑定 usage 记录的条目仅对该厂商命中')
+    eq(usage.computeCost('zzz-probe-x', 1_000_000, 0, T0, 'other-provider'), 0, '无匹配通道 → 探查价不命中（回退内置价无此前缀 = 0）')
+    near(usage.computeCost('zzz-legacy-x', 1_000_000, 0, T0, planId), 3, '无标记条目（源未绑 provider）对所有通道命中')
+    const viaBuild = usage.buildUsageEntries(
+      [{ modelId: 'zzz-probe-x', providerId: paygoId, role: 'sub', prompt: 1_000_000, completion: 0 }],
+      T0
+    )
+    near(viaBuild[0].cost, 2, 'buildUsageEntries 透传 providerId → usage 通道命中对应探查价')
+    settings.probedPricing = []
   }
 
   console.log('')
