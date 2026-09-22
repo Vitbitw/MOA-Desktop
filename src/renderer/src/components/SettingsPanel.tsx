@@ -965,8 +965,12 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
               className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               placeholder="sk-...（本地回环地址可留空）"
             />
-            {editing && resolvedVendorKey !== '' && (
-              <p className="text-[10px] text-muted-foreground mt-1">同分组厂商将同步此密钥</p>
+            {editingProvider && resolvedVendorKey !== '' && (
+              <p className="text-[10px] text-muted-foreground mt-1">
+                {apiKey !== editingProvider.apiKey
+                  ? '同分组厂商将同步此密钥'
+                  : '加入分组不会同步已有密钥；如需统一请重新填写密钥'}
+              </p>
             )}
           </div>
 
