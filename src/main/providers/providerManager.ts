@@ -3,6 +3,7 @@ import { getDatabase } from '../db/database'
 import { getProviderKey, saveProviderKey, removeProviderKey } from '../store/key-store'
 import type { Provider, ModelInfo, ProviderUpdatePatch } from '../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, PLAN_BILLING_NAMES, VENDOR_GROUP } from '../../shared/defaults'
+import { hasProviderAccess, isLocalBaseUrl } from '../../shared/providerAccess'
 import { fetchProxy } from '../local/fetchProxy'
 import { broadcastToUi } from '../uiBridge'
 import { IPC_EVENT } from '../../shared/ipc-channels'
@@ -202,7 +203,7 @@ export async function fetchAndCacheModels(
   const providers = getAllProviders()
   const provider = providers.find((p) => p.id === providerId)
   if (!provider) throw new Error(`Provider ${providerId} not found`)
-  if (!provider.apiKey) return []
+  if (!hasProviderAccess(provider)) return []
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -251,6 +252,9 @@ export function seedBuiltInProviders(): void {
   let added = 0
   for (const tpl of BUILT_IN_PROVIDER_TEMPLATES) {
     if (existingNames.has(tpl.name)) continue
+    // 本地回环模板不预置（本地厂商由用户「添加厂商」时插入）：免 Key 后预置行会立即可见，
+    // 且删除后会被本逻辑复活——跳过 seed 让删除持久生效
+    if (isLocalBaseUrl(tpl.baseUrl)) continue
     // T1：新建条目直接写入预设分组 / 计费通道（migrate-only 清单命中才预设，未命中保持默认态）
     getDatabase().exec(
       'INSERT INTO providers (id, name, base_url, model_list, enabled, created_at, vendor_key, billing) VALUES (?, ?, ?, ?, 1, ?, ?, ?)',
@@ -264,7 +268,7 @@ export function seedBuiltInProviders(): void {
   }
 
   if (existing.length === 0) {
-    console.log(`[Providers] Seeded ${BUILT_IN_PROVIDER_TEMPLATES.length} built-in providers`)
+    console.log(`[Providers] Seeded ${added} built-in providers`)
   } else if (added > 0) {
     console.log(`[Providers] Added ${added} new built-in provider(s)`)
   }

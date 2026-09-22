@@ -9,6 +9,7 @@ import { getMoaConfig } from './moaConfig'
 import { streamChat } from './streamChat'
 import { extractJsonArray, extractJsonObject, isRetriableLLMError } from '../pricing/probe'
 import { DEFAULT_SUB_MODEL_TIMEOUT } from '../../shared/defaults'
+import { hasProviderAccess } from '../../shared/providerAccess'
 import type { ClarifyTurn, ExpertGenResult, ExpertScale, GenerateExpertsRequest, GeneratedExpert } from '../../shared/types'
 
 /** 追问轮数上限：达上限后主进程本地强制生成（不再追问） */
@@ -81,7 +82,7 @@ export function resolveGeneratorModel(): GeneratorModel | null {
   const agg = config.aggregator
   if (agg?.primaryProviderId && agg?.primaryModelId) {
     const p = providers.find((prov) => prov.id === agg.primaryProviderId)
-    if (p?.enabled && p.apiKey) {
+    if (p?.enabled && hasProviderAccess(p)) {
       return { providerId: p.id, baseUrl: p.baseUrl, apiKey: p.apiKey, modelId: agg.primaryModelId }
     }
   }
@@ -90,14 +91,14 @@ export function resolveGeneratorModel(): GeneratorModel | null {
   const firstSub = config.subModels[0]
   if (firstSub) {
     const p = providers.find((prov) => prov.id === firstSub.providerId)
-    if (p?.enabled && p.apiKey) {
+    if (p?.enabled && hasProviderAccess(p)) {
       return { providerId: p.id, baseUrl: p.baseUrl, apiKey: p.apiKey, modelId: firstSub.modelId }
     }
   }
 
-  // ③ 首个已启用且配 Key 的厂商的首个模型
+  // ③ 首个可用（有 Key 或本地地址）厂商的首个模型
   for (const p of providers) {
-    if (!p.enabled || !p.apiKey) continue
+    if (!p.enabled || !hasProviderAccess(p)) continue
     const m = p.models?.[0]
     if (m?.id) return { providerId: p.id, baseUrl: p.baseUrl, apiKey: p.apiKey, modelId: m.id }
   }

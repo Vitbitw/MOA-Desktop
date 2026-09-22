@@ -8,6 +8,7 @@ import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, Chev
 import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { splitModelKey } from '../../../shared/modelKey'
+import { hasProviderAccess, isLocalBaseUrl } from '../../../shared/providerAccess'
 import ExpertTeamSection from './ExpertTeamSection'
 import { switchSeatModel } from '../utils/expertTeam'
 
@@ -676,8 +677,8 @@ function ProvidersSection() {
     await refresh()
   }
 
-  // 仅显示已配置 API Key 的厂商，未配置的（如内置模板占位）不展示
-  const keyedProviders = providers.filter((p) => p.apiKey)
+  // 仅显示可用的厂商（已配置 Key 或本地回环地址）；无凭据的内置模板占位不展示
+  const availableProviders = providers.filter((p) => hasProviderAccess(p))
 
   return (
     <div className="max-w-xl">
@@ -691,21 +692,21 @@ function ProvidersSection() {
         </button>
       </div>
 
-      {keyedProviders.length === 0 && (
+      {availableProviders.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8 border border-dashed border-border rounded-md">
-          暂无已配置 API Key 的厂商，点击上方按钮添加
+          暂无可用的厂商（本地地址免 Key），点击上方按钮添加
         </p>
       )}
 
       <div className="space-y-2">
-        {keyedProviders.map((p) => (
+        {availableProviders.map((p) => (
           <div key={p.id} className="rounded-lg border border-border p-3 text-sm space-y-1.5">
             <div className="flex items-center justify-between">
               <span className="font-medium text-foreground">{p.name}</span>
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => fetchModels(p.id)}
-                  disabled={loading === p.id || !p.apiKey}
+                  disabled={loading === p.id}
                   className="p-1.5 text-muted-foreground hover:text-foreground disabled:opacity-30 rounded-md hover:bg-accent/50 transition-colors"
                   title="获取模型列表"
                 >
@@ -723,13 +724,13 @@ function ProvidersSection() {
             <div className="text-muted-foreground truncate text-xs">{p.baseUrl}</div>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span className={p.apiKey ? 'text-green-500' : 'text-red-400'}>
-                  {p.apiKey ? '●' : '○'}
+                <span className={hasProviderAccess(p) ? 'text-green-500' : 'text-red-400'}>
+                  {hasProviderAccess(p) ? '●' : '○'}
                 </span>
                 <span className="font-mono truncate max-w-[140px]">
                   {p.apiKey
                     ? showKey[p.id] ? p.apiKey : `${p.apiKey.slice(0, 4)}...${p.apiKey.slice(-4)}`
-                    : '未配置 Key'}
+                    : '本地 · 免 Key'}
                 </span>
                 {p.apiKey && (
                   <button
@@ -764,8 +765,8 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
   const [error, setError] = useState<string | null>(null)
 
   const handleSave = async () => {
-    if (!name.trim() || !apiKey.trim()) {
-      setError('名称和 API Key 为必填')
+    if (!name.trim()) {
+      setError('名称为必填')
       return
     }
     setSaving(true)
@@ -776,6 +777,12 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
       const finalBaseUrl = baseUrl.trim() || selectedTemplate?.baseUrl || ''
       if (!finalBaseUrl) {
         setError('请填写 API 地址（或从上方快速选择内置厂商）')
+        setSaving(false)
+        return
+      }
+      // 本地回环地址免 Key（本地推理服务不校验 Authorization）；云端厂商必须填 Key
+      if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl)) {
+        setError('云端厂商需填写 API Key（本地地址可留空）')
         setSaving(false)
         return
       }
@@ -840,13 +847,13 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground block mb-1">API Key *</label>
+            <label className="text-xs text-muted-foreground block mb-1">API Key（本地地址可留空）</label>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              placeholder="sk-..."
+              placeholder="sk-...（本地回环地址可留空）"
             />
           </div>
         </div>
@@ -880,9 +887,9 @@ function TitleSettingsSection() {
   const providers = useConfigStore((s) => s.providers)
   const titleCfg = settings.title
 
-  // Only show models from providers with an API key — title generation requires a working connection
+  // Only show models from providers with access (API key or local endpoint) — title generation requires a working connection
   const allModelOptions = providers
-    .filter((p) => p.apiKey)
+    .filter((p) => hasProviderAccess(p))
     .flatMap((p) =>
     (p.models || []).map((m) => ({
       label: `${p.name} · ${m.id}`,
@@ -899,7 +906,7 @@ function TitleSettingsSection() {
   return (
     <div className="space-y-5 max-w-xl">
       <p className="text-sm text-muted-foreground">
-        配置 AI 自动为对话生成标题。需要选择一个已配置 API Key 的轻量模型来执行标题生成。
+        配置 AI 自动为对话生成标题。需要选择一个可用的轻量模型（已配置 API Key 或本地地址）来执行标题生成。
       </p>
 
       <SettingRow label="标题模型" hint="用于生成标题的轻量模型（建议选择便宜快速的模型）">
@@ -1378,9 +1385,9 @@ function ProbeSection() {
   // 探查运行状态与进度由全局订阅（probeStore.initProbeStateSubscription，App 挂载时建立）
   // 统一维护：后台自动刷新期间打开本页同样能看到「正在刷新」与进度
 
-  // 探查模型选项（仅列有 API Key 的 provider 的模型，探查需要真实调用）
+  // 探查模型选项（仅列可用厂商的模型：有 Key 或本地地址，探查需要真实调用）
   const modelOptions = providers
-    .filter((p) => p.apiKey)
+    .filter((p) => hasProviderAccess(p))
     .flatMap((p) =>
       (p.models || []).map((m) => ({
         label: `${p.name} · ${m.id}`,

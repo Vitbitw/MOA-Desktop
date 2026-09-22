@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { getAllProviders } from '../providers/providerManager'
+import { hasProviderAccess } from '../../shared/providerAccess'
 import { getMoaConfig } from '../moa/moaConfig'
 import { executeMoAWithEvents, resolveSubModels } from '../moa/moaEngine'
 import { createThrottledEmitter, STREAM_PUSH_INTERVAL_MS } from '../moa/streamThrottle'
@@ -181,9 +182,9 @@ function withConcurrency(handler: (req: Request, res: Response) => Promise<void>
   }
 }
 
-/** 可参与直连路由的 provider（enabled 且有 API key）。 */
+/** 可参与直连路由的 provider（enabled 且可用：有 API key 或本地回环地址）。 */
 function usableProviders(): Provider[] {
-  return getAllProviders().filter((p) => p.enabled && p.apiKey)
+  return getAllProviders().filter((p) => p.enabled && hasProviderAccess(p))
 }
 
 /** Find first enabled provider for direct passthrough. */

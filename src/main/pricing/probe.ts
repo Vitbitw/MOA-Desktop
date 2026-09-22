@@ -14,6 +14,7 @@ import { getUsageSnapshot } from '../monitoring/snapshotStore'
 import { CC_PLAN_PAGE } from '../monitoring/commandCode'
 import { defaultPricingProbeUrlByName } from '../../shared/defaults'
 import { splitModelKey } from '../../shared/modelKey'
+import { hasProviderAccess } from '../../shared/providerAccess'
 import type { ProbedPricingEntry, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
 
 const HTTP_TIMEOUT_MS = 20_000
@@ -47,7 +48,7 @@ export interface ProbeModel {
 
 // ─── 探查模型解析 ───
 
-/** 解析探查用模型：显式配置 > 聚合模型 > 首个已启用且有 apiKey 的 provider */
+/** 解析探查用模型：显式配置 > 聚合模型 > 首个可用（有 apiKey 或本地地址）的 provider */
 export function resolveProbeModel(): ProbeModel | null {
   const probeModelId = readAppSettings().pricingProbe.probeModelId
   const providers = getAllProviders()
@@ -56,7 +57,7 @@ export function resolveProbeModel(): ProbeModel | null {
     const { providerId: pid, modelId: mid } = splitModelKey(probeModelId)
     if (pid && mid) {
       const p = providers.find((prov) => prov.id === pid)
-      if (p?.enabled && p.apiKey) {
+      if (p?.enabled && hasProviderAccess(p)) {
         return { providerId: p.id, baseUrl: p.baseUrl, apiKey: p.apiKey, modelId: mid }
       }
     }
@@ -65,13 +66,13 @@ export function resolveProbeModel(): ProbeModel | null {
   const agg = getMoaConfig().aggregator
   if (agg?.primaryProviderId && agg?.primaryModelId) {
     const p = providers.find((prov) => prov.id === agg.primaryProviderId)
-    if (p?.enabled && p.apiKey) {
+    if (p?.enabled && hasProviderAccess(p)) {
       return { providerId: p.id, baseUrl: p.baseUrl, apiKey: p.apiKey, modelId: agg.primaryModelId }
     }
   }
 
   for (const p of providers) {
-    if (!p.enabled || !p.apiKey) continue
+    if (!p.enabled || !hasProviderAccess(p)) continue
     const m = p.models?.[0]
     if (m?.id) return { providerId: p.id, baseUrl: p.baseUrl, apiKey: p.apiKey, modelId: m.id }
   }
