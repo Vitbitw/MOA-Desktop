@@ -17,7 +17,7 @@ import { generateExpertTeam } from './moa/expertTeamGenerator'
 import { createThrottledEmitter, STREAM_PUSH_INTERVAL_MS } from './moa/streamThrottle'
 import type { ThrottledEmitter } from './moa/streamThrottle'
 import { generateTitle } from './title/titleGenerator'
-import { buildUsageEntries, sumUsage, computePlanEntryCosts } from './moa/usage'
+import { buildUsageEntries, sumUsage, computeRangePlanCosts } from './moa/usage'
 import { createUsageWindow, destroyUsageWindow, setOpenUsageHandler, syncUsageWindow } from './usage/usageWindow'
 import { invalidateProxyCache } from './local/fetchProxy'
 import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
@@ -92,6 +92,17 @@ interface RequestLogRow {
   success: number
   error_detail: string | null
   models: string | null
+}
+
+/** 解析 request_logs.models 明细列：null / 空 / 损坏 / 非数组 → null（调用方按「无明细」处理，仅计入 totals） */
+function parseRequestLogModels(raw: string | null): Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -690,21 +701,26 @@ function registerIpcHandlers() {
     // 分组明细：Map<key, UsageRow>
     const rowMap = new Map<string, UsageRow>()
 
-    for (const row of rows) {
+    // 解析 models 列（一次）；null/空/损坏 → 无明细，仅计入 totals
+    const parsedModels = rows.map((r) => parseRequestLogModels(r.models))
+
+    // T2.1（评审 MF-1）Plan 比值摊销：摊销分母 = **本次查询范围**的行（设计 §3③）——
+    // 先把范围内全部 plan 明细跨行汇聚重算一次，再按行回填；totals 与分组明细同用这一份结果
+    const planCostsByRow = computeRangePlanCosts(
+      rows.map((r, i) => ({ timestamp: r.timestamp, models: parsedModels[i] })),
+      allProviders
+    )
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      const models = parsedModels[i]
       totals.requests += 1
       if (row.success === 1) totals.success += 1
       totals.prompt += row.prompt_tokens || 0
       totals.completion += row.completion_tokens || 0
 
-      // 解析 models 列；null/空/损坏则跳过明细（仅计入 totals）
-      let models: Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null = null
-      try {
-        models = row.models ? JSON.parse(row.models) : null
-      } catch {
-        models = null
-      }
       // T2 Plan 比值摊销（设计 §3）：有 plan 明细的行 → totals 与明细同用重算值；其余行沿用写入值
-      const planCosts = models && models.length ? computePlanEntryCosts(models, row.timestamp, allProviders) : null
+      const planCosts = planCostsByRow[i]
       totals.cost += planCosts ? planCosts.reduce((s, c) => s + c, 0) : row.cost || 0
       if (!models || models.length === 0) {
         // 无明细行（网关 stats 模式写 models='[]'）：按行级字段补一条分组，保证 rows 合计与 totals 可对账
@@ -763,20 +779,19 @@ function registerIpcHandlers() {
     const since = new Date().setHours(0, 0, 0, 0)
     const rows = getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
     const allProviders: Provider[] = getAllProviders()
+    // T2.1（评审 MF-1）：与 USAGE_GET_SUMMARY 同源——当日范围内跨行汇聚重算一次（分母 = 今日范围行），再按行回填累加
+    const planCostsByRow = computeRangePlanCosts(
+      rows.map((r) => ({ timestamp: r.timestamp, models: parseRequestLogModels(r.models) })),
+      allProviders
+    )
     let prompt = 0
     let completion = 0
     let cost = 0
-    for (const row of rows) {
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
       prompt += row.prompt_tokens || 0
       completion += row.completion_tokens || 0
-      // T2 Plan 比值摊销（与 USAGE_GET_SUMMARY 同源）：有 plan 明细 → 重算值；无明细/损坏 → 沿用写入值
-      let models: Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null = null
-      try {
-        models = row.models ? JSON.parse(row.models) : null
-      } catch {
-        models = null
-      }
-      const planCosts = models && models.length ? computePlanEntryCosts(models, row.timestamp, allProviders) : null
+      const planCosts = planCostsByRow[i]
       cost += planCosts ? planCosts.reduce((s, c) => s + c, 0) : row.cost || 0
     }
     return { prompt, completion, cost, running: moaRunning } satisfies UsageToday

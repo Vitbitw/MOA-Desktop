@@ -303,30 +303,64 @@ export function computePlanAllocatedCosts(
   return out
 }
 
+/** 查询范围汇聚重算的输入行：timestamp = 日志行写入时间戳（分桶依据）；models = 该行已解析的明细列 */
+export interface PlanCostRangeRow {
+  timestamp: number
+  models: Array<{ modelId: string; providerId?: string; prompt?: number; completion?: number; cost?: number }> | null
+}
+
 /**
- * 读取端便捷入口：给定一行的 models 明细，返回摊销重算后的 cost 数组（与明细等长）。
- * 明细内无 plan 通道条目（usage 行 / 厂商已删 / 无 providerId）→ 返回 null，调用方沿用写入值。
+ * 读取端入口（T2.1 评审 MF-1 修复，设计 §3③）：**查询范围汇聚重算 + 按行回填**。
+ *
+ * 旧的单行入口把分母（桶内 Σtokens map）局部在「单条日志行的 models」里，每行各自吃掉整期 amountUSD
+ * → Σ = 行数 × 期内消费（3 行实测 3.00x）。这里把 rows 内**所有行**的 plan 明细摊平成
+ * 一次 `computePlanAllocatedCosts` 调用（按 provider × 桶跨行聚合，分母 = 本次查询范围的行），
+ * 再按 (行, 明细下标) 回填——totals、分组明细、TODAY 全用同一份结果。
+ *
+ * 口径：range='all' 时桶内 Σcost = 期内消费严格成立；today/week/month 窗口 range 为窗口近似
+ * （分母不含范围外历史行，设计 §3③ 已声明）。
+ *
+ * 返回与 rows 等长的数组：
+ * - 该行明细无 plan 条目（usage 行 / providerId 缺失 / 厂商已删 / 无明细或损坏）→ null，
+ *   调用方沿用行级写入值 `row.cost`（与旧行为一致，manual 命中行同样由 read 分支保留 manual 值）；
+ * - 该行含 plan 条目 → 该行各明细的重算 cost 数组（与明细等长）。
  */
-export function computePlanEntryCosts(
-  models: Array<{ modelId: string; providerId?: string; prompt?: number; completion?: number; cost?: number }>,
-  timestamp: number,
+export function computeRangePlanCosts(
+  rows: readonly PlanCostRangeRow[],
   providers: readonly Provider[]
-): number[] | null {
+): Array<number[] | null> {
   const byId = new Map(providers.map((p) => [p.id, p] as const))
-  const hasPlan = models.some((m) => m.providerId !== undefined && byId.get(m.providerId)?.billing === 'plan')
-  if (!hasPlan) return null
-  return computePlanAllocatedCosts(
-    models.map((m) => ({
-      modelId: m.modelId,
-      providerId: m.providerId,
-      prompt: m.prompt || 0,
-      completion: m.completion || 0,
-      timestamp,
-      cost: m.cost || 0
-    })),
-    providers,
-    'read'
-  )
+  const isPlanDetail = (m: { providerId?: string }): boolean =>
+    m.providerId !== undefined && byId.get(m.providerId)?.billing === 'plan'
+
+  const out: Array<number[] | null> = new Array(rows.length).fill(null)
+  const flat: PlanCostRow[] = []
+  // 回填位：指向所属行的明细数组，避免二次查找
+  const slots: Array<{ arr: number[]; col: number }> = []
+
+  for (let ri = 0; ri < rows.length; ri++) {
+    const models = rows[ri].models
+    if (!models || models.length === 0 || !models.some(isPlanDetail)) continue
+    const arr: number[] = new Array(models.length).fill(0)
+    out[ri] = arr
+    for (let mi = 0; mi < models.length; mi++) {
+      const m = models[mi]
+      slots.push({ arr, col: mi })
+      flat.push({
+        modelId: m.modelId,
+        providerId: m.providerId,
+        prompt: m.prompt || 0,
+        completion: m.completion || 0,
+        timestamp: rows[ri].timestamp,
+        cost: m.cost || 0
+      })
+    }
+  }
+  if (flat.length === 0) return out // 范围内无 plan 明细 → 全 null（调用方沿用写入值）
+
+  const costs = computePlanAllocatedCosts(flat, providers, 'read')
+  for (let i = 0; i < slots.length; i++) slots[i].arr[slots[i].col] = costs[i]
+  return out
 }
 
 /**

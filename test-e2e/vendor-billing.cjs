@@ -7,6 +7,8 @@
 //      ⑥ seed 预设：清单命中 → plan / 组名
 //      ⑦ Plan 比值摊销（T2）：跨 anchor 分桶 / 桶内 Σ=消费 / 未配订阅费单价链回退 / manual 优先 / CNY 折算 / 零 token 不除零
 //      ⑧ 探查条目按通道过滤（T2 §5）：绑定条目仅同厂商命中、无标记条目全通道命中
+//      ⑨ 查询范围汇聚重算（T2.1 评审 MF-1）：多行同桶 Σ=amountUSD（非行数×amountUSD）/ 跨 provider 独立桶 / 无 plan 行 null
+//      ⑩ 挂接结构断言（T2.1）：SUMMARY/TODAY 必须调 computeRangePlanCosts（禁用挂接即红，封堵评审变异⑥零覆盖）
 // 用法：node test-e2e/vendor-billing.cjs
 // 加载方式：esbuild transform 各 TS 模块 → CJS，new Function 注入 stub require（db / key-store / fetchProxy / uiBridge / appSettings）
 // 返回码：全部通过 0，有失败 1
@@ -414,6 +416,50 @@ function main() {
     )
     near(viaBuild[0].cost, 2, 'buildUsageEntries 透传 providerId → usage 通道命中对应探查价')
     settings.probedPricing = []
+  }
+
+  console.log('[13] 查询范围汇聚重算 + 按行回填（T2.1 评审 MF-1：分母 = 查询范围，非单条行内）')
+  {
+    const rangeRows = [
+      // planId（10 USD，anchor 分桶）3 行同桶：100/200/700 tokens → 期望 1/2/7，Σ=10（而非行数×10=30）
+      { timestamp: ANCHOR + DAY, models: [{ modelId: 'qwen-turbo', providerId: planId, prompt: 100, completion: 0, cost: 0 }] },
+      { timestamp: ANCHOR + 2 * DAY, models: [{ modelId: 'qwen-turbo', providerId: planId, prompt: 200, completion: 0, cost: 0 }] },
+      { timestamp: ANCHOR + 3 * DAY, models: [{ modelId: 'qwen-turbo', providerId: planId, prompt: 700, completion: 0, cost: 0 }] },
+      // cnyId（72 CNY → 10 USD，自然月桶）2 行：400/600 tokens → 期望 4/6（独立桶，跨 provider 不互串）
+      { timestamp: T0, models: [{ modelId: 'm', providerId: cnyId, prompt: 400, completion: 0, cost: 0 }] },
+      { timestamp: T0 + DAY, models: [{ modelId: 'm', providerId: cnyId, prompt: 600, completion: 0, cost: 0 }] },
+      // usage 通道行：无 plan 明细 → null（调用方沿用行级写入值）
+      { timestamp: ANCHOR + DAY, models: [{ modelId: 'qwen-turbo', providerId: paygoId, prompt: 1000, completion: 0, cost: 0.42 }] },
+      // 无明细行（stats 模式 / 损坏）→ null
+      { timestamp: ANCHOR + DAY, models: null }
+    ]
+    const rc = usage.computeRangePlanCosts(rangeRows, provs)
+    eq(rc.length, 7, '范围汇聚重算返回与输入等长')
+    const planSigma = rc[0][0] + rc[1][0] + rc[2][0]
+    near(planSigma, 10, '多行同桶 Σcost = amountUSD（10 USD），而非行数 × amountUSD')
+    ok(Math.abs(planSigma - 30) > 1, '膨胀反例：Σ ≠ 30（旧单行作用域 = 3 行各吃 10 → 30）', { planSigma })
+    near(rc[0][0], 1, '行0 = 10 × 100/1000 = 1（分母是范围内同桶合计 1000，非本行 100）')
+    near(rc[1][0], 2, '行1 = 10 × 200/1000 = 2')
+    near(rc[2][0], 7, '行2 = 10 × 700/1000 = 7')
+    const cnySigma = rc[3][0] + rc[4][0]
+    near(cnySigma, 10, '跨 provider 互不污染：cnyId 桶 Σcost = 10 USD（独立桶，未与 planId 混算）')
+    near(rc[3][0], 4, 'cnyId 行0 = 10 × 400/1000 = 4')
+    eq(rc[5], null, 'usage 通道行 → null（调用方沿用行级写入值，不被摊销污染）')
+    eq(rc[6], null, '无明细行 → null（调用方沿用 row.cost）')
+    eq(usage.computeRangePlanCosts([], provs), [], '空范围 → 空数组（不抛错）')
+  }
+
+  console.log('[14] 挂接自证：USAGE_GET_SUMMARY / TODAY 必须走范围汇聚重算（封堵变异⑥「禁用挂接仍绿」零覆盖）')
+  {
+    // handler 体无法脱离 electron 加载，故对 index.ts 挂接点做结构断言：
+    // [13] 已证明函数口径正确，本段证明两个 handler 真的调用它——禁用任一挂接即红。
+    const idxSrc = fs.readFileSync(path.resolve(__dirname, '../src/main/index.ts'), 'utf8').split('\r').join('')
+    ok(/import \{[^}]*computeRangePlanCosts[^}]*\} from '\.\/moa\/usage'/.test(idxSrc), 'index.ts 导入 computeRangePlanCosts')
+    const summarySeg = idxSrc.slice(idxSrc.indexOf('IPC.USAGE_GET_SUMMARY'), idxSrc.indexOf('IPC.USAGE_GET_TODAY'))
+    const todaySeg = idxSrc.slice(idxSrc.indexOf('IPC.USAGE_GET_TODAY'), idxSrc.indexOf('IPC.MONITOR_GET_STATUS'))
+    ok(summarySeg.includes('computeRangePlanCosts('), 'USAGE_GET_SUMMARY 挂接范围汇聚重算（禁用该挂接 → 本断言红）')
+    ok(todaySeg.includes('computeRangePlanCosts('), 'USAGE_GET_TODAY 挂接范围汇聚重算（禁用该挂接 → 本断言红）')
+    ok(!summarySeg.includes('computePlanEntryCosts(') && !todaySeg.includes('computePlanEntryCosts('), '两 handler 未回退单行入口 computePlanEntryCosts（防分母作用域回归）')
   }
 
   console.log('')
