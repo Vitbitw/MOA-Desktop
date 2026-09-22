@@ -62,7 +62,10 @@ export function removeProvider(id: string): void {
   getDatabase().exec('DELETE FROM providers WHERE id = ?', [id])
 }
 
-export async function fetchAndCacheModels(providerId: string): Promise<ModelInfo[]> {
+export async function fetchAndCacheModels(
+  providerId: string,
+  opts?: { allowEmpty?: boolean }
+): Promise<ModelInfo[]> {
   const providers = getAllProviders()
   const provider = providers.find((p) => p.id === providerId)
   if (!provider) throw new Error(`Provider ${providerId} not found`)
@@ -80,12 +83,22 @@ export async function fetchAndCacheModels(providerId: string): Promise<ModelInfo
 
     const body = await resp.json()
     // 兼容两种返回：OpenAI 风格 { data: [{ id }] } 与 /api/tags 风格 { models: [{ name }] }
-    const rawList: Array<{ id: string; name?: string }> = Array.isArray(body.data) ? body.data : (Array.isArray(body.models) ? body.models : [])
+    const rawList: Array<{ id: string; name?: string }> | null = Array.isArray(body.data)
+      ? body.data
+      : Array.isArray(body.models)
+        ? body.models
+        : null
+    // 结构异常（两种字段都不是数组）：一律保留本地缓存，不落库不广播
+    if (!rawList) return []
     const models: ModelInfo[] = rawList.map((m: { id: string; name?: string }) => ({
       id: m.id || m.name || '',
       name: m.id || m.name || '',
       providerId
     })).filter((m) => m.id)
+
+    // 合法空列表（中转端点偶发 200 + {"data":[]} 与厂商真无模型无法区分）：
+    // 探查路径只取关键词，保守保留缓存；手动「获取模型列表」allowEmpty=true 如实清空并广播
+    if (models.length === 0 && opts?.allowEmpty !== true) return []
 
     const nextList = JSON.stringify(models)
     const changed = nextList !== JSON.stringify(provider.models ?? [])

@@ -279,7 +279,9 @@ function registerIpcHandlers() {
     removeProvider(id)
   })
 
-  handleIpc(IPC.CONFIG_GET_MODELS, (_e, providerId: string) => fetchAndCacheModels(providerId))
+  // allowEmpty：手动「获取模型列表」是显式要求最新，厂商返回空列表时如实清空并广播；
+  // 定价探查（缺省）只把结果当关键词，空列表保留本地缓存
+  handleIpc(IPC.CONFIG_GET_MODELS, (_e, providerId: string) => fetchAndCacheModels(providerId, { allowEmpty: true }))
 
   // ── Conversations ──
   handleIpc(IPC.DB_GET_CONVERSATIONS, () =>

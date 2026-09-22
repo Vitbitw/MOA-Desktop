@@ -52,9 +52,14 @@ function App() {
   }, [viewMode])
 
   useEffect(() => {
-    window.moaAPI.getProviders().then((res: { success: boolean; data: unknown }) => {
-      if (res.success) setProviders(res.data as any)
-    })
+    window.moaAPI
+      .getProviders()
+      .then((res: { success: boolean; data: unknown }) => {
+        if (res.success) setProviders(res.data as any)
+      })
+      .catch(() => {
+        /* 拉取失败保持现有列表，等下一次广播重试 */
+      })
     window.moaAPI.getConversations().then((res: { success: boolean; data: unknown }) => {
       if (res.success && Array.isArray(res.data)) setConversations((res.data as any[]).map(convFromRow))
     })
@@ -119,9 +124,14 @@ function App() {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null
     const reload = () => {
-      window.moaAPI.getProviders().then((res: { success: boolean; data: unknown }) => {
-        if (res.success) setProviders(res.data as any)
-      })
+      window.moaAPI
+        .getProviders()
+        .then((res: { success: boolean; data: unknown }) => {
+          if (res.success) setProviders(res.data as any)
+        })
+        .catch(() => {
+          /* 拉取失败保持现有列表，等下一次广播重试 */
+        })
     }
     const unsub = window.moaAPI.onProvidersChanged(() => {
       if (timer) clearTimeout(timer)
