@@ -164,8 +164,30 @@ export function updateProviderKey(id: string, apiKey: string): void {
     if (!ids.includes(row.id)) ids.push(row.id)
   }
 
-  // ② 对收集到的 id 逐条写入同一值
-  for (const targetId of ids) saveProviderKey(targetId, apiKey)
+  // ② 预捕获旧值后逐条写入；任一写入失败则回滚已写项并重抛，
+  // 保证组内不出现新旧 key 混存（错误处理矩阵：异常抛出不部分写）。
+  // key-store 为冻结复用模块（saveProviderKey 单次调用无法批量落盘），
+  // 故以「预捕获 + try/catch 回滚 + 重抛」达成同等语义。
+  const backups = ids.map((tid) => ({ tid, old: getProviderKey(tid) }))
+  const written: string[] = []
+  try {
+    for (const { tid } of backups) {
+      saveProviderKey(tid, apiKey)
+      written.push(tid)
+    }
+  } catch (err) {
+    for (const tid of written) {
+      try {
+        const old = backups.find((b) => b.tid === tid)?.old
+        if (old === undefined) removeProviderKey(tid)
+        else saveProviderKey(tid, old)
+      } catch (rollbackErr) {
+        // 回滚本身失败：记录后继续回滚其余项，最终仍抛出原始错误
+        console.error('[Providers] key rollback failed:', tid, rollbackErr)
+      }
+    }
+    throw err
+  }
 }
 
 export function removeProvider(id: string): void {
