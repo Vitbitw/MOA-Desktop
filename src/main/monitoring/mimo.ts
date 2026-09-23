@@ -70,14 +70,11 @@ export function loginToMimo(
 
     const ses = session.fromPartition(LOGIN_PARTITION)
 
-    // 分区已持久化过登录态 → 直接复用
-    const existing = await buildCookieHeader(ses)
-    if (existing) {
-      captured = true
-      saveUsageCredential(credKey(source.id), existing)
-      finish({ success: true })
-      return
-    }
+    // 开窗前清掉分区里的旧登录 Cookie：它可能服务端已失效（会话被吊销）却仍留在 cookie jar 里，
+    // 留着会走两条坏路径：①「分区有 Cookie 就复用、不开窗」短路返回 success，刷新依旧 401，
+    // 点「重新登录」没反应；②只删短路也会被轮询在 1.5s 内命中 → 窗口闪一下即关，走不到重登。
+    // 清空后窗口里必然是登录页，轮询只可能捕获本次新登录的 Cookie（一并覆盖「退出登录后换账号」）。
+    await ses.clearStorageData({ storages: ['cookies'] })
 
     loginWin = new BrowserWindow({
       width: 960,

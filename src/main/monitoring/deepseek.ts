@@ -88,6 +88,12 @@ export function loginToDeepSeek(
 
     const ses = session.fromPartition(LOGIN_PARTITION)
 
+    // 开窗前清掉分区 localStorage 里的旧 userToken：它可能已失效（平台会话过期/被吊销），
+    // 留着轮询会在 1.2s 内把它当登录态捕获 → 窗口闪一下即关并返回 success，刷新依旧 401，
+    // 点「重新登录」走不到真正的登录流程。清掉后只能由本次新登录写入的 token 触发捕获
+    // （若平台靠 httpOnly Cookie 自动恢复会话，SPA 会重新签发 userToken，仍能正常捕获）。
+    await ses.clearStorageData({ storages: ['localstorage'] })
+
     loginWin = new BrowserWindow({
       width: 960,
       height: 720,

@@ -82,12 +82,12 @@ export function loginToCommandCode(
 
     const ses = session.fromPartition(LOGIN_PARTITION)
 
-    // 分区已持久化过登录态（此前登录成功）→ 直接复用，无需再开登录窗
-    if (await tryCaptureToken(ses, source.id)) {
-      captured = true
-      finish({ success: true })
-      return
-    }
+    // 开窗前清掉分区里的旧 session cookie：它可能服务端已失效（会话过期/被吊销）却仍留在 cookie jar 里。
+    // 留着有两重坏处：①「有旧凭证就直接复用、不开窗」会短路返回 success，刷新依旧 401，
+    // 用户点「重新登录」毫无反应；②只删短路也会被轮询在 1.5s 内命中旧 cookie → 窗口闪一下即关，同样走不到重登。
+    // 清空后窗口里必然是登录页，轮询只可能捕获本次新登录下发的凭证（一并覆盖「退出登录后换账号」）。
+    await ses.clearStorageData({ storages: ['cookies'] })
+
     loginWin = new BrowserWindow({
       width: 960,
       height: 720,
