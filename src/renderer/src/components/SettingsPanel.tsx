@@ -291,7 +291,7 @@ function MoASection() {
         : null
 
       // F1：不再写 mode —— 聊天模式仅由输入框按钮控制（不持久化）；
-      // 网关固定聚合模式（模式不可配置），协作架构见下方「MoA 网关」区。
+      // 网关出口模式（缺省聚合 / 可切单模型直通）与协作架构见下方「MoA 网关」区。
       // F5：aggregationPromptVariant / customAggregationPrompt 原值回传，避免静默重置。
       const res: any = await window.moaAPI.setMoaConfig({
         subModels,
@@ -513,13 +513,17 @@ function GatewaySection({ architecture }: {
   architecture: MoaArchitecture
 }) {
   const { settings, updateSetting, notifySaveResult } = useSettingsStore()
+  const providers = useConfigStore((s) => s.providers)
   // 网关独立协作架构（undefined = 跟随全局）：与聊天侧解耦，仅影响网关出口
   const [gatewayArch, setGatewayArch] = useState<MoaArchitecture | undefined>(undefined)
+  // 网关出口模式：单模型直通模型（'providerId:modelId'；undefined = 聚合，席位全体参与）
+  const [gatewayDirect, setGatewayDirect] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     window.moaAPI.getMoaConfig().then((res: any) => {
       const config = unwrapMoaConfig(res)
       setGatewayArch(config?.gatewayArchitecture || undefined)
+      setGatewayDirect(config?.gatewayDirectModel || undefined)
     })
   }, [])
 
@@ -535,13 +539,32 @@ function GatewaySection({ architecture }: {
     }
   }
 
+  // 出口模式即改即存；选「聚合」传 undefined（JSON 序列化自动省略键，读回即聚合态）
+  const saveGatewayDirectModel = async (key: string | undefined) => {
+    setGatewayDirect(key)
+    try {
+      const res: any = await window.moaAPI.setMoaConfig({ gatewayDirectModel: key })
+      if (res?.success === false) throw new Error(res?.error || '保存失败')
+      notifySaveResult(true)
+    } catch (err) {
+      notifySaveResult(false, String(err))
+    }
+  }
+
+  // 直通模型候选：网关只路由「启用且可用」的厂商（与主进程 usableProviders 同口径）；
+  // 当前值已不在候选（厂商/模型被删）时下拉补占位项，避免受控 select 显示错位
+  const directModelOptions = providers
+    .filter((p) => p.enabled && hasProviderAccess(p))
+    .flatMap((p) => (p.models || []).map((m) => ({ label: `${p.name} · ${m.id}`, value: `${p.id}:${m.id}` })))
+  const directInPool = gatewayDirect === undefined || directModelOptions.some((o) => o.value === gatewayDirect)
+
   return (
     <div className="border-t border-border pt-5 space-y-4">
       <div>
         <label className="text-sm font-medium text-foreground block">MoA 网关（对外暴露）</label>
         <p className="text-xs text-muted-foreground mt-1">
           把 MoA 能力以 OpenAI 兼容接口开放给第三方软件（Cline / Cursor / Cherry Studio 等）；
-          网关固定聚合模式（始终输出一份融合后的最终答案），缺省模型遵循上方 MoA 配置的首个子模型。
+          出口默认聚合（输出一份融合后的最终答案），可切换为单模型直通；缺省模型遵循上方 MoA 配置的首个子模型。
         </p>
       </div>
 
@@ -554,6 +577,47 @@ function GatewaySection({ architecture }: {
 
       {settings.gateway.enabled && (
         <>
+          <SettingRow
+            label="出口模式"
+            hint={gatewayDirect !== undefined
+              ? '单模型直通：第三方请求一律由所选模型直接作答（不发起席位与聚合）；仅影响网关出口'
+              : '聚合（默认）：席位全体参与，输出一份融合后的最终答案；仅影响网关出口'}
+          >
+            <select
+              value={gatewayDirect !== undefined ? 'direct' : 'aggregate'}
+              onChange={(e) => {
+                if (e.target.value === 'aggregate') {
+                  saveGatewayDirectModel(undefined)
+                  return
+                }
+                // 首次切直通默认落到首个可用模型；无可用模型时不切换（避免存出无法路由的配置）
+                const first = gatewayDirect ?? directModelOptions[0]?.value
+                if (first) saveGatewayDirectModel(first)
+              }}
+              className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            >
+              <option value="aggregate">聚合（全部席位参与）</option>
+              <option value="direct" disabled={directModelOptions.length === 0 && gatewayDirect === undefined}>单模型直通</option>
+            </select>
+          </SettingRow>
+
+          {gatewayDirect !== undefined && (
+            <SettingRow label="直通模型" hint="网关出口固定使用的模型；桌面端聊天不受影响">
+              <select
+                value={gatewayDirect}
+                onChange={(e) => { if (e.target.value) saveGatewayDirectModel(e.target.value) }}
+                className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+              >
+                {!directInPool && (
+                  <option value={gatewayDirect}>{gatewayDirect}（已不在可用模型列表，请重选）</option>
+                )}
+                {directModelOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </SettingRow>
+          )}
+
           <SettingRow
             label="协作架构"
             hint={gatewayArch === undefined

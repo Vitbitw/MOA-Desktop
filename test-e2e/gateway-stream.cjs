@@ -3,7 +3,8 @@
 // （roundStart → subUpdate（含 running）→ aggStart → aggChunk（含 false / done:true）→ roundDone）、
 // 客户端断开 abort 链路（引擎中止、聚合不发起、roundDone aborted:true、记账标注）、
 // 透传兜底旁路直播（未配置子模型；逐字节透传，含畸形流）、聚合 fallback 无缝接续 / 已开流收流结束、非流式客户端 JSON 现状、
-// MoA 流式 SSE 响应头（T4.1）+ 引擎失败未开流 502 JSON 保持。
+// MoA 流式 SSE 响应头（T4.1）+ 引擎失败未开流 502 JSON 保持；
+// 网关出口模式（gatewayDirectModel 单模型直通：跳过席位/聚合与请求模型、/health 口径、清除与配置失效回落聚合）。
 // 用法：node test-e2e/gateway-stream.cjs
 // 加载方式：esbuild bundle（stdin 聚合入口：server / uiBridge / moaConfig 共享同一模块实例）+
 //   plugin stub：electron、../db/database、../config/appSettings、../providers/providerManager、
@@ -317,7 +318,7 @@ const SUB_MODELS = [
       name: 'Mock',
       baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
       apiKey: 'gw-test-key',
-      models: ['sub-a', 'sub-b', 'sub-slow-a', 'sub-slow-b', 'sub-f', 'agg-1', 'direct-1'].map((id) => ({ id, name: id, providerId: 'prov-1' })),
+      models: ['sub-a', 'sub-b', 'sub-slow-a', 'sub-slow-b', 'sub-f', 'agg-1', 'direct-1', 'direct-t', 'direct-t2'].map((id) => ({ id, name: id, providerId: 'prov-1' })),
       enabled: true
     }
   ]
@@ -672,6 +673,91 @@ const SUB_MODELS = [
     const agg3 = mock.lastBody('agg-1')
     ok(String(agg3?.messages?.[0]?.content || '').includes('多模型融合器'),
       '跟随全局 election：聚合请求 system = 选举提示词（STANDARD_PROMPT_ZH）')
+  }
+
+  console.log('\n[10] 网关出口模式：gatewayDirectModel 单模型直通（跳过席位/聚合与请求模型），清除/失效回落聚合')
+  {
+    mock.scripts.set('sub-a', { frames: ['甲'], gapMs: 10 })
+    mock.scripts.set('agg-1', { frames: ['聚合结果'], gapMs: 10 })
+    mock.scripts.set('direct-t', { frames: ['直通', '结果'], gapMs: 20, usage: { prompt_tokens: 5, completion_tokens: 7 } })
+    mock.scripts.set('direct-t2', { content: '直通非流式' })
+
+    // ① 直通生效：请求模型（sub-a）与席位/聚合全部让位，固定走 direct-t
+    moaConfig.setMoaConfig({
+      architecture: 'election',
+      gatewayArchitecture: undefined,
+      gatewayDirectModel: 'prov-1:direct-t',
+      subModels: SUB_MODELS,
+      aggregator: { primaryModelId: 'agg-1', primaryProviderId: 'prov-1' }
+    })
+    const mark = uiMark()
+    const aggBefore = mock.count('agg-1')
+    const tBefore = mock.count('direct-t')
+    const subBefore = mock.count('sub-a')
+    const client = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: true, messages: [{ role: 'user', content: 'hi' }] })
+    const evts = uiSince(mark)
+
+    eq(client.status, 200, 'HTTP 200')
+    eq(mock.count('direct-t') - tBefore, 1, '上游恰一次调用（所选直通模型）')
+    eq(mock.count('sub-a') - subBefore, 0, '席位子模型未被调用（聚合链路被跳过）')
+    eq(mock.count('agg-1') - aggBefore, 0, '聚合未发起')
+    eq(sseContent(client.raw), '直通结果', '对外内容 = 直通模型输出')
+    eq(evts[0]?.channel, 'gateway:roundStart', '序列以 roundStart 开始')
+    eq(evts[0]?.payload.mode, 'direct', 'roundStart.mode = direct')
+    eq(evts[0]?.payload.subModels, [{ index: 0, modelId: 'direct-t', role: '' }], 'roundStart 单模型清单 = 所选直通模型')
+    eq(evts[evts.length - 1]?.channel, 'gateway:roundDone', '以 roundDone 结束')
+    eq(evts[evts.length - 1]?.payload.success, true, 'roundDone.success = true')
+
+    // ② /health 反映实际执行路径与所选模型
+    const health1 = await (await fetch(`http://127.0.0.1:${GW_PORT}/health`)).json()
+    eq(health1.moaConfig.mode, 'direct', '/health moaConfig.mode = direct')
+    eq(health1.moaConfig.directModel, 'direct-t', '/health moaConfig.directModel = 所选模型')
+
+    // ③ Anthropic 端点（/v1/messages）同样固定直通（非流式 → Anthropic 响应形态）
+    moaConfig.setMoaConfig({ gatewayDirectModel: 'prov-1:direct-t2' })
+    const anthBefore = mock.count('direct-t2')
+    const anthAggBefore = mock.count('agg-1')
+    const anth = await new Promise((resolve) => {
+      const req = http.request(
+        { host: '127.0.0.1', port: GW_PORT, path: '/v1/messages', method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        (res) => {
+          let raw = ''
+          res.on('data', (d) => { raw += d })
+          res.on('end', () => resolve({ status: res.statusCode, raw }))
+        }
+      )
+      req.on('error', () => resolve({ status: 0, raw: '' }))
+      req.end(JSON.stringify({ model: 'claude-3-5-sonnet', stream: false, max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] }))
+    })
+    eq(anth.status, 200, '/v1/messages HTTP 200（直通生效）')
+    eq(mock.count('direct-t2') - anthBefore, 1, '/v1/messages 上游恰一次调用（所选模型）')
+    eq(mock.count('agg-1') - anthAggBefore, 0, '/v1/messages 聚合未发起')
+    eq(JSON.parse(anth.raw).content?.[0]?.text, '直通非流式', 'Anthropic 响应 content = 直通模型输出')
+
+    // ④ 清除直通（undefined）→ 回落聚合
+    moaConfig.setMoaConfig({ gatewayDirectModel: undefined })
+    const aggBefore2 = mock.count('agg-1')
+    const client4 = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client4.status, 200, '清除直通后 HTTP 200')
+    eq(mock.count('agg-1') - aggBefore2, 1, '清除直通 → 聚合恢复（agg-1 恰一次）')
+    eq(JSON.parse(client4.raw).model, 'moa-aggregated', '聚合出口：JSON model = moa-aggregated')
+
+    // ⑤ 配置失效（厂商不存在 / 模型不在列表）→ 回落聚合，不静默走错模型
+    moaConfig.setMoaConfig({ gatewayDirectModel: 'prov-none:whatever' })
+    const aggBefore3 = mock.count('agg-1')
+    const client5 = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client5.status, 200, '厂商不存在配置 HTTP 200')
+    eq(mock.count('agg-1') - aggBefore3, 1, '厂商不存在 → 回落聚合')
+    moaConfig.setMoaConfig({ gatewayDirectModel: 'prov-1:ghost-model' })
+    const aggBefore4 = mock.count('agg-1')
+    const client6 = await gatewayRequest(GW_PORT, { model: 'sub-a', stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    eq(client6.status, 200, '模型不在列表配置 HTTP 200')
+    eq(mock.count('agg-1') - aggBefore4, 1, '模型不在列表 → 回落聚合')
+    const health2 = await (await fetch(`http://127.0.0.1:${GW_PORT}/health`)).json()
+    eq(health2.moaConfig.mode, 'aggregate', '配置失效时 /health mode = aggregate（不虚报直通）')
+
+    // 清理：不留直通配置（防御性收敛）
+    moaConfig.setMoaConfig({ gatewayDirectModel: undefined })
   }
 
   console.log('\n──────────────────────────────')

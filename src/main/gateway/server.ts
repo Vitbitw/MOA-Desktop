@@ -5,6 +5,7 @@ import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { getAllProviders } from '../providers/providerManager'
 import { hasProviderAccess } from '../../shared/providerAccess'
+import { splitModelKey } from '../../shared/modelKey'
 import { getMoaConfig } from '../moa/moaConfig'
 import { executeMoAWithEvents, resolveSubModels } from '../moa/moaEngine'
 import { createThrottledEmitter, STREAM_PUSH_INTERVAL_MS } from '../moa/streamThrottle'
@@ -214,6 +215,19 @@ function routeForRequest(model: string | undefined): { baseUrl: string; apiKey: 
 }
 
 /**
+ * 网关出口「单模型直通」目标解析：配置 'providerId:modelId'（设置 → MoA → MoA 网关 → 出口模式）→ 模型与所属厂商。
+ * 配置失效（厂商被删/停用/无凭据、模型不在其模型列表）时返回 null —— 调用方回落常规链路（聚合 / 透传兜底），不静默走错模型。
+ */
+function resolveGatewayDirectTarget(key: string | undefined): { modelId: string; provider: NonNullable<ReturnType<typeof routeForRequest>> } | null {
+  if (typeof key !== 'string' || key === '') return null
+  const { providerId, modelId } = splitModelKey(key)
+  if (!providerId || !modelId) return null
+  const p = usableProviders().find((x) => x.id === providerId && x.models.some((m) => m.id === modelId))
+  if (!p) return null
+  return { modelId, provider: { baseUrl: p.baseUrl, apiKey: p.apiKey, models: p.models } }
+}
+
+/**
  * 造「旁路 tap」流：返回 stream 与其 controller（ReadableStream 构造时 start 同步执行，返回时 controller 必已就绪）。
  * direct 透传时把读到的 chunk 镜像进该流，交给 readSseStream 增量解析——不改变原透传字节。
  */
@@ -396,7 +410,7 @@ async function executeMoaRound(opts: {
   }))
   broadcastToUi(GATEWAY_ROUND_START, {
     roundId,
-    // 网关固定聚合模式（模式不可配置）：透传兜底轮的 'direct' 广播在下方分支单独发出
+    // 网关默认聚合出口；单模型直通 / 透传兜底轮的 'direct' 广播在下方分支单独发出
     mode: 'aggregate',
     subModels: roundSubs,
     aggregator: config.aggregator ? { modelId: config.aggregator.primaryModelId } : undefined
@@ -422,7 +436,7 @@ async function executeMoaRound(opts: {
     messages: opts.messages,
     subModels: config.subModels,
     aggregator: config.aggregator || undefined,
-    // 网关固定聚合：出口必须给出唯一最终答案（compare/direct 不是网关可选项）
+    // 网关聚合轮：出口必须给出唯一最终答案（compare 不是网关可选项；单模型直通在路由层单独分流）
     mode: 'aggregate',
     aggregationPromptVariant: config.aggregationPromptVariant,
     customAggregationPrompt: config.customAggregationPrompt,
@@ -741,14 +755,19 @@ export function createGatewayServer(): Express {
   app.get('/health', (_req: Request, res: Response) => {
     const provider = firstUsableProvider()
     const config = getMoaConfig()
+    const directTarget = resolveGatewayDirectTarget(config.gatewayDirectModel)
     res.json({
       status: 'ok',
       version: '1.0.0',
       uptimeSeconds: Math.floor(process.uptime()),
       activeRequests,
       queueLength,
-      // mode 反映实际执行路径：未配置子模型时退化为单模型透传，否则恒为聚合
-      moaConfig: { subCount: config.subModels.length, mode: config.subModels.length === 0 ? 'direct' : 'aggregate' },
+      // mode 反映实际执行路径：单模型直通生效（或未配置子模型透传兜底）→ direct，否则聚合
+      moaConfig: {
+        subCount: config.subModels.length,
+        mode: directTarget || config.subModels.length === 0 ? 'direct' : 'aggregate',
+        ...(directTarget ? { directModel: directTarget.modelId } : {})
+      },
       // model 字段透出实际可用的首个模型名（旧实现误填 config.mode，与字段语义不符）
       providers: [{ name: 'default', status: provider ? 'ok' : 'no_key', model: provider?.models[0]?.id ?? '' }]
     })
@@ -776,8 +795,10 @@ export function createGatewayServer(): Express {
       bodyModel && findProviderForModel(bodyModel) ? bodyModel
         : moaModel && findProviderForModel(moaModel) ? moaModel
           : bodyModel
+    // 出口模式：配置了单模型直通 → 固定路由到所选模型与其厂商（忽略请求模型的 MoA 语义）
+    const directTarget = resolveGatewayDirectTarget(config.gatewayDirectModel)
     // 智能路由：请求的 model 命中某 provider（含本地引擎）则路由之，否则回落第一个可用
-    const provider = routeForRequest(requestedModel)
+    const provider = directTarget?.provider ?? routeForRequest(requestedModel)
     if (!provider) {
       res.status(503).json({
         error: { message: 'No enabled provider configured.', type: 'moa_config_error' }
@@ -787,12 +808,13 @@ export function createGatewayServer(): Express {
 
     const { messages, stream } = req.body
 
-    // ── 透传兜底：未配置子模型时无法聚合，退化为单模型透传（网关固定聚合，direct/compare 不再是可选模式）──
-    if (config.subModels.length === 0) {
+    // ── 单模型直通（出口模式）/ 透传兜底：配置了直通模型 → 固定走该模型；未配置子模型无法聚合 → 透传请求模型。
+    // （compare 不是网关可选项；出口须给唯一最终答案）──
+    if (directTarget || config.subModels.length === 0) {
       const reqStart = Date.now()
       const roundId = crypto.randomUUID()
-      // 请求名不在该 provider 模型列表时回落到其第一个模型；否则透传原名
-      let upstreamModel = requestedModel || ''
+      // 直通模式用所选模型；兜底模式透传请求名（不在该 provider 模型列表时回落到其第一个模型）
+      let upstreamModel = directTarget?.modelId || requestedModel || ''
       if (!provider.models.some((m) => m.id === upstreamModel)) {
         upstreamModel = provider.models[0]?.id || upstreamModel
       }
@@ -997,7 +1019,7 @@ export function createGatewayServer(): Express {
       return
     }
 
-    // ── MoA 聚合轮（网关固定聚合模式）──
+    // ── MoA 聚合轮（网关默认出口模式）──
     // X1 修复：executeMoA 主体无整体异常防护，Express 4 又不捕获 async handler 的
     // rejection——任何内部抛错（DB 故障等）都会变成 unhandled rejection 崩溃主进程
     const reqStart = Date.now()
@@ -1091,15 +1113,17 @@ export function createGatewayServer(): Express {
     const config = getMoaConfig()
     const converted = anthropicToOpenAI(req.body)
     const stream = req.body?.stream === true
-    const provider = routeForRequest(req.body?.model)
+    // 出口模式：单模型直通配置生效时固定路由到所选模型与其厂商（忽略请求模型）
+    const directTarget = resolveGatewayDirectTarget(config.gatewayDirectModel)
+    const provider = directTarget?.provider ?? routeForRequest(req.body?.model)
     if (!provider) {
       res.status(503).json({ type: 'error', error: { type: 'api_error', message: 'No enabled provider configured.' } })
       return
     }
 
-    // ── 透传兜底：未配置子模型（同 chat/completions：上游 OpenAI 兼容），响应/事件转换为 Anthropic 形态 ──
-    if (config.subModels.length === 0) {
-      await handleAnthropicDirect({ res, provider, converted, model: req.body?.model, stream })
+    // ── 单模型直通（出口模式）/ 透传兜底：上游 OpenAI 兼容，响应/事件转换为 Anthropic 形态 ──
+    if (directTarget || config.subModels.length === 0) {
+      await handleAnthropicDirect({ res, provider, converted, model: directTarget?.modelId ?? req.body?.model, stream })
       return
     }
 
