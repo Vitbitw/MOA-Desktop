@@ -1120,21 +1120,28 @@ function mimoStatusTone(status?: string): string {
 /** 订阅套餐区：套餐名 / 「状态与到期」合并卡（与 Command Code 订阅区同布局） */
 function MimoSubscriptionSection({
   subscription,
-  available
+  available,
+  className
 }: {
   subscription?: MimoSubscription
   available: boolean
+  /** 外层定位类（如 md:col-span-2，与套餐额度卡同网格一行） */
+  className?: string
 }) {
   if (!available && !subscription) {
     return (
-      <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+      <div
+        className={`rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground ${className ?? ''}`}
+      >
         暂无数据
       </div>
     )
   }
   if (!subscription) {
     return (
-      <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+      <div
+        className={`rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground ${className ?? ''}`}
+      >
         当前账号未查询到订阅信息（可能未订阅套餐）
       </div>
     )
@@ -1161,11 +1168,11 @@ function MimoSubscriptionSection({
   const endLabel = endTs !== undefined ? fmtDateUtc(endTs) : null
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <div className={`grid grid-cols-1 md:grid-cols-2 gap-3 ${className ?? ''}`}>
       <div className="rounded-lg border border-border bg-card px-4 py-3">
         <div className="text-xs text-muted-foreground mb-1">当前套餐</div>
         <div className="text-lg font-semibold text-foreground">{planName}</div>
-        {subscription.planId && planName !== subscription.planId && (
+        {subscription.planId && planName.toLowerCase() !== subscription.planId.toLowerCase() && (
           <div className="text-xs text-muted-foreground mt-0.5">{subscription.planId}</div>
         )}
       </div>
@@ -1561,20 +1568,11 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
 
       {loggedIn && usage && (
         <>
-          {/* 订阅套餐（含到期时间）——与 Command Code 订阅区对齐 */}
+          {/* 订阅与额度（一行三卡：当前套餐 / 状态与到期 / 套餐额度）+ MiMo 特有明细（账户余额、套餐用量）随卡片展示 */}
           <section>
-            <h3 className="text-xs font-semibold text-muted-foreground mb-2">订阅套餐</h3>
-            <MimoSubscriptionSection
-              subscription={subscription}
-              available={usage.sourcesAvailable.subscription ?? false}
-            />
-          </section>
-
-          {/* 额度区：套餐周期额度（MiMo 无 5h/7d 滚动窗口）+ 账户余额与 Token Plan 分项，随额度一并展示 */}
-          <section>
-            <h3 className="text-xs font-semibold text-muted-foreground mb-2">额度</h3>
-            <div className="flex flex-wrap items-baseline gap-x-2 mb-2 text-xs text-muted-foreground">
-              <span>MiMo Token Plan 按套餐周期计量，无 5 小时 / 7 天滚动窗口</span>
+            <div className="flex flex-wrap items-baseline gap-x-2 mb-2">
+              <h3 className="text-xs font-semibold text-muted-foreground">订阅与额度</h3>
+              <span className="text-xs text-muted-foreground">MiMo Token Plan 按套餐周期计量，无 5 小时 / 7 天滚动窗口</span>
               <span
                 className="cursor-help"
                 title="官方 FAQ：Token Plan 为固定周期 Credits 池（no 5-hour cap or weekly usage limit）；额度在套餐周期结束（续费/到期）时整体重置"
@@ -1583,6 +1581,11 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <MimoSubscriptionSection
+                subscription={subscription}
+                available={usage.sourcesAvailable.subscription ?? false}
+                className="md:col-span-2"
+              />
               <MonthlyCard
                 title="套餐额度"
                 window={usage.windows?.monthly}
