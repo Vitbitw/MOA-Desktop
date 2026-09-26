@@ -1567,7 +1567,12 @@ function PricingRow({
   onRemove,
   unitLabel = '$/M',
   probedWindows,
-  probedTimezone
+  probedTimezone,
+  probedMonthlyCredits,
+  probedUsageLimits,
+  showMonthlyCredits,
+  showUsageLimits,
+  currency = 'USD'
 }: {
   modelId: string
   config: PricingConfig
@@ -1577,6 +1582,15 @@ function PricingRow({
   /** 探查到的官方峰谷窗口（只读展示） */
   probedWindows?: PricingWindow[]
   probedTimezone?: string
+  /** 探查到的月度额度（Monthly credits，只读展示） */
+  probedMonthlyCredits?: number
+  /** 探查到的用量限额（官方估算请求数，只读展示） */
+  probedUsageLimits?: ProbedUsageLimits
+  /** 是否显示「月额度」/「Usage limits」列（源级条件，须与表头一致） */
+  showMonthlyCredits?: boolean
+  showUsageLimits?: boolean
+  /** 货币（月额度格式化用；与 formatCost 的口径一致） */
+  currency?: 'CNY' | 'USD'
 }) {
   const [editingKey, setEditingKey] = useState(false)
   const [keyDraft, setKeyDraft] = useState(modelId)
@@ -1608,6 +1622,14 @@ function PricingRow({
 
   const numInputCls =
     'min-w-0 flex-1 text-right rounded border border-input bg-background px-1.5 py-1 text-xs text-foreground placeholder:text-muted-foreground/60'
+
+  // 只读额度列文本：月额度（原币格式化）与 Usage limits（5 小时 / 每周 / 每月 请求数）
+  const mcText = probedMonthlyCredits !== undefined ? formatCost(probedMonthlyCredits, currency) : '—'
+  const ul = probedUsageLimits
+  const hasUl = !!ul && (ul.fiveHour !== undefined || ul.weekly !== undefined || ul.monthly !== undefined)
+  const cellNum = (v: number | undefined) => (v !== undefined ? v.toLocaleString() : '—')
+  const ulText = hasUl ? `${cellNum(ul!.fiveHour)} / ${cellNum(ul!.weekly)} / ${cellNum(ul!.monthly)}` : '—'
+  const extraCols = (showMonthlyCredits ? 1 : 0) + (showUsageLimits ? 1 : 0)
 
   return (
     <>
@@ -1737,10 +1759,30 @@ function PricingRow({
             </button>
           </div>
         </td>
+        {showMonthlyCredits && (
+          <td
+            className="py-1.5 px-1 text-right text-xs tabular-nums text-muted-foreground"
+            title="该模型月度额度（订阅计划页 Monthly credits，只读）"
+          >
+            {mcText}
+          </td>
+        )}
+        {showUsageLimits && (
+          <td
+            className="py-1.5 px-1 text-right text-[10px] tabular-nums text-muted-foreground whitespace-nowrap"
+            title={
+              hasUl
+                ? '官方估算请求数：5 小时 / 每周 / 每月（只读）'
+                : '暂无用量限额数据（计划页 Usage limits 区块抓取后显示）'
+            }
+          >
+            {ulText}
+          </td>
+        )}
       </tr>
       {showWindows && (
         <tr className="border-b border-border/50 bg-accent/10">
-          <td colSpan={6} className="py-2 px-3">
+          <td colSpan={6 + extraCols} className="py-2 px-3">
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-foreground">峰谷定价（多时段）</span>
@@ -1912,10 +1954,6 @@ function ProbeSection() {
   // 探查运行状态放全局 store：切换页面组件卸载后仍能保留"探查中"状态
   const { busy, runningIds, messages, progress, setBusy, setRunningIds, setMessages, setProgress, collapsed, toggleCollapsed, sorts, setSort } =
     useProbeStore()
-  // 模型月额度区块展开状态（按源 ID 集合；map 回调内不能用 hooks，状态放组件顶层）
-  const [mcOpen, setMcOpen] = useState<Set<string>>(new Set())
-  // Usage limits 区块展开状态（按源 ID 集合）
-  const [lcOpen, setLcOpen] = useState<Set<string>>(new Set())
 
   // 探查运行状态与进度由全局订阅（probeStore.initProbeStateSubscription，App 挂载时建立）
   // 统一维护：后台自动刷新期间打开本页同样能看到「正在刷新」与进度
@@ -2259,6 +2297,15 @@ function ProbeSection() {
       <div className="space-y-4">
         {visibleSources.map((s) => {
           const meta = sourceMeta(s.id)
+          // 额度列显示条件（源级）：≥1 条目含该值才加列（无数据源表结构不变，列宽不受影响）
+          const hasMcCol = meta.entries.some((e) => e.monthlyCredits !== undefined)
+          const hasUlCol = meta.entries.some(
+            (e) =>
+              !!e.usageLimits &&
+              (e.usageLimits.fiveHour !== undefined ||
+                e.usageLimits.weekly !== undefined ||
+                e.usageLimits.monthly !== undefined)
+          )
           // 源绑定的厂商（通道徽标由此推导；未绑定不标）
           const boundProvider = providerForSource(s)
           return (
@@ -2434,25 +2481,52 @@ function ProbeSection() {
                               </th>
                             )
                           })}
+                          {hasMcCol && (
+                            <th
+                              className="py-1 px-1 w-[64px] text-right text-muted-foreground font-medium"
+                              title="订阅计划页 Monthly credits：该模型的月度额度（只读）"
+                            >
+                              月额度
+                            </th>
+                          )}
+                          {hasUlCol && (
+                            <th
+                              className="py-1 px-1 w-[130px] text-right text-muted-foreground font-medium"
+                              title="官方估算请求数：5 小时 / 每周 / 每月（只读）"
+                            >
+                              Usage limits
+                            </th>
+                          )}
                           <th className="py-1 px-1 w-6"></th>
                         </tr>
                       </thead>
                       <tbody>
-                        {sortModelIds(s.id, manualModelIds(s)).map((modelId) => (
-                          <PricingRow
-                            key={modelId}
-                            modelId={modelId}
-                            config={manualPrice(s.id, modelId)}
-                            onChange={(cfg) => setManualPrice(modelId, cfg)}
-                            onRemove={() => removeManualModel(modelId)}
-                            unitLabel={priceUnitLabel(s.id, modelId)}
-                            probedWindows={probedEntryFor(s.id, modelId)?.windows}
-                            probedTimezone={probedEntryFor(s.id, modelId)?.timezone}
-                          />
-                        ))}
+                        {sortModelIds(s.id, manualModelIds(s)).map((modelId) => {
+                          const pe = probedEntryFor(s.id, modelId)
+                          return (
+                            <PricingRow
+                              key={modelId}
+                              modelId={modelId}
+                              config={manualPrice(s.id, modelId)}
+                              onChange={(cfg) => setManualPrice(modelId, cfg)}
+                              onRemove={() => removeManualModel(modelId)}
+                              unitLabel={priceUnitLabel(s.id, modelId)}
+                              probedWindows={pe?.windows}
+                              probedTimezone={pe?.timezone}
+                              probedMonthlyCredits={pe?.monthlyCredits}
+                              probedUsageLimits={pe?.usageLimits}
+                              showMonthlyCredits={hasMcCol}
+                              showUsageLimits={hasUlCol}
+                              currency={settings.currency}
+                            />
+                          )
+                        })}
                         {manualModelIds(s).length === 0 && (
                           <tr>
-                            <td colSpan={6} className="text-center py-3 text-muted-foreground text-xs">
+                            <td
+                              colSpan={6 + (hasMcCol ? 1 : 0) + (hasUlCol ? 1 : 0)}
+                              className="text-center py-3 text-muted-foreground text-xs"
+                            >
                               暂无模型。点击「更新模型」从该厂商拉取模型列表后设置手动价格。
                             </td>
                           </tr>
@@ -2462,142 +2536,6 @@ function ProbeSection() {
                     )}
                   </div>
 
-                  {/* Usage limits：计划页 Usage limits 区块探查结果（每模型 5h/周/月请求数估算；仅 ≥1 条目含该值时显示） */}
-                  {(() => {
-                    const ulEntries = meta.entries
-                      .filter(
-                        (e): e is ProbedPricingEntry & { usageLimits: ProbedUsageLimits } =>
-                          !!e.usageLimits &&
-                          (e.usageLimits.fiveHour !== undefined ||
-                            e.usageLimits.weekly !== undefined ||
-                            e.usageLimits.monthly !== undefined)
-                      )
-                      .sort(
-                        (a, b) =>
-                          (b.usageLimits.monthly ?? -1) - (a.usageLimits.monthly ?? -1) ||
-                          a.pattern.localeCompare(b.pattern)
-                      )
-                    if (ulEntries.length === 0) return null
-                    const open = lcOpen.has(s.id)
-                    const cell = (v: number | undefined) => (v !== undefined ? v.toLocaleString() : '—')
-                    return (
-                      <div className="border-t border-border pt-3">
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() =>
-                              setLcOpen((prev) => {
-                                const next = new Set(prev)
-                                if (next.has(s.id)) next.delete(s.id)
-                                else next.add(s.id)
-                                return next
-                              })
-                            }
-                            className="flex items-center gap-1 text-xs font-semibold text-muted-foreground hover:text-foreground"
-                          >
-                            <ChevronDown
-                              className={`w-3.5 h-3.5 transition-transform ${open ? '' : '-rotate-90'}`}
-                            />
-                            Usage limits（{ulEntries.length} 条 · 官方估算请求数）
-                          </button>
-                          <a
-                            href={ulEntries[0].sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-xs text-muted-foreground/70 hover:text-primary underline underline-offset-2"
-                            title={`来源（实际抓取的定价页）：${ulEntries[0].sourceUrl}`}
-                          >
-                            来源
-                          </a>
-                        </div>
-                        {open && (
-                          <table className="w-full text-xs table-fixed mt-1.5">
-                            <thead>
-                              <tr className="border-b border-border text-muted-foreground">
-                                <th className="text-left px-2 py-1 font-medium">模型</th>
-                                <th className="text-right px-2 py-1 font-medium w-[88px]">5 小时</th>
-                                <th className="text-right px-2 py-1 font-medium w-[88px]">每周</th>
-                                <th className="text-right px-2 py-1 font-medium w-[88px]">每月</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {ulEntries.map((e) => (
-                                <tr key={e.pattern} className="border-b border-border/50 last:border-0">
-                                  <td className="px-2 py-1 font-mono truncate" title={e.pattern}>
-                                    {e.pattern}
-                                  </td>
-                                  <td className="px-2 py-1 text-right tabular-nums">{cell(e.usageLimits.fiveHour)}</td>
-                                  <td className="px-2 py-1 text-right tabular-nums">{cell(e.usageLimits.weekly)}</td>
-                                  <td className="px-2 py-1 text-right tabular-nums">{cell(e.usageLimits.monthly)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        )}
-                      </div>
-                    )
-                  })()}
-
-                  {/* 模型月额度：订阅计划页 Monthly credits 列探查结果（仅 ≥1 条目含该值时显示） */}
-                  {(() => {
-                    const mcEntries = meta.entries
-                      .filter((e): e is ProbedPricingEntry & { monthlyCredits: number } => e.monthlyCredits !== undefined)
-                      .sort((a, b) => b.monthlyCredits - a.monthlyCredits || a.pattern.localeCompare(b.pattern))
-                    if (mcEntries.length === 0) return null
-                    const open = mcOpen.has(s.id)
-                    return (
-                      <div className="border-t border-border pt-3">
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() =>
-                              setMcOpen((prev) => {
-                                const next = new Set(prev)
-                                if (next.has(s.id)) next.delete(s.id)
-                                else next.add(s.id)
-                                return next
-                              })
-                            }
-                            className="flex items-center gap-1 text-xs font-semibold text-muted-foreground hover:text-foreground"
-                          >
-                            <ChevronDown
-                              className={`w-3.5 h-3.5 transition-transform ${open ? '' : '-rotate-90'}`}
-                            />
-                            模型月额度（{mcEntries.length} 条）
-                          </button>
-                          <a
-                            href={mcEntries[0].sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-xs text-muted-foreground/70 hover:text-primary underline underline-offset-2"
-                            title={`来源（实际抓取的定价页）：${mcEntries[0].sourceUrl}`}
-                          >
-                            来源
-                          </a>
-                        </div>
-                        {open && (
-                          <table className="w-full text-xs table-fixed mt-1.5">
-                            <thead>
-                              <tr className="border-b border-border text-muted-foreground">
-                                <th className="text-left px-2 py-1 font-medium">模型</th>
-                                <th className="text-right px-2 py-1 font-medium w-[96px]">月额度</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {mcEntries.map((e) => (
-                                <tr key={e.pattern} className="border-b border-border/50 last:border-0">
-                                  <td className="px-2 py-1 font-mono truncate" title={e.pattern}>
-                                    {e.pattern}
-                                  </td>
-                                  <td className="px-2 py-1 text-right tabular-nums">
-                                    {formatCost(e.monthlyCredits, settings.currency)}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        )}
-                      </div>
-                    )
-                  })()}
                 </>
               )}
             </div>
