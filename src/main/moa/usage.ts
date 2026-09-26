@@ -18,6 +18,12 @@ export interface UsageEntry {
   modelId: string
   /** 厂商 ID（用于按厂商分组；旧数据可能缺失） */
   providerId?: string
+  /**
+   * 记账账号 ID（写入时快照 = 当时的当前账号）。多账号来源下通道 / 订阅费 / 分组
+   * 全部按它读，切账号或改通道不会把历史行重新归到别的账号头上（防串号）。
+   * 旧数据无此字段 → 读取端回退 providerId（默认账号 id = providerId）。
+   */
+  accountId?: string
   role: 'sub' | 'agg' | 'title'
   prompt: number
   completion: number
@@ -160,13 +166,14 @@ export function computeCost(
 
 /**
  * 为每条用量记录计算 cost（timestamp 用于峰谷时段定价，默认当前时间）。
- * T2 通道分支（设计 §3 写入端）：provider.billing='plan' 时
+ * T2 通道分支（设计 §3 写入端）：当前账号 billing='plan' 时
  *   manual（settings.pricing）命中 → 用 manual 价（用户显式意图，最高优先级）；
  *   否则 → cost=0 占位，读取端（USAGE_GET_SUMMARY / TODAY）按期内消费比值摊销重算，写入不定值。
  * billing='usage' / providerId 缺失 → 行为与现状完全一致（manual > probed > default）。
+ * 同时把**当前账号 id 快照进条目**：该行此后只认这个账号的通道与订阅费。
  */
 export function buildUsageEntries(
-  entries: Array<{ modelId: string; providerId?: string; role: UsageEntry['role']; prompt: number; completion: number }>,
+  entries: Array<{ modelId: string; providerId?: string; accountId?: string; role: UsageEntry['role']; prompt: number; completion: number }>,
   timestamp = Date.now()
 ): UsageEntry[] {
   const providers = entries.some((e) => e.providerId !== undefined)
@@ -174,12 +181,13 @@ export function buildUsageEntries(
     : null
   return entries.map((e) => {
     const provider = e.providerId && providers ? providers.get(e.providerId) : undefined
+    const accountId = e.accountId ?? provider?.activeAccountId
     if (provider?.billing === 'plan') {
       const manual = getCustomPrice(e.modelId, timestamp)
-      if (manual) return { ...e, cost: costFromPrice(manual, e.prompt, e.completion) }
-      return { ...e, cost: 0 }
+      if (manual) return { ...e, accountId, cost: costFromPrice(manual, e.prompt, e.completion) }
+      return { ...e, accountId, cost: 0 }
     }
-    return { ...e, cost: computeCost(e.modelId, e.prompt, e.completion, timestamp, e.providerId) }
+    return { ...e, accountId, cost: computeCost(e.modelId, e.prompt, e.completion, timestamp, e.providerId) }
   })
 }
 
@@ -189,10 +197,62 @@ export function buildUsageEntries(
 export interface PlanCostRow {
   modelId: string
   providerId?: string
+  /** 记账账号（写入时快照）；缺失 = 旧数据，按 providerId 的默认账号解析 */
+  accountId?: string
   prompt: number
   completion: number
   timestamp: number
   cost: number
+}
+
+/** 账号维度的记账上下文：通道 + 订阅费 + 归属来源（摊销与分组都以它为准） */
+export interface AccountBillingInfo {
+  accountId: string
+  providerId: string
+  billing: 'usage' | 'plan'
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
+}
+
+/**
+ * 建立账号索引（一次摊销全程复用）：
+ * - byAccount：accountId → 通道/订阅费（多账号来源下每账号各算各的，互不稀释）；
+ * - byProvider：providerId → 兜底信息（旧数据无 accountId 时用；优先默认账号，否则当前账号投影）。
+ */
+export function buildAccountBillingIndex(
+  providers: readonly Provider[]
+): { byAccount: Map<string, AccountBillingInfo>; byProvider: Map<string, AccountBillingInfo> } {
+  const byAccount = new Map<string, AccountBillingInfo>()
+  const byProvider = new Map<string, AccountBillingInfo>()
+  for (const p of providers) {
+    for (const a of p.accounts ?? []) {
+      byAccount.set(a.id, { accountId: a.id, providerId: p.id, billing: a.billing, ...(a.plan ? { plan: a.plan } : {}) })
+    }
+    // 兜底取当前账号投影（accounts 缺失的测试桩 / 旧数据也能算）
+    const fallbackId = p.activeAccountId || p.id
+    byProvider.set(p.id, {
+      accountId: byAccount.has(fallbackId) ? fallbackId : p.id,
+      providerId: p.id,
+      billing: p.billing,
+      ...(p.plan ? { plan: p.plan } : {})
+    })
+  }
+  return { byAccount, byProvider }
+}
+
+/**
+ * 解析一行明细的记账账号上下文（隔离关键路径）：
+ * 1. 有 accountId → 只认该账号；账号已删返回 undefined（**不借用同来源其他账号的通道/订阅费**），
+ *    由消费端回退单价链，避免把 A 账号的账算到 B 账号头上；
+ * 2. 无 accountId（旧数据）→ providerId 恰是默认账号 id，直接命中；默认账号已删 → 来源投影兜底；
+ * 3. providerId 也缺失 → undefined。
+ */
+export function resolveAccountBilling(
+  row: { providerId?: string; accountId?: string },
+  idx: { byAccount: Map<string, AccountBillingInfo>; byProvider: Map<string, AccountBillingInfo> }
+): AccountBillingInfo | undefined {
+  if (row.accountId) return idx.byAccount.get(row.accountId)
+  if (!row.providerId) return undefined
+  return idx.byAccount.get(row.providerId) ?? idx.byProvider.get(row.providerId)
 }
 
 /**
@@ -215,15 +275,17 @@ function planBucket(timestamp: number, anchorTs?: number): number | string {
  * Plan 通道成本：期内消费比值摊销（设计 §3）。返回与 rows 等长的新 cost 数组。
  *
  * 口径（逐行判定，顺序即优先级）：
- * 1. provider 非 plan / providerId 缺失 / 厂商已删 → 原 cost 不变（usage 通道行为不变）；
- * 2. plan + manual（settings.pricing[modelId]）命中 → 原 cost（写入时已按 manual 计，读写同源复现）；
+ * 1. 解析不到记账账号（无 providerId / 厂商已删）→ 原 cost 不变（usage 通道行为不变）；
+ *    账号已删（有 accountId 但账号不存在）→ 单价链回退：**不借用同来源其他账号的订阅费**；
+ * 2. 账号通道为 plan + manual（settings.pricing[modelId]）命中 → 原 cost（写入时已按 manual 计，读写同源复现）；
  * 3. plan + 已配订阅费（amount > 0）：
- *    'read' → 桶内比值摊销 `cost_i = amountUSD × tokens_i / Σtokens(同桶同 provider)`；
+ *    'read' → 桶内比值摊销 `cost_i = amountUSD × tokens_i / Σtokens(同桶同**账号**)`；
  *    'write' → 保持写入占位值（0）；
  * 4. plan + 未配订阅费（缺 / 0）→ 单价链回退 `computeCost`（probed 按通道 > default），read/write 同。
  *
  * 分桶：`bucket = floor((ts - anchorTs) / 30天)`，anchorTs 缺省 = 当月 1 号（按条目 timestamp 所属自然月）；
- * 同 provider 同桶聚合。`amountUSD = amount / (currency === 'CNY' ? 7.2 : 1)`——**方向与 probe.ts 的 CNY→USD 折算一致（除以 7.2）**，
+ * **同账号同桶聚合**——同一来源的 Plan 账号与按量账号各占各的桶，订阅费不会互相稀释。
+ * `amountUSD = amount / (currency === 'CNY' ? 7.2 : 1)`——**方向与 probe.ts 的 CNY→USD 折算一致（除以 7.2）**，
  * 设计文档 §3 写的 `amount × (CNY ? 7.2 : 1)` 与 probe.ts:714-716 矛盾（会让 72 CNY 变成 518.4 USD），此处按维度正确性取除法；
  * `Σtokens = 0` → 该桶全 0（不除零、不抛错）。逐条 6 位舍入后把残差回填到桶内 token 最大的一条，保证桶内 Σcost = amountUSD。
  */
@@ -232,7 +294,7 @@ export function computePlanAllocatedCosts(
   providers: readonly Provider[],
   mode: PlanCostMode = 'read'
 ): number[] {
-  const byId = new Map(providers.map((p) => [p.id, p] as const))
+  const idx = buildAccountBillingIndex(providers)
   const out: number[] = new Array(rows.length).fill(0)
   interface Bucket {
     amountUSD: number
@@ -245,8 +307,15 @@ export function computePlanAllocatedCosts(
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i]
-    const provider = r.providerId ? byId.get(r.providerId) : undefined
-    if (!provider || provider.billing !== 'plan') {
+    const acc = resolveAccountBilling(r, idx)
+    if (!acc) {
+      // 账号已删 → 单价链；无 providerId / 厂商已删 → 原值不变
+      out[i] = r.accountId
+        ? computeCost(r.modelId, r.prompt, r.completion, r.timestamp, r.providerId)
+        : r.cost
+      continue
+    }
+    if (acc.billing !== 'plan') {
       out[i] = r.cost
       continue
     }
@@ -255,7 +324,7 @@ export function computePlanAllocatedCosts(
       out[i] = r.cost
       continue
     }
-    const amount = provider.plan?.amount
+    const amount = acc.plan?.amount
     if (!(typeof amount === 'number' && amount > 0)) {
       out[i] = computeCost(r.modelId, r.prompt, r.completion, r.timestamp, r.providerId)
       continue
@@ -265,11 +334,11 @@ export function computePlanAllocatedCosts(
       continue
     }
     const tokens = (r.prompt || 0) + (r.completion || 0)
-    const key = `${r.providerId}|${planBucket(r.timestamp, provider.plan?.anchorTs)}`
+    const key = `${acc.accountId}|${planBucket(r.timestamp, acc.plan?.anchorTs)}`
     let bucket = buckets.get(key)
     if (!bucket) {
       bucket = {
-        amountUSD: amount / (provider.plan?.currency === 'CNY' ? CNY_TO_USD_RATE : 1), // CNY → USD：与 probe.ts 同向（÷7.2）
+        amountUSD: amount / (acc.plan?.currency === 'CNY' ? CNY_TO_USD_RATE : 1), // CNY → USD：与 probe.ts 同向（÷7.2）
         totalTokens: 0,
         maxTokenIdx: i,
         maxTokens: tokens,
@@ -306,7 +375,7 @@ export function computePlanAllocatedCosts(
 /** 查询范围汇聚重算的输入行：timestamp = 日志行写入时间戳（分桶依据）；models = 该行已解析的明细列 */
 export interface PlanCostRangeRow {
   timestamp: number
-  models: Array<{ modelId: string; providerId?: string; prompt?: number; completion?: number; cost?: number }> | null
+  models: Array<{ modelId: string; providerId?: string; accountId?: string; prompt?: number; completion?: number; cost?: number }> | null
 }
 
 /**
@@ -314,7 +383,7 @@ export interface PlanCostRangeRow {
  *
  * 旧的单行入口把分母（桶内 Σtokens map）局部在「单条日志行的 models」里，每行各自吃掉整期 amountUSD
  * → Σ = 行数 × 期内消费（3 行实测 3.00x）。这里把 rows 内**所有行**的 plan 明细摊平成
- * 一次 `computePlanAllocatedCosts` 调用（按 provider × 桶跨行聚合，分母 = 本次查询范围的行），
+ * 一次 `computePlanAllocatedCosts` 调用（按 **账号** × 桶跨行聚合，分母 = 本次查询范围的行），
  * 再按 (行, 明细下标) 回填——totals、分组明细、TODAY 全用同一份结果。
  *
  * 口径：range='all' 时桶内 Σcost = 期内消费严格成立；today/week/month 窗口 range 为窗口近似
@@ -329,9 +398,12 @@ export function computeRangePlanCosts(
   rows: readonly PlanCostRangeRow[],
   providers: readonly Provider[]
 ): Array<number[] | null> {
-  const byId = new Map(providers.map((p) => [p.id, p] as const))
-  const isPlanDetail = (m: { providerId?: string }): boolean =>
-    m.providerId !== undefined && byId.get(m.providerId)?.billing === 'plan'
+  const idx = buildAccountBillingIndex(providers)
+  // 该明细是否需要进摊销重算：当前账号是 plan，或其账号已删（需回退单价链而非沿用 0 占位）
+  const needsRecompute = (m: { providerId?: string; accountId?: string }): boolean => {
+    if (m.accountId && !idx.byAccount.has(m.accountId)) return true
+    return resolveAccountBilling(m, idx)?.billing === 'plan'
+  }
 
   const out: Array<number[] | null> = new Array(rows.length).fill(null)
   const flat: PlanCostRow[] = []
@@ -340,7 +412,7 @@ export function computeRangePlanCosts(
 
   for (let ri = 0; ri < rows.length; ri++) {
     const models = rows[ri].models
-    if (!models || models.length === 0 || !models.some(isPlanDetail)) continue
+    if (!models || models.length === 0 || !models.some(needsRecompute)) continue
     const arr: number[] = new Array(models.length).fill(0)
     out[ri] = arr
     for (let mi = 0; mi < models.length; mi++) {
@@ -349,6 +421,7 @@ export function computeRangePlanCosts(
       flat.push({
         modelId: m.modelId,
         providerId: m.providerId,
+        accountId: m.accountId,
         prompt: m.prompt || 0,
         completion: m.completion || 0,
         timestamp: rows[ri].timestamp,
@@ -379,6 +452,7 @@ export function applyPlanWritePricing(
     entries.map((e) => ({
       modelId: e.modelId,
       providerId: e.providerId,
+      accountId: e.accountId,
       prompt: e.prompt,
       completion: e.completion,
       timestamp,

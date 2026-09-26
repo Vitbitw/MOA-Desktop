@@ -12,27 +12,68 @@ export type SubModelRole =
   | ''
 
 // ─── Providers ───
+/**
+ * 厂商账号：一个来源（厂商）下可挂无限个账号，每个账号自带 API Key / 计费通道 / Plan 配置。
+ * 通道与订阅费属于账号而非来源——同一来源的 Plan 账号与按量账号互不共享，读写各走各的账号 id。
+ */
+export interface ProviderAccount {
+  id: string
+  providerId: string
+  /** 账号备注名（如「工作号」）；空串时 UI 按计费通道显示 */
+  label: string
+  /** 该账号的计费通道：'usage' = 按量 | 'plan' = 订阅/Token 包（成本按期内消费比值摊销） */
+  billing: 'usage' | 'plan'
+  /** Plan 通道每期（月）实际消费（手填）；未配置时省略 → 消费端回退单价链估算 */
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
+  /** 是否为该来源当前用于调用与记账的账号（每来源至多一个） */
+  active: boolean
+  /** 该账号的 API Key（设置页编辑账号时展示用；调用侧仍走 Provider.apiKey 投影） */
+  apiKey: string
+}
+
 export interface Provider {
   id: string
   name: string
   baseUrl: string
-  apiKey: string
   models: ModelInfo[]
   enabled: boolean
   builtIn?: boolean
-  /** 计费通道：'usage' = 按量 | 'plan' = 订阅/Token 包（成本按期内消费比值摊销） */
+  /** 该来源下全部账号（≥1），按创建顺序 */
+  accounts: ProviderAccount[]
+  /** 当前账号 id（accounts 中 active=true 的那条；数据异常时为第一条） */
+  activeAccountId: string
+  /**
+   * 以下三项均为**当前账号的投影**（调用链 / 成本记账只认这三项，不关心账号层数）：
+   * 计费通道：'usage' = 按量 | 'plan' = 订阅/Token 包
+   */
   billing: 'usage' | 'plan'
-  /** Plan 通道每期（月）实际消费（手填）；未配置时省略 → 消费端回退单价链估算 */
+  /** 当前账号的 Plan 每期消费；未配置时省略 → 消费端回退单价链估算 */
   plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
+  /** 当前账号的 API Key */
+  apiKey: string
 }
 
-/** providers 编辑入参（updateProvider patch）：仅传入的字段更新，未传入的保持原值 */
+/** providers 编辑入参（updateProvider patch）：仅传入的字段更新，未传入的保持原值。账号级字段走 ProviderAccountPatch */
 export interface ProviderUpdatePatch {
   name?: string
   baseUrl?: string
+}
+
+/** 账号编辑入参（updateProviderAccount patch）：仅传入的字段更新 */
+export interface ProviderAccountPatch {
+  label?: string
   billing?: 'usage' | 'plan'
   /** 传 null 清空订阅费配置（amount / currency / anchor 三列一并重置） */
   plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } | null
+}
+
+/** 新增账号入参（addProviderAccount） */
+export interface ProviderAccountInput {
+  label?: string
+  billing?: 'usage' | 'plan'
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
+  /** 账号 API Key（省略 / 空串 = 暂不配置，保存后可单独填写） */
+  apiKey?: string
 }
 
 export interface ModelInfo {
@@ -257,7 +298,7 @@ export interface UsageToday { prompt: number; completion: number; cost: number; 
 /** 云端用量监控源类型（当前支持 Command Code / Xiaomi MiMo / DeepSeek，后续可扩展） */
 export type RemoteUsageSourceType = 'commandcode' | 'mimo' | 'deepseek'
 
-/** 一个云端用量监控源（如 Command Code Studio 账号） */
+/** 一个云端用量监控源（如 Command Code Studio），下挂无限个账号 */
 export interface RemoteUsageSource {
   id: string
   type: RemoteUsageSourceType
@@ -266,9 +307,25 @@ export interface RemoteUsageSource {
   enabled: boolean
 }
 
+/**
+ * 一个云监控账号：凭据、用量快照、本地累计全部按本 id 隔离（换账号/删账号互不串号）。
+ * 每源至少一个账号；默认账号的 id = 所属源 id（历史凭据与三张表的 source_id 原样沿用，零迁移）。
+ */
+export interface MonitorAccount {
+  id: string
+  /** 所属监控源 id（RemoteUsageSource.id） */
+  sourceId: string
+  /** 账号备注名（如「工作号」）；空串时 UI 按计费通道显示 */
+  label: string
+  /** 账号用途标记：'plan' = 订阅套餐账号 | 'usage' = 按量计费账号 */
+  billing: 'plan' | 'usage'
+}
+
 export interface MonitoringSettings {
   /** 已启用的云端用量监控源列表 */
   sources: RemoteUsageSource[]
+  /** 各源下的账号列表（读设置时自动为缺失的源补默认账号，见 config/appSettings.ts） */
+  accounts: MonitorAccount[]
   /**
    * 统一自动刷新间隔（分钟），0 表示关闭。
    * 页面数据刷新（本页打开期间）与 Command Code 后台明细采集共用此值；

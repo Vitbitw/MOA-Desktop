@@ -131,11 +131,24 @@ console.log('buildProbedEntries：')
 // ── 3. resolveProbeTarget：按订阅套餐动态选计划页 + 额度列标题 ──
 console.log('resolveProbeTarget：')
 {
+  // v5：套餐按**账号**存。用例造两个账号——按量账号排在前且无订阅，
+  // 断言 resolveProbeTarget 会优先取 Plan 账号的快照（否则会误回退到源 URL）
   const mk = (planId, providers) =>
     makeFactory({
       getAllProviders: () => providers || [CC_PROVIDER],
-      readAppSettings: () => ({ monitoring: { sources: MON_SOURCES } }),
-      getUsageSnapshot: () => (planId === undefined ? null : { subscription: planId ? { planId } : {} })
+      readAppSettings: () => ({
+        monitoring: {
+          sources: MON_SOURCES,
+          accounts: [
+            { id: 'commandcode-payg', sourceId: 'commandcode', label: '按量号', billing: 'usage' },
+            { id: 'commandcode', sourceId: 'commandcode', label: 'Plan号', billing: 'plan' }
+          ]
+        }
+      }),
+      getUsageSnapshot: (accountId) => {
+        if (accountId === 'commandcode-payg') return {} // 按量账号：有快照但无订阅
+        return planId === undefined ? null : { subscription: planId ? { planId } : {} }
+      }
     })
 
   eq(mk('individual-goat').resolveProbeTarget(CC_SOURCE), { url: 'https://commandcode.ai/docs/plans/goat', creditsColumn: 'Monthly credits' }, 'goat → goat 计划页 + Monthly credits 列')

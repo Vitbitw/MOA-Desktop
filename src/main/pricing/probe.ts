@@ -373,26 +373,34 @@ export interface ProbeTarget {
  * 动态选对应计划页（URL 与额度列标题见 CC_PLAN_PAGE——每模型 Monthly credits 只在计划页有，
  * 且 max 页为双列、必须指列）；
  * 未登录 / 无订阅 / 未知 planId（teams-pro、provider 等无公开计划页）/ 快照异常 → 回退源自带 URL。
- * 其余源原样返回（零影响）。多 commandcode 监控源时按配置顺序取第一个能解析出套餐的。
+ * 其余源原样返回（零影响）。多账号时**Plan 账号优先**（其快照才带订阅），再按配置顺序找第一个能解析出套餐的。
  */
 export function resolveProbeTarget(source: PricingProbeSource): ProbeTarget {
   const providerId = resolveSourceProviderId(source)
   const provider = providerId ? getAllProviders().find((p) => p.id === providerId) : undefined
   if (!provider?.baseUrl?.includes('api.commandcode.ai')) return { url: source.url }
   try {
-    for (const ms of readAppSettings().monitoring.sources) {
-      if (!ms.enabled || ms.type !== 'commandcode') continue
-      const snap = getUsageSnapshot(ms.id)
+    // v5：套餐信息按**账号**存。同一源可能有 Plan 账号与按量账号——优先取 Plan 账号的订阅快照，
+    // 拿不到再看其它账号，避免用按量账号的空订阅去否定套餐计划页。
+    const mon = readAppSettings().monitoring
+    const ccSourceIds = new Set(
+      mon.sources.filter((s) => s.enabled && s.type === 'commandcode').map((s) => s.id)
+    )
+    const candidates = mon.accounts
+      .filter((a) => ccSourceIds.has(a.sourceId))
+      .sort((a, b) => (a.billing === b.billing ? 0 : a.billing === 'plan' ? -1 : 1))
+    for (const acc of candidates) {
+      const snap = getUsageSnapshot(acc.id)
       const planId = snap && 'subscription' in snap ? snap.subscription?.planId : undefined
       const page = planId ? CC_PLAN_PAGE[planId] : undefined
       if (page) {
         if (DEBUG) {
-          console.log(`[PricingProbe] ${source.name}(${source.id}) 套餐 ${planId} → 计划页 ${page.url}（额度列「${page.creditsColumn}」）`)
+          console.log(`[PricingProbe] ${source.name}(${source.id}) 账号 ${acc.id} 套餐 ${planId} → 计划页 ${page.url}（额度列「${page.creditsColumn}」）`)
         }
         return { url: page.url, creditsColumn: page.creditsColumn }
       }
       if (DEBUG) {
-        console.log(`[PricingProbe] ${source.name}(${source.id}) 套餐不可用(planId=${planId ?? '无'})，回退源 URL ${source.url}`)
+        console.log(`[PricingProbe] ${source.name}(${source.id}) 账号 ${acc.id} 套餐不可用(planId=${planId ?? '无'})，回退源 URL ${source.url}`)
       }
     }
   } catch (err) {

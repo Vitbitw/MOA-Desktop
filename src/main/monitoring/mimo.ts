@@ -8,6 +8,7 @@
 //      - 5小时/7天窗口：响应里出现窗口形态字段时防御性解析（无则区块降级）
 //   3. 归一化为 MimoUsage，区块级优雅降级
 // 网络请求统一走 fetchProxy（尊重用户的网络代理设置）。
+// POST 端点须带 `?api-platform_ph=<cookie 值去引号>`（平台网关要求，详见 mimoPost）。
 // 注意：MiMo 无 API Key 通道，余额/套餐查询全部基于登录 Cookie（约 24h 有效期，过期需重新登录）。
 // 金额口径：MiMo 接口按账户币种返回（国内默认 CNY），主进程统一归一为 USD，
 // 展示层沿用 formatCost(…, settings.currency)（CNY 展示 ×7.2，与全应用一致）。
@@ -29,20 +30,21 @@ const API_BASE = 'https://platform.xiaomimimo.com/api/v1'
 const LOGIN_URL = 'https://platform.xiaomimimo.com'
 const LOGIN_PARTITION = 'persist:mimo'
 const REQUEST_TIMEOUT_MS = 15_000
-/** CNY → USD 折算率（与 providers.plan_currency、formatCost 展示换算同一口径） */
+/** CNY → USD 折算率（与 provider_accounts.plan_currency、formatCost 展示换算同一口径） */
 const CNY_TO_USD = 7.2
 /** 诊断开关（MOA_MONITOR_DEBUG=1）：输出刷新状态，排查用量数据异常时开启 */
 const DEBUG = process.env.MOA_MONITOR_DEBUG === '1'
 
-/** 判定登录有效所需的关键 cookie 名 */
-const REQUIRED_COOKIES = ['api-platform_serviceToken', 'userId']
+/** 判定登录有效所需的关键 cookie 名。ph 同时用于 POST 端点的 query 参数（见 mimoPost）：
+ *  缺失时会捕获到「GET 可用、POST 不可用」的中间态凭证 → 刷新必报登录过期 */
+const REQUIRED_COOKIES = ['api-platform_serviceToken', 'userId', 'api-platform_ph']
 
 let loginWin: BrowserWindow | null = null
 
-// ─── 凭证 ───
+// ─── 凭证（按**账号**键控；默认账号 id = 源 id）───
 
-function credKey(sourceId: string): string {
-  return sourceId
+function credKey(accountId: string): string {
+  return accountId
 }
 
 /** 从分区收集 MiMo 相关 cookie 拼装 Cookie 头；关键 cookie 缺失时返回 null */
@@ -62,10 +64,22 @@ async function buildCookieHeader(ses: Electron.Session): Promise<string | null> 
   }
 }
 
+/**
+ * 从 Cookie 头里取单个 cookie 的值。
+ * 平台 Set-Cookie 会把值用双引号包裹（页面 document.cookie 可见 `"xxx=="` 形态），
+ * 而网关比对与官网前端拼 query 用的都是**去引号**的值，故统一剥掉首尾引号。
+ */
+function cookieValue(cookieHeader: string, name: string): string | undefined {
+  const m = new RegExp(`(?:^|;\\s*)${name}=([^;]*)`).exec(cookieHeader)
+  if (!m) return undefined
+  return m[1].replace(/^"|"$/g, '')
+}
+
 // ─── 登录窗 ───
 
 export function loginToMimo(
   source: RemoteUsageSource,
+  accountId: string,
   parent?: BrowserWindow | null
 ): Promise<{ success: boolean; cancelled?: boolean; error?: string }> {
   return new Promise(async (resolve) => {
@@ -115,7 +129,7 @@ export function loginToMimo(
       if (header) {
         captured = true
         clearInterval(pollTimer)
-        saveUsageCredential(credKey(source.id), header)
+        saveUsageCredential(credKey(accountId), header)
         finish({ success: true })
         loginWin?.close()
       }
@@ -137,7 +151,7 @@ export function loginToMimo(
           if (header) {
             captured = true
             clearInterval(graceTimer)
-            saveUsageCredential(credKey(source.id), header)
+            saveUsageCredential(credKey(accountId), header)
             finish({ success: true })
             return
           }
@@ -191,9 +205,18 @@ async function mimoGet(path: string, cookie: string): Promise<{ status: number; 
   }
 }
 
+/**
+ * POST 请求。平台网关对 POST 端点额外要求 query 带 `api-platform_ph`
+ * （值 = 同名 cookie 去引号后 URL 编码，与官网前端 29618 请求层 `credentials:"same-origin"` 同款）：
+ * 缺失或带引号一律判未登录 → 401 + loginUrl + 服务端清登录 cookie。
+ * 真实报障对齐：修复前 POST /usage/detail/list 恒 401，UI 误报「登录已过期（Cookie 约 24h 有效）」。
+ * GET 端点无此要求。
+ */
 async function mimoPost(path: string, payload: unknown, cookie: string): Promise<{ status: number; body: unknown }> {
+  const ph = cookieValue(cookie, 'api-platform_ph')
+  const query = ph ? `?api-platform_ph=${encodeURIComponent(ph)}` : ''
   try {
-    const resp = await fetchProxy(`${API_BASE}${path}`, {
+    const resp = await fetchProxy(`${API_BASE}${path}${query}`, {
       method: 'POST',
       headers: {
         Cookie: cookie,
@@ -653,8 +676,8 @@ function aggregateSummary(rows: MimoDetailRow[], currency: string): NonNullable<
   }
 }
 
-export async function refreshMimoUsage(source: RemoteUsageSource): Promise<MimoRefreshResult> {
-  const cookie = getUsageCredential(credKey(source.id))
+export async function refreshMimoUsage(accountId: string): Promise<MimoRefreshResult> {
+  const cookie = getUsageCredential(credKey(accountId))
   if (!cookie) return { ok: false, code: 'not_authenticated' }
 
   const now = new Date()
@@ -671,7 +694,7 @@ export async function refreshMimoUsage(source: RemoteUsageSource): Promise<MimoR
   ])
   if (DEBUG) {
     console.log(
-      `[Monitor] mimo refresh(${source.id}): balance=${balRes.status} tokenPlan=${planRes.status} detail=${detailRes.status} subStatus=${subRes.status} usageList=${listRes.status} overview=${overviewRes.status}`
+      `[Monitor] mimo refresh(${accountId}): balance=${balRes.status} tokenPlan=${planRes.status} detail=${detailRes.status} subStatus=${subRes.status} usageList=${listRes.status} overview=${overviewRes.status}`
     )
   }
 
@@ -762,7 +785,7 @@ export async function refreshMimoUsage(source: RemoteUsageSource): Promise<MimoR
             cost: toUsd(r.costNative, parsed.currency),
             requests: r.requests
           }))
-          persisted = persistUsageRecords(source.id, records)
+          persisted = persistUsageRecords(accountId, records)
         } catch (err) {
           console.warn('[Monitor] MiMo 用量记录落库失败:', err)
         }

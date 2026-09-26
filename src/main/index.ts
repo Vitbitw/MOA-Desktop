@@ -5,11 +5,11 @@ import { getDatabase } from './db/database'
 import { readAppSettings, updateRawAppSettings } from './config/appSettings'
 import { handleIpc, handleIpcRaw } from './ipc/handle'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
-import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, PricingProbeState, PricingProbeResultItem, ProbeProgressEvent, ToastData, GenerateExpertsRequest, ProviderUpdatePatch, Provider } from '../shared/types'
+import type { AppSettings, SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, UsageRow, PricingProbeSource, PricingProbeState, PricingProbeResultItem, ProbeProgressEvent, ToastData, GenerateExpertsRequest, ProviderUpdatePatch, ProviderAccountPatch, ProviderAccountInput, Provider } from '../shared/types'
 import { DEFAULT_HOST, DEFAULT_PORT } from '../shared/defaults'
 import { applyGatewayServer, stopGatewayServer } from './gateway/server'
 import { initUiBridge } from './uiBridge'
-import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders, updateProvider, updateProviderKey, backfillProviderBilling } from './providers/providerManager'
+import { getAllProviders, addProvider, removeProvider, fetchAndCacheModels, seedBuiltInProviders, updateProvider, updateProviderKey, addProviderAccount, updateProviderAccount, removeProviderAccount, setActiveProviderAccount, backfillProviderBilling } from './providers/providerManager'
 import { getMoaConfig, setMoaConfig, loadMoaConfigFromDb } from './moa/moaConfig'
 import { executeMoA, executeMoAWithEvents } from './moa/moaEngine'
 import type { MoaResponse } from './moa/moaEngine'
@@ -95,7 +95,7 @@ interface RequestLogRow {
 }
 
 /** 解析 request_logs.models 明细列：null / 空 / 损坏 / 非数组 → null（调用方按「无明细」处理，仅计入 totals） */
-function parseRequestLogModels(raw: string | null): Array<{ modelId: string; providerId?: string; prompt: number; completion: number; cost: number }> | null {
+function parseRequestLogModels(raw: string | null): Array<{ modelId: string; providerId?: string; accountId?: string; prompt: number; completion: number; cost: number }> | null {
   if (!raw) return null
   try {
     const parsed = JSON.parse(raw)
@@ -297,14 +297,31 @@ function registerIpcHandlers() {
   // 定价探查（缺省）只把结果当关键词，空列表保留本地缓存
   handleIpc(IPC.CONFIG_GET_MODELS, (_e, providerId: string) => fetchAndCacheModels(providerId, { allowEmpty: true }))
 
-  // T1：编辑厂商（仅 patch 传入字段更新；plan 传 null 清空订阅费配置）
+  // T1：编辑厂商来源级字段（名称 / API 地址；仅 patch 传入字段更新）
   handleIpc(IPC.PROVIDERS_UPDATE, (_e, id: string, patch: ProviderUpdatePatch) =>
     updateProvider(id, patch)
   )
 
-  // T1：改 API 密钥 —— 只写本条记录（v4 B 方案：厂商分组已移除，组同步退役）
-  handleIpc(IPC.PROVIDERS_UPDATE_KEY, (_e, id: string, apiKey: string) => {
-    updateProviderKey(id, apiKey)
+  // 改某账号的 API 密钥 —— 账号级单条语义（入参 accountId，只写本账号）
+  handleIpc(IPC.PROVIDERS_UPDATE_KEY, (_e, accountId: string, apiKey: string) => {
+    updateProviderKey(accountId, apiKey)
+  })
+
+  // ── 厂商账号（v5：一个来源可挂无限个账号，通道 / 订阅费 / Key 各归各的账号）──
+  handleIpc(IPC.PROVIDERS_ADD_ACCOUNT, (_e, providerId: string, input: ProviderAccountInput) =>
+    addProviderAccount(providerId, input)
+  )
+
+  handleIpc(IPC.PROVIDERS_UPDATE_ACCOUNT, (_e, accountId: string, patch: ProviderAccountPatch) =>
+    updateProviderAccount(accountId, patch)
+  )
+
+  handleIpc(IPC.PROVIDERS_REMOVE_ACCOUNT, (_e, accountId: string) => {
+    removeProviderAccount(accountId)
+  })
+
+  handleIpc(IPC.PROVIDERS_SET_ACTIVE_ACCOUNT, (_e, providerId: string, accountId: string) => {
+    setActiveProviderAccount(providerId, accountId)
   })
 
   // ── Conversations ──
@@ -683,11 +700,33 @@ function registerIpcHandlers() {
       : getDatabase().query<RequestLogRow>('SELECT * FROM request_logs WHERE timestamp >= ?', [since])
 
     // 厂商信息（getAllProviders 依赖 DB 已初始化，故在 handler 内调用）：
-    // name/billing = 「来源名·通道」拆行 key（设计 §4，v4 恒带通道后缀）；全量列表供 Plan 摊销重算（设计 §3）
+    // name/billing = 「来源名[·账号名]·通道」拆行 key（设计 §4，v4 恒带通道后缀）；全量列表供 Plan 摊销重算（设计 §3）
     const allProviders: Provider[] = getAllProviders()
-    const providerNameMap = new Map(
-      allProviders.map((p) => [p.id, { name: p.name, billing: p.billing }] as const)
+    // 账号级索引：分组按**明细快照的 accountId** 取，切当前账号 / 改通道不会把历史行并进别的账号
+    const accountNameMap = new Map(
+      allProviders.flatMap((p) =>
+        p.accounts.map((a) => [a.id, { name: p.name, label: a.label, billing: a.billing }] as const)
+      )
     )
+    const providerNameMap = new Map(
+      allProviders.map((p) => [p.id, { name: p.name, label: '', billing: p.billing }] as const)
+    )
+    /**
+     * 拆行 key：账号有备注名时带上（同来源多账号互不合并），否则与 v4 的「来源名·通道」完全一致。
+     * **隔离关键**：明细带 accountId → 只认该账号；账号已删则返回 undefined（调用点回退模型名），
+     * 绝不回落到同来源的默认账号——否则 A 账号的历史请求会被并进 B 账号的分组行（串号）。
+     * 只有旧数据（写入时还没有 accountId）才按 providerId 解析（默认账号 id = providerId）。
+     */
+    const groupKeyFor = (m: { providerId?: string; accountId?: string }): string | undefined => {
+      const info = m.accountId
+        ? accountNameMap.get(m.accountId)
+        : m.providerId
+          ? (accountNameMap.get(m.providerId) ?? providerNameMap.get(m.providerId))
+          : undefined
+      if (!info) return undefined
+      const label = info.label ? `${info.label}·` : ''
+      return `${info.name}·${label}${info.billing === 'plan' ? 'Plan' : '按量'}`
+    }
     const MODE_LABELS: Record<string, string> = {
       aggregate: '聚合',
       compare: '对比',
@@ -736,18 +775,15 @@ function registerIpcHandlers() {
         continue
       }
 
-      // 按 groupBy 归组：model→modelId；provider→「来源名·通道」拆行（恒带后缀，v4 B 方案）；mode→中文模式标签
+      // 按 groupBy 归组：model→modelId；provider→「来源名[·账号名]·通道」拆行（恒带后缀，v4 B 方案）；mode→中文模式标签
       for (let i = 0; i < models.length; i++) {
         const m = models[i]
         let key: string
         if (groupBy === 'model') {
           key = m.modelId
         } else if (groupBy === 'provider') {
-          // providerId 缺失或厂商已删除 → 兜底显示模型名，避免 UUID
-          const info = m.providerId ? providerNameMap.get(m.providerId) : undefined
-          key = info
-            ? `${info.name}·${info.billing === 'plan' ? 'Plan' : '按量'}`
-            : m.modelId
+          // 明细缺 providerId 或厂商/账号已删除 → 兜底显示模型名，避免 UUID
+          key = groupKeyFor(m) ?? m.modelId
         } else {
           // 标题生成日志（source='title'）单独归组，避免污染「直通」模式
           key = row.source === 'title' ? '标题' : (MODE_LABELS[row.moa_mode] || row.moa_mode || 'direct')
@@ -794,53 +830,67 @@ function registerIpcHandlers() {
     return { prompt, completion, cost, running: moaRunning } satisfies UsageToday
   })
 
-  // ── Cloud Usage Monitoring (Command Code / MiMo / DeepSeek) ──
-  handleIpc(IPC.MONITOR_GET_STATUS, (_e, source: RemoteUsageSource) =>
-    source.type === 'deepseek' ? getDeepSeekStatus(source.id) : getMonitorStatus(source.id)
-  )
+  // ── Cloud Usage Monitoring (Command Code / Xiaomi MiMo / DeepSeek) ──
+  // v5：入参一律 accountId。主进程按账号解析所属源，凭据 / 快照 / 本地累计 / 采集状态
+  // 全部按账号读写——渲染层无法传入「不匹配的源」，同源多账号之间不可能串号。
+  const resolveMonitorTarget = (accountId: string): RemoteUsageSource => {
+    const m = readAppSettings().monitoring
+    const account = m.accounts.find((a) => a.id === accountId)
+    const source = account ? m.sources.find((s) => s.id === account.sourceId) : undefined
+    if (!account || !source) throw new Error(`监控账号不存在: ${accountId}`)
+    return source
+  }
 
-  handleIpc(IPC.MONITOR_LOGIN, (_e, source: RemoteUsageSource) =>
-    source.type === 'mimo'
-      ? loginToMimo(source, mainWindow)
+  handleIpc(IPC.MONITOR_GET_STATUS, (_e, accountId: string) => {
+    const source = resolveMonitorTarget(accountId)
+    return source.type === 'deepseek' ? getDeepSeekStatus(accountId) : getMonitorStatus(accountId)
+  })
+
+  handleIpc(IPC.MONITOR_LOGIN, (_e, accountId: string) => {
+    const source = resolveMonitorTarget(accountId)
+    return source.type === 'mimo'
+      ? loginToMimo(source, accountId, mainWindow)
       : source.type === 'deepseek'
-        ? loginToDeepSeek(source, mainWindow)
-        : loginToCommandCode(source, mainWindow)
-  )
-
-  handleIpc(IPC.MONITOR_LOGOUT, (_e, sourceId: string) => {
-    logoutCommandCode(sourceId)
-    logoutDeepSeek(sourceId)
-    // 登出即清该源本地累计与用量快照：同一 sourceId 换账号后不得混入/展示旧账号数据
-    clearCumulativeUsage(sourceId)
-    clearUsageSnapshot(sourceId)
+        ? loginToDeepSeek(source, accountId, mainWindow)
+        : loginToCommandCode(source, accountId, mainWindow)
   })
 
-  handleIpc(IPC.MONITOR_SET_API_KEY, (_e, sourceId: string, apiKey: string) => {
-    saveUsageCredential(usageApiKeyKey(sourceId), apiKey)
+  handleIpc(IPC.MONITOR_LOGOUT, (_e, accountId: string) => {
+    logoutCommandCode(accountId)
+    logoutDeepSeek(accountId)
+    // 登出即清**该账号**的本地累计与用量快照：换账号后不得混入/展示旧账号数据，
+    // 同源其它账号的数据保留
+    clearCumulativeUsage(accountId)
+    clearUsageSnapshot(accountId)
   })
 
-  // 本地累计（Command Code）：多次采集去重累积的按模型用量
-  handleIpc(IPC.MONITOR_GET_CUMULATIVE, (_e, sourceId: string) => getCumulativeUsage(sourceId))
+  handleIpc(IPC.MONITOR_SET_API_KEY, (_e, accountId: string, apiKey: string) => {
+    saveUsageCredential(usageApiKeyKey(accountId), apiKey)
+  })
+
+  // 本地累计（Command Code）：多次采集去重累积的按模型用量（按账号隔离）
+  handleIpc(IPC.MONITOR_GET_CUMULATIVE, (_e, accountId: string) => getCumulativeUsage(accountId))
 
   // 后台采集器状态（是否启用 / 间隔 / 上次采集时间 / 上次错误）
   handleIpc(IPC.MONITOR_COLLECTOR_STATUS, () => getCollectorStatus())
 
   // 重启前持久化的用量快照（渲染层首进先渲染它，再按统一自动刷新间隔决定是否刷新）
-  handleIpc(IPC.MONITOR_GET_SNAPSHOT, (_e, sourceId: string) => getUsageSnapshot(sourceId))
+  handleIpc(IPC.MONITOR_GET_SNAPSHOT, (_e, accountId: string) => getUsageSnapshot(accountId))
 
-  handleIpcRaw(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
-    // 页面刷新与后台采集共用同一「自动刷新间隔」：这里先占位，
-    // 采集器据此跳过同一间隔内的重复拉取（见 collector.markUsageCollected）
-    if (source.type === 'commandcode' || source.type === 'mimo') markUsageCollected()
+  handleIpcRaw(IPC.MONITOR_REFRESH, async (_e, accountId: string) => {
+    const source = resolveMonitorTarget(accountId)
+    // 页面刷新与后台采集共用同一「自动刷新间隔」：这里先按**本账号**占位，
+    // 采集器据此跳过该账号间隔内的重复拉取（不影响同源其它账号）
+    if (source.type === 'commandcode' || source.type === 'mimo') markUsageCollected(accountId)
     const result =
       source.type === 'mimo'
-        ? await refreshMimoUsage(source)
+        ? await refreshMimoUsage(accountId)
         : source.type === 'deepseek'
-          ? await refreshDeepSeekUsage(source)
-          : await refreshCommandCodeUsage(source)
+          ? await refreshDeepSeekUsage(accountId)
+          : await refreshCommandCodeUsage(accountId)
     if (result.ok) {
-      // 落盘快照：渲染层页面缓存只活在会话内，重启后首进由此恢复
-      saveUsageSnapshot(source.id, result.data)
+      // 落盘快照：渲染层页面缓存只活在会话内，重启后首进由此恢复（一账号一行）
+      saveUsageSnapshot(accountId, result.data)
       return { success: true, data: result.data }
     }
     return { success: false, error: result.error, code: result.code }

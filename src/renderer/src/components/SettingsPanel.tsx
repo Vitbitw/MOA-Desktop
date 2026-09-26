@@ -5,7 +5,7 @@ import { useProbeStore, probeResultsToMessages, type PricingSortKey } from '../s
 import { useNotificationStore } from '../store/notificationStore'
 import { formatCost } from '../lib/usageFormat'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap, Pencil } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture } from '../../../shared/types'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, ProviderAccount, MoaArchitecture } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { splitModelKey } from '../../../shared/modelKey'
 import { hasProviderAccess, isLocalBaseUrl } from '../../../shared/providerAccess'
@@ -770,10 +770,15 @@ function ProvidersSection() {
             <div className="flex items-center justify-between">
               <span className="font-medium text-foreground">
                 {p.name}
-                {/* 通道徽标：按量=中性灰、Plan=主题色（记录属性，与是否分组无关） */}
+                {/* 通道徽标：按量=中性灰、Plan=主题色（记录属性，与是否分组无关）——取自当前账号 */}
                 <span className={`ml-1.5 text-[10px] font-normal ${p.billing === 'plan' ? 'text-primary' : 'text-muted-foreground'}`}>
                   （{p.billing === 'plan' ? 'Plan' : '按量'}）
                 </span>
+                {p.accounts.length > 1 && (
+                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">
+                    {p.accounts.length} 个账号
+                  </span>
+                )}
               </span>
               <div className="flex items-center gap-1">
                 <button
@@ -787,7 +792,7 @@ function ProvidersSection() {
                 <button
                   onClick={() => setEditing(p)}
                   className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent/50 transition-colors"
-                  title="编辑厂商（通道 / 订阅费 / 密钥）"
+                  title="编辑厂商（多账号 / 通道 / 订阅费 / 密钥）"
                 >
                   <Pencil className="w-3.5 h-3.5" />
                 </button>
@@ -864,10 +869,45 @@ const formatPlanAnchor = (ts?: number): string => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
+/** 账号草稿：编辑厂商时先改本地、点「保存」统一提交；id=null 表示尚未落库的待建账号 */
+interface AccountDraft {
+  id: string | null
+  label: string
+  billing: 'usage' | 'plan'
+  planAmount: string
+  planCurrency: 'CNY' | 'USD'
+  planDate: string
+  apiKey: string
+}
+
+const emptyAccountDraft = (): AccountDraft => ({
+  id: null,
+  label: '',
+  billing: 'usage',
+  planAmount: '',
+  planCurrency: 'CNY',
+  planDate: '',
+  apiKey: ''
+})
+
+const toAccountDraft = (a: ProviderAccount): AccountDraft => ({
+  id: a.id,
+  label: a.label,
+  billing: a.billing,
+  planAmount: a.plan ? String(a.plan.amount) : '',
+  planCurrency: a.plan?.currency ?? 'CNY',
+  planDate: formatPlanAnchor(a.plan?.anchorTs),
+  apiKey: a.apiKey
+})
+
+/** 草稿账号的展示名：有备注名用备注名，否则用通道名 */
+const accountDraftName = (d: AccountDraft): string => d.label.trim() || (d.billing === 'plan' ? 'Plan' : '按量')
+
 function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () => void; onDone: () => void; editingProvider?: Provider }) {
   const editing = !!editingProvider
   const [name, setName] = useState(editingProvider?.name ?? '')
   const [baseUrl, setBaseUrl] = useState(editingProvider?.baseUrl ?? '')
+  // 新建模式：单账号，字段与旧版一致（账号落库由 addProvider 一并完成）
   const [apiKey, setApiKey] = useState(editingProvider?.apiKey ?? '')
   // 计费通道：'usage' = 按量（默认）| 'plan' = 订阅/Token 包
   const [billing, setBilling] = useState<'usage' | 'plan'>(editingProvider?.billing ?? 'usage')
@@ -877,6 +917,68 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
   const [planDate, setPlanDate] = useState(formatPlanAnchor(editingProvider?.plan?.anchorTs))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // ── 编辑模式：账号层（同来源可挂多个账号，通道/订阅费/Key 各归各的账号）──
+  const [drafts, setDrafts] = useState<AccountDraft[]>(() => (editingProvider?.accounts ?? []).map(toAccountDraft))
+  const [sel, setSel] = useState(() => {
+    if (!editingProvider) return 0
+    const i = editingProvider.accounts.findIndex((a) => a.id === editingProvider.activeAccountId)
+    return i >= 0 ? i : 0
+  })
+  /** 待删除账号 id（保存时逐个 removeProviderAccount） */
+  const [removedIds, setRemovedIds] = useState<string[]>([])
+  /** 期望的当前账号在 drafts 中的下标（允许指向待建账号；保存时解析成真实 id） */
+  const [activeSel, setActiveSel] = useState(() => {
+    if (!editingProvider) return 0
+    const i = editingProvider.accounts.findIndex((a) => a.id === editingProvider.activeAccountId)
+    return i >= 0 ? i : 0
+  })
+
+  /** 落库中的账号（排除待删 / 待建）数量：至少保留一个 */
+  const liveCount = drafts.filter((d) => d.id !== null && !removedIds.includes(d.id)).length +
+    drafts.filter((d) => d.id === null).length
+
+  const cur = drafts[sel]
+
+  const patchDraft = (i: number, patch: Partial<AccountDraft>) =>
+    setDrafts((list) => list.map((d, idx) => (idx === i ? { ...d, ...patch } : d)))
+
+  const addDraft = () => {
+    setDrafts((list) => [
+      ...list,
+      { id: null, label: '', billing: 'usage', planAmount: '', planCurrency: 'CNY', planDate: '', apiKey: '' }
+    ])
+    setSel(drafts.length)
+  }
+
+  const removeDraft = (i: number) => {
+    const target = drafts[i]
+    if (!target) return
+    const next = drafts.filter((_, idx) => idx !== i)
+    const nextRemoved = target.id ? [...removedIds, target.id] : removedIds
+    setDrafts(next)
+    setRemovedIds(nextRemoved)
+    // 下标跟随删除位移；删的恰好是当前账号 → 当前账号回退到第一个
+    const fix = (x: number) => (x > i ? x - 1 : x === i ? 0 : x)
+    setSel((s) => Math.min(fix(s), next.length - 1))
+    setActiveSel((a) => (nextRemoved.includes(drafts[a]?.id ?? '') ? 0 : fix(a)))
+  }
+
+  /** 草稿 → 提交用 Plan 对象：非 plan 通道 / 金额非正数 / 留空 → null（清空订阅费，回退单价链） */
+  const buildPlan = (d: AccountDraft): { amount: number; currency: 'CNY' | 'USD'; anchorTs?: number } | null => {
+    if (d.billing !== 'plan' || d.planAmount.trim() === '') return null
+    const amount = Number(d.planAmount)
+    if (!Number.isFinite(amount) || amount < 0) throw new Error('每期消费金额需为不小于 0 的数字')
+    const anchorTs = parsePlanAnchor(d.planDate)
+    return { amount, currency: d.planCurrency, ...(anchorTs !== undefined ? { anchorTs } : {}) }
+  }
+
+  const accountPayload = (d: AccountDraft, plan: { amount: number; currency: 'CNY' | 'USD'; anchorTs?: number } | null) => ({
+    label: d.label.trim(),
+    billing: d.billing,
+    ...(plan ? { plan } : {}),
+    apiKey: d.apiKey.trim()
+  })
 
   const handleSave = async () => {
     if (!name.trim()) {
@@ -891,61 +993,108 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
       return
     }
     // 本地回环地址免 Key（本地推理服务不校验 Authorization）；云端厂商必须填 Key
-    if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl)) {
+    if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl) && !editing) {
       setError('云端厂商需填写 API Key（回环地址可留空）')
       return
     }
-    // 每期消费金额：留空 = 未配置（回退单价链）；填了必须是 ≥0 数字
-    let amount = 0
-    if (planAmount.trim() !== '') {
-      amount = Number(planAmount)
-      if (!Number.isFinite(amount) || amount < 0) {
-        setError('每期消费金额需为不小于 0 的数字')
-        return
-      }
+    if (editing && liveCount === 0) {
+      setError('至少保留一个账号')
+      return
     }
-    const anchorTs = parsePlanAnchor(planDate)
-    const plan = billing === 'plan' && amount > 0
-      ? { amount, currency: planCurrency, ...(anchorTs !== undefined ? { anchorTs } : {}) }
-      : null
+    // 账号草稿统一先行校验：金额非法在提交前拦下，避免改到一半才发现（部分账号已提交）
+    let draftPlans: Array<{ amount: number; currency: 'CNY' | 'USD'; anchorTs?: number } | null>
+    let newPlan: { amount: number; currency: 'CNY' | 'USD'; anchorTs?: number } | null
+    try {
+      draftPlans = drafts.map((d) => buildPlan(d))
+      newPlan = buildPlan({ ...emptyAccountDraft(), billing, planAmount, planCurrency, planDate })
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err))
+      return
+    }
     setSaving(true)
     setError(null)
     try {
-      if (editingProvider) {
-        // 编辑：通道 / 订阅费 / 名称 / 地址走 updateProvider（plan=null 清空订阅费）
-        const res = await window.moaAPI.updateProvider(editingProvider.id, {
+      if (!editingProvider) {
+        const res = await window.moaAPI.addProvider({
           name: name.trim(),
           baseUrl: finalBaseUrl,
+          apiKey: apiKey.trim(),
           billing,
-          plan
+          ...(newPlan ? { plan: newPlan } : {})
         })
-        if (!res.success) {
+        if (res.success) {
+          onDone()
+        } else {
           setError(String(res.error || '保存失败'))
-          return
         }
-        // 密钥变更走 updateProviderKey（v4 单条语义：只写本条）
-        if (apiKey !== editingProvider.apiKey) {
-          const keyRes = await window.moaAPI.updateProviderKey(editingProvider.id, apiKey)
-          if (!keyRes.success) {
-            setError(String(keyRes.error || '密钥保存失败'))
+        return
+      }
+
+      // ── 编辑：来源级字段 → 新增/更新账号 → 删除账号 → 切当前账号 ──
+      // **先建后删**：用户「删掉唯一账号 + 同次保存新建一个」时，先建后删才不会撞上
+      // 「至少保留一个账号」；且新建失败只多出账号（可再删），不会丢数据。
+      const srcRes = await window.moaAPI.updateProvider(editingProvider.id, {
+        name: name.trim(),
+        baseUrl: finalBaseUrl
+      })
+      if (!srcRes.success) {
+        setError(String(srcRes.error || '保存失败'))
+        return
+      }
+      const createdIds = new Map<number, string>()
+      for (let i = 0; i < drafts.length; i++) {
+        const d = drafts[i]
+        if (d.id === null) {
+          const r = await window.moaAPI.addProviderAccount(editingProvider.id, accountPayload(d, draftPlans[i] ?? null))
+          if (!r.success) {
+            setError(String(r.error || '添加账号失败'))
+            return
+          }
+          createdIds.set(i, (r.data as { id: string }).id)
+          continue
+        }
+        const orig = editingProvider.accounts.find((a) => a.id === d.id)
+        if (!orig) continue
+        const plan = draftPlans[i] ?? null
+        const planChanged = JSON.stringify(plan ?? null) !== JSON.stringify(orig.plan ?? null)
+        if (d.label.trim() !== orig.label || d.billing !== orig.billing || planChanged) {
+          const r = await window.moaAPI.updateProviderAccount(d.id, {
+            label: d.label.trim(),
+            billing: d.billing,
+            plan
+          })
+          if (!r.success) {
+            setError(String(r.error || '保存账号失败'))
             return
           }
         }
-        onDone()
-        return
+        if (d.apiKey !== orig.apiKey) {
+          const kr = await window.moaAPI.updateProviderKey(d.id, d.apiKey)
+          if (!kr.success) {
+            setError(String(kr.error || '密钥保存失败'))
+            return
+          }
+        }
       }
-      const res = await window.moaAPI.addProvider({
-        name: name.trim(),
-        baseUrl: finalBaseUrl,
-        apiKey: apiKey.trim(),
-        billing,
-        ...(plan ? { plan } : {})
-      })
-      if (res.success) {
-        onDone()
-      } else {
-        setError(String(res.error || '保存失败'))
+      // 新账号都已落库，再删（顺序保证不会出现「先删到只剩 0 个」的中间态）
+      for (const rid of removedIds) {
+        const rm = await window.moaAPI.removeProviderAccount(rid)
+        if (!rm.success) {
+          setError(String(rm.error || '删除账号失败'))
+          return
+        }
       }
+      // 切换当前账号：指向待建账号时用它落库后的 id
+      const nextActive = drafts[activeSel]?.id ?? createdIds.get(activeSel)
+      if (nextActive && nextActive !== editingProvider.activeAccountId) {
+        const ar = await window.moaAPI.setActiveProviderAccount(editingProvider.id, nextActive)
+        if (!ar.success) {
+          setError(String(ar.error || '切换账号失败'))
+          return
+        }
+      }
+      onDone()
+      return
     } catch (err) {
       setError(String(err))
     } finally {
@@ -998,6 +1147,9 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
               placeholder="例如：https://api.openai.com/v1"
             />
           </div>
+          {/* ── 新建：单账号（Key / 通道 / 订阅费与旧版一致）；编辑时这些字段下沉到下方「账号」区 ── */}
+          {!editing && (
+          <>
           <div>
             <label className="text-xs text-muted-foreground block mb-1">API Key（回环地址可留空）</label>
             <input
@@ -1069,6 +1221,149 @@ function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () =
                 <p className="text-[10px] text-muted-foreground mt-1">摊销按月分桶，缺省当月 1 号；年费÷12 填入</p>
               </div>
             </div>
+          )}
+          </>
+          )}
+
+          {/* ── 编辑：账号管理（同一来源可挂多个账号，Plan 账号与按量账号各配各的 Key）── */}
+          {editing && cur && (
+          <div className="rounded-md border border-border bg-muted/30 p-2 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">账号（{liveCount}）</span>
+              <button
+                type="button"
+                onClick={addDraft}
+                className="flex items-center gap-1 text-xs text-primary hover:text-primary/80"
+              >
+                <Plus className="w-3 h-3" /> 添加账号
+              </button>
+            </div>
+
+            {/* 账号切换：点选后下方表单编辑该账号 */}
+            <div className="flex flex-wrap gap-1">
+              {drafts.map((d, i) => (
+                <button
+                  key={d.id ?? `new-${i}`}
+                  type="button"
+                  onClick={() => setSel(i)}
+                  className={`px-2 py-1 text-xs rounded-md border transition-colors ${
+                    i === sel
+                      ? 'border-primary bg-primary/10 text-foreground'
+                      : 'border-border text-muted-foreground hover:border-primary/50'
+                  }`}
+                  title={d.label || undefined}
+                >
+                  {accountDraftName(d)}
+                  {d.id !== null && activeSel === i && (
+                    <span className="ml-1 text-[10px] text-primary">当前</span>
+                  )}
+                  {d.id === null && <span className="ml-1 text-[10px] text-muted-foreground">新</span>}
+                </button>
+              ))}
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">账号备注（可空）</label>
+              <input
+                value={cur.label}
+                onChange={(e) => patchDraft(sel, { label: e.target.value })}
+                className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder="例如：工作号 / 家庭号"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">该账号的计费通道</label>
+              <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5 w-fit">
+                {(['usage', 'plan'] as const).map((b) => (
+                  <button
+                    key={b}
+                    type="button"
+                    onClick={() => patchDraft(sel, { billing: b })}
+                    className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                      cur.billing === b
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {b === 'usage' ? '按量' : 'Plan（订阅）'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {cur.billing === 'plan' && (
+              <div className="space-y-2 rounded-md border border-border bg-muted/40 p-2">
+                <div className="flex items-end gap-2">
+                  <div className="flex-1 min-w-0">
+                    <label className="text-xs text-muted-foreground block mb-1">每期消费金额（月）</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={cur.planAmount}
+                      onChange={(e) => patchDraft(sel, { planAmount: e.target.value })}
+                      placeholder="如：68（留空 = 未配置，按单价估算）"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground block mb-1">币种</label>
+                    <select
+                      value={cur.planCurrency}
+                      onChange={(e) => patchDraft(sel, { planCurrency: e.target.value as 'CNY' | 'USD' })}
+                      className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    >
+                      <option value="CNY">CNY（¥）</option>
+                      <option value="USD">USD（$）</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-1">周期起始日</label>
+                  <input
+                    type="date"
+                    value={cur.planDate}
+                    onChange={(e) => patchDraft(sel, { planDate: e.target.value })}
+                    className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <p className="text-[10px] text-muted-foreground mt-1">摊销按月分桶，缺省当月 1 号；年费÷12 填入</p>
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">该账号的 API Key（回环地址可留空）</label>
+              <input
+                type="password"
+                value={cur.apiKey}
+                onChange={(e) => patchDraft(sel, { apiKey: e.target.value })}
+                className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder="sk-...（每个账号各自独立，互不共享）"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-2 pt-0.5">
+              <button
+                type="button"
+                onClick={() => setActiveSel(sel)}
+                disabled={activeSel === sel}
+                className="px-2 py-1 text-xs rounded-md border border-border text-muted-foreground hover:text-foreground disabled:opacity-40"
+                title="调用与成本记账改用该账号"
+              >
+                {activeSel === sel ? '当前使用中' : '设为当前账号'}
+              </button>
+              <button
+                type="button"
+                onClick={() => removeDraft(sel)}
+                disabled={liveCount <= 1}
+                className="px-2 py-1 text-xs rounded-md border border-border text-muted-foreground hover:text-destructive disabled:opacity-40"
+                title={liveCount <= 1 ? '至少保留一个账号' : '删除该账号（凭据与用量一并移除）'}
+              >
+                删除账号
+              </button>
+            </div>
+          </div>
           )}
         </div>
 

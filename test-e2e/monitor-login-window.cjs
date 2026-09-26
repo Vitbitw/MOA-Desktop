@@ -174,7 +174,8 @@ async function runScenario(cfg) {
   removeUsageCredential(cfg.credKey)
   cfg.seed()
 
-  const p = cfg.login(cfg.source, null)
+  // v5：登录凭据按**账号**落库（入参 accountId；默认账号 id = 源 id，故 credKey 即 accountId）
+  const p = cfg.login(cfg.source, cfg.credKey, null)
   await sleep(100)
 
   ok(stub.windows.length === 1, '分区残留旧凭证时仍打开登录窗', { windows: stub.windows.length })
@@ -258,7 +259,7 @@ async function main() {
     expectCred: (c) => c === 'fresh-cc-token'
   })
 
-  // 2) MiMo：旧 serviceToken/userId 还在分区里（服务端已吊销但 cookie 未到期）
+  // 2) MiMo：旧凭证（真实登录为 4 个 cookie：serviceToken/userId/slh/ph）还在分区里（服务端已吊销但 cookie 未到期）
   await runScenario({
     label: 'Xiaomi MiMo',
     login: api.loginToMimo,
@@ -268,15 +269,21 @@ async function main() {
     seed: () =>
       part('persist:mimo').cookies.push(
         { name: 'api-platform_serviceToken', domain: '.xiaomimimo.com', path: '/', value: 'stale-mimo-token' },
-        { name: 'userId', domain: '.xiaomimimo.com', path: '/', value: 'user-1' }
+        { name: 'userId', domain: '.xiaomimimo.com', path: '/', value: 'user-1' },
+        { name: 'api-platform_slh', domain: '.xiaomimimo.com', path: '/', value: '"stale-slh=="' },
+        { name: 'api-platform_ph', domain: '.xiaomimimo.com', path: '/', value: '"stale-ph=="' }
       ),
     partitionCleared: () => part('persist:mimo').cookies.length === 0,
     freshLogin: () =>
       part('persist:mimo').cookies.push(
         { name: 'api-platform_serviceToken', domain: '.xiaomimimo.com', path: '/', value: 'fresh-mimo-token' },
-        { name: 'userId', domain: '.xiaomimimo.com', path: '/', value: 'user-1' }
+        { name: 'userId', domain: '.xiaomimimo.com', path: '/', value: 'user-1' },
+        { name: 'api-platform_slh', domain: '.xiaomimimo.com', path: '/', value: '"fresh-slh=="' },
+        { name: 'api-platform_ph', domain: '.xiaomimimo.com', path: '/', value: '"fresh-ph=="' }
       ),
-    expectCred: (c) => !!c && c.indexOf('api-platform_serviceToken=fresh-mimo-token') !== -1
+    // ph 是 POST 端点的网关要求（见 mimo-request.cjs 回归），捕获必须带上它
+    expectCred: (c) =>
+      !!c && c.indexOf('api-platform_serviceToken=fresh-mimo-token') !== -1 && c.indexOf('api-platform_ph="fresh-ph=="') !== -1
   })
 
   // 3) DeepSeek：旧 userToken 还在分区 localStorage 里（轮询会把它当登录态关窗）

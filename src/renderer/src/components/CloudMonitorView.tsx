@@ -5,7 +5,7 @@ import { formatCost } from '../lib/usageFormat'
 import { expiredWindows, fmtRemaining, isStaleAfterReset } from '../lib/usageWindow'
 import { clearCloudSnapshot, getCloudSnapshot, patchCloudSnapshot, shouldFetchOnMount } from '../lib/cloudMonitorCache'
 import type { CollectorStatusInfo } from '../lib/cloudMonitorCache'
-import { ExternalLink, KeyRound, Loader2, LogOut, RefreshCw } from 'lucide-react'
+import { ExternalLink, KeyRound, Loader2, LogOut, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type {
   CommandCodeSubscription,
   CommandCodeUsage,
@@ -14,6 +14,7 @@ import type {
   DeepSeekUsage,
   MimoSubscription,
   MimoUsage,
+  MonitorAccount,
   MonitorStatus,
   MonitorErrorCode,
   RemoteUsageSource,
@@ -416,16 +417,17 @@ function useWindowResetRefresh(opts: {
 
 // ─── 面板：Command Code 云端用量 ───
 
-function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
+function CommandCodePanel({ source, account }: { source: RemoteUsageSource; account: MonitorAccount }) {
   const settings = useSettingsStore((s) => s.settings)
   const currency = settings.currency
-  const sourceId = source.id
+  // 凭据 / 快照 / 本地累计 / IPC 一律按**账号**键控（默认账号 id = 源 id，历史数据零迁移）
+  const accountId = account.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(
-    () => getCloudSnapshot(sourceId)?.status ?? null
+    () => getCloudSnapshot(accountId)?.status ?? null
   )
   const [usage, setUsage] = useState<CommandCodeUsage | null>(
-    () => (getCloudSnapshot(sourceId)?.usage as CommandCodeUsage | undefined) ?? null
+    () => (getCloudSnapshot(accountId)?.usage as CommandCodeUsage | undefined) ?? null
   )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -435,18 +437,18 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   // 本地累计（云端列表对部分套餐只给最近 100 条，累计口径让数字只增不减）
   const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(
-    () => getCloudSnapshot(sourceId)?.cumulative ?? null
+    () => getCloudSnapshot(accountId)?.cumulative ?? null
   )
   const [collector, setCollector] = useState<CollectorStatusInfo | null>(
-    () => getCloudSnapshot(sourceId)?.collector ?? null
+    () => getCloudSnapshot(accountId)?.collector ?? null
   )
   const [detailMode, setDetailMode] = useState<'monthly' | 'cumulative'>(
-    () => getCloudSnapshot(sourceId)?.detailMode ?? 'monthly'
+    () => getCloudSnapshot(accountId)?.detailMode ?? 'monthly'
   )
   // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
   const lastFetchedAt = usage?.fetchedAt ?? null
   // 快照恢复是否已完成（会话内模块缓存 / 主进程持久化快照）：TTL 判定须等它完成，避免快照未到先误拉
-  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(sourceId)?.usage != null)
+  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(accountId)?.usage != null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数（拿到过期的 loading/status）
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -464,7 +466,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   const loadStatus = async () => {
     if (!source) return
     try {
-      const res = await window.moaAPI.getMonitorStatus(source)
+      const res = await window.moaAPI.getMonitorStatus(accountId)
       if (res.success && res.data) setStatus(res.data)
     } catch {
       // 状态读取失败不阻塞页面
@@ -473,9 +475,9 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
 
   // 登录态变化即写回快照：切视图重进时首帧直接渲染正确外观（避免先闪「登录」按钮再切「退出登录」）
   useEffect(() => {
-    if (sourceId && status) patchCloudSnapshot(sourceId, { status })
+    if (accountId && status) patchCloudSnapshot(accountId, { status })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId, status])
+  }, [accountId, status])
 
   const refresh = async () => {
     if (!source || loading) return
@@ -483,11 +485,11 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     setError(null)
     setErrorCode(null)
     try {
-      const res = await window.moaAPI.monitorRefresh(source)
+      const res = await window.moaAPI.monitorRefresh(accountId)
       if (res.success && res.data) {
         setUsage(res.data as CommandCodeUsage)
         // 写回快照：视图切走组件卸载后，重进直接恢复
-        patchCloudSnapshot(sourceId, { usage: res.data })
+        patchCloudSnapshot(accountId, { usage: res.data })
       } else {
         const code = res.code ?? 'unknown'
         setErrorCode(code)
@@ -513,19 +515,19 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
 
   // 本地累计 + 采集器状态（累计口径的数据来源）
   const loadCumulative = async () => {
-    if (!sourceId) return
+    if (!accountId) return
     try {
       const [cumRes, stRes] = await Promise.all([
-        window.moaAPI.monitorGetCumulative(sourceId),
+        window.moaAPI.monitorGetCumulative(accountId),
         window.moaAPI.monitorCollectorStatus()
       ])
       if (cumRes.success && cumRes.data) {
         setCumulative(cumRes.data)
-        patchCloudSnapshot(sourceId, { cumulative: cumRes.data })
+        patchCloudSnapshot(accountId, { cumulative: cumRes.data })
       }
       if (stRes.success && stRes.data) {
         setCollector(stRes.data)
-        patchCloudSnapshot(sourceId, { collector: stRes.data })
+        patchCloudSnapshot(accountId, { collector: stRes.data })
       }
     } catch {
       // 累计读取失败不阻塞页面（首次为空属正常）
@@ -534,13 +536,13 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
 
   // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
   const hydrateUsage = async () => {
-    if (!sourceId) return
-    if (getCloudSnapshot(sourceId)?.usage != null) return
+    if (!accountId) return
+    if (getCloudSnapshot(accountId)?.usage != null) return
     try {
-      const res = await window.moaAPI.monitorGetSnapshot(sourceId)
+      const res = await window.moaAPI.monitorGetSnapshot(accountId)
       if (res.success && res.data) {
         setUsage(res.data as CommandCodeUsage)
-        patchCloudSnapshot(sourceId, { usage: res.data })
+        patchCloudSnapshot(accountId, { usage: res.data })
       }
     } catch {
       // 快照读取失败不阻塞页面（按无快照处理）
@@ -551,12 +553,12 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
 
   // 挂载：读取状态 + 本地累计；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
   useEffect(() => {
-    if (!sourceId) return
+    if (!accountId) return
     loadStatus()
     void loadCumulative()
     void hydrateUsage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId])
+  }, [accountId])
 
   // 每次刷新成功后同步累计数据（lastFetchedAt 变化 = 刷新完成）
   useEffect(() => {
@@ -566,17 +568,17 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
 
   // 页面打开期间轮询本地累计：后台采集写入的新记录自动出现，否则数字看着像"不动"
   useEffect(() => {
-    if (!sourceId) return
+    if (!accountId) return
     const timer = setInterval(() => {
       void loadCumulative()
     }, 60_000)
     return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId])
+  }, [accountId])
 
   // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
   useEffect(() => {
-    if (sourceId && snapshotReady && status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
+    if (accountId && snapshotReady && status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -584,20 +586,20 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
 
   // 明细口径选择写回快照：切视图往返后保持用户选择
   useEffect(() => {
-    if (sourceId) patchCloudSnapshot(sourceId, { detailMode })
+    if (accountId) patchCloudSnapshot(accountId, { detailMode })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId, detailMode])
+  }, [accountId, detailMode])
 
   // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
   useEffect(() => {
-    if (refreshMinutes <= 0 || !loggedIn || !sourceId) return
+    if (refreshMinutes <= 0 || !loggedIn || !accountId) return
     timerRef.current = setInterval(() => {
       refreshRef.current()
     }, refreshMinutes * 60_000)
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
     }
-  }, [refreshMinutes, loggedIn, sourceId])
+  }, [refreshMinutes, loggedIn, accountId])
 
   // 窗口到点补拉：5h/7d 重置后立即刷新（共用 hook，见 useWindowResetRefresh）
   useWindowResetRefresh({
@@ -613,7 +615,7 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     if (!source) return
     setLoggingIn(true)
     try {
-      const res = await window.moaAPI.monitorLogin(source)
+      const res = await window.moaAPI.monitorLogin(accountId)
       const inner = res.data
       if (res.success && inner?.success) {
         setError(null)
@@ -630,11 +632,11 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   }
 
   const handleLogout = async () => {
-    if (!sourceId) return
+    if (!accountId) return
     // 快照随登出清空：换账号后不得残留旧账号数据
-    clearCloudSnapshot(sourceId)
+    clearCloudSnapshot(accountId)
     try {
-      await window.moaAPI.monitorLogout(sourceId)
+      await window.moaAPI.monitorLogout(accountId)
     } catch {
       // 登出尽力而为：本地登录态立即复位，失败无需打扰用户
     }
@@ -645,9 +647,9 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
   }
 
   const handleSaveApiKey = async () => {
-    if (!sourceId || !apiKeyDraft.trim()) return
+    if (!accountId || !apiKeyDraft.trim()) return
     try {
-      await window.moaAPI.monitorSetApiKey(sourceId, apiKeyDraft.trim())
+      await window.moaAPI.monitorSetApiKey(accountId, apiKeyDraft.trim())
       setApiKeyDraft('')
       setShowApiKeyInput(false)
       setStatus((s) => (s ? { ...s, hasApiKey: true } : s))
@@ -1169,16 +1171,17 @@ function MimoSubscriptionSection({
   )
 }
 
-function MimoPanel({ source }: { source: RemoteUsageSource }) {
+function MimoPanel({ source, account }: { source: RemoteUsageSource; account: MonitorAccount }) {
   const settings = useSettingsStore((s) => s.settings)
   const currency = settings.currency
-  const sourceId = source.id
+  // 凭据 / 快照 / 本地累计 / IPC 一律按**账号**键控（默认账号 id = 源 id，历史数据零迁移）
+  const accountId = account.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(
-    () => getCloudSnapshot(sourceId)?.status ?? null
+    () => getCloudSnapshot(accountId)?.status ?? null
   )
   const [usage, setUsage] = useState<MimoUsage | null>(
-    () => (getCloudSnapshot(sourceId)?.usage as MimoUsage | undefined) ?? null
+    () => (getCloudSnapshot(accountId)?.usage as MimoUsage | undefined) ?? null
   )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1186,13 +1189,13 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const [loggingIn, setLoggingIn] = useState(false)
   // 本地累计（云端列表是「日期×模型」聚合行，累计口径让跨月数字只增不减）
   const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(
-    () => getCloudSnapshot(sourceId)?.cumulative ?? null
+    () => getCloudSnapshot(accountId)?.cumulative ?? null
   )
   const [collector, setCollector] = useState<CollectorStatusInfo | null>(
-    () => getCloudSnapshot(sourceId)?.collector ?? null
+    () => getCloudSnapshot(accountId)?.collector ?? null
   )
   const [detailMode, setDetailMode] = useState<'monthly' | 'cumulative'>(
-    () => getCloudSnapshot(sourceId)?.detailMode ?? 'monthly'
+    () => getCloudSnapshot(accountId)?.detailMode ?? 'monthly'
   )
   // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
   const lastFetchedAt = usage?.fetchedAt ?? null
@@ -1200,7 +1203,7 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   // 始终指向最新的 refresh，避免定时器闭包持旧函数
   const refreshRef = useRef<() => Promise<void>>(async () => {})
   // 快照恢复是否已完成（会话内模块缓存 / 主进程持久化快照）：TTL 判定须等它完成，避免快照未到先误拉
-  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(sourceId)?.usage != null)
+  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(accountId)?.usage != null)
   useEffect(() => {
     refreshRef.current = refresh
   })
@@ -1215,7 +1218,7 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const loadStatus = async () => {
     if (!source) return
     try {
-      const res = await window.moaAPI.getMonitorStatus(source)
+      const res = await window.moaAPI.getMonitorStatus(accountId)
       if (res.success && res.data) setStatus(res.data)
     } catch {
       // 状态读取失败不阻塞页面
@@ -1224,9 +1227,9 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 
   // 登录态变化即写回快照：切视图重进时首帧直接渲染正确外观（避免先闪「登录」按钮再切「退出登录」）
   useEffect(() => {
-    if (sourceId && status) patchCloudSnapshot(sourceId, { status })
+    if (accountId && status) patchCloudSnapshot(accountId, { status })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId, status])
+  }, [accountId, status])
 
   const refresh = async () => {
     if (!source || loading) return
@@ -1234,11 +1237,11 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
     setError(null)
     setErrorCode(null)
     try {
-      const res = await window.moaAPI.monitorRefresh(source)
+      const res = await window.moaAPI.monitorRefresh(accountId)
       if (res.success && res.data) {
         setUsage(res.data as MimoUsage)
         // 写回快照：视图切走组件卸载后，重进直接恢复
-        patchCloudSnapshot(sourceId, { usage: res.data })
+        patchCloudSnapshot(accountId, { usage: res.data })
       } else {
         const code = res.code ?? 'unknown'
         setErrorCode(code)
@@ -1264,19 +1267,19 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 
   // 本地累计 + 采集器状态（累计口径的数据来源）
   const loadCumulative = async () => {
-    if (!sourceId) return
+    if (!accountId) return
     try {
       const [cumRes, stRes] = await Promise.all([
-        window.moaAPI.monitorGetCumulative(sourceId),
+        window.moaAPI.monitorGetCumulative(accountId),
         window.moaAPI.monitorCollectorStatus()
       ])
       if (cumRes.success && cumRes.data) {
         setCumulative(cumRes.data)
-        patchCloudSnapshot(sourceId, { cumulative: cumRes.data })
+        patchCloudSnapshot(accountId, { cumulative: cumRes.data })
       }
       if (stRes.success && stRes.data) {
         setCollector(stRes.data)
-        patchCloudSnapshot(sourceId, { collector: stRes.data })
+        patchCloudSnapshot(accountId, { collector: stRes.data })
       }
     } catch {
       // 累计读取失败不阻塞页面（首次为空属正常）
@@ -1285,12 +1288,12 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 
   // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
   const hydrateUsage = async () => {
-    if (getCloudSnapshot(sourceId)?.usage != null) return
+    if (getCloudSnapshot(accountId)?.usage != null) return
     try {
-      const res = await window.moaAPI.monitorGetSnapshot(sourceId)
+      const res = await window.moaAPI.monitorGetSnapshot(accountId)
       if (res.success && res.data) {
         setUsage(res.data as MimoUsage)
-        patchCloudSnapshot(sourceId, { usage: res.data })
+        patchCloudSnapshot(accountId, { usage: res.data })
       }
     } catch {
       // 快照读取失败不阻塞页面（按无快照处理）
@@ -1305,7 +1308,7 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
     void loadCumulative()
     void hydrateUsage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId])
+  }, [accountId])
 
   // 每次刷新成功后同步累计数据（lastFetchedAt 变化 = 刷新完成）
   useEffect(() => {
@@ -1315,19 +1318,19 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 
   // 页面打开期间轮询本地累计：后台采集写入的新记录自动出现，否则数字看着像"不动"
   useEffect(() => {
-    if (!sourceId) return
+    if (!accountId) return
     const timer = setInterval(() => {
       void loadCumulative()
     }, 60_000)
     return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId])
+  }, [accountId])
 
   // 明细口径选择写回快照：切视图往返后保持用户选择
   useEffect(() => {
-    if (sourceId) patchCloudSnapshot(sourceId, { detailMode })
+    if (accountId) patchCloudSnapshot(accountId, { detailMode })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId, detailMode])
+  }, [accountId, detailMode])
 
   // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示。
   // 旧版快照（升级前保存，无 detailList 标记）不判新鲜，直接重拉到新结构。
@@ -1364,7 +1367,7 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const handleLogin = async () => {
     setLoggingIn(true)
     try {
-      const res = await window.moaAPI.monitorLogin(source)
+      const res = await window.moaAPI.monitorLogin(accountId)
       const inner = res.data
       if (res.success && inner?.success) {
         setError(null)
@@ -1382,9 +1385,9 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 
   const handleLogout = async () => {
     // 快照随登出清空：换账号后不得残留旧账号数据
-    clearCloudSnapshot(sourceId)
+    clearCloudSnapshot(accountId)
     try {
-      await window.moaAPI.monitorLogout(sourceId)
+      await window.moaAPI.monitorLogout(accountId)
     } catch {
       // 登出尽力而为：本地登录态立即复位，失败无需打扰用户
     }
@@ -1782,14 +1785,15 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 
 // ─── 面板：DeepSeek 开放平台用量 ───
 
-function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
-  const sourceId = source.id
+function DeepSeekPanel({ source, account }: { source: RemoteUsageSource; account: MonitorAccount }) {
+  // 凭据 / 快照 / 本地累计 / IPC 一律按**账号**键控（默认账号 id = 源 id，历史数据零迁移）
+  const accountId = account.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(
-    () => getCloudSnapshot(sourceId)?.status ?? null
+    () => getCloudSnapshot(accountId)?.status ?? null
   )
   const [usage, setUsage] = useState<DeepSeekUsage | null>(
-    () => (getCloudSnapshot(sourceId)?.usage as DeepSeekUsage | undefined) ?? null
+    () => (getCloudSnapshot(accountId)?.usage as DeepSeekUsage | undefined) ?? null
   )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1800,7 +1804,7 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   const [showApiKeyInput, setShowApiKeyInput] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   // 快照恢复是否已完成（会话内模块缓存 / 主进程持久化快照）：TTL 判定须等它完成，避免快照未到先误拉
-  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(sourceId)?.usage != null)
+  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(accountId)?.usage != null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 始终指向最新的 refresh，避免定时器闭包持旧函数
   const refreshRef = useRef<() => Promise<void>>(async () => {})
@@ -1818,7 +1822,7 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   const loadStatus = async () => {
     if (!source) return
     try {
-      const res = await window.moaAPI.getMonitorStatus(source)
+      const res = await window.moaAPI.getMonitorStatus(accountId)
       if (res.success && res.data) setStatus(res.data)
     } catch {
       // 状态读取失败不阻塞页面
@@ -1827,9 +1831,9 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
 
   // 登录态变化即写回快照：切视图重进时首帧直接渲染正确外观（避免先闪「登录」按钮再切「退出登录」）
   useEffect(() => {
-    if (sourceId && status) patchCloudSnapshot(sourceId, { status })
+    if (accountId && status) patchCloudSnapshot(accountId, { status })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId, status])
+  }, [accountId, status])
 
   const refresh = async () => {
     if (!source || loading) return
@@ -1837,11 +1841,11 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
     setError(null)
     setErrorCode(null)
     try {
-      const res = await window.moaAPI.monitorRefresh(source)
+      const res = await window.moaAPI.monitorRefresh(accountId)
       if (res.success && res.data) {
         setUsage(res.data as DeepSeekUsage)
         // 写回快照：视图切走组件卸载后，重进直接恢复
-        patchCloudSnapshot(sourceId, { usage: res.data })
+        patchCloudSnapshot(accountId, { usage: res.data })
       } else {
         const code = res.code ?? 'unknown'
         setErrorCode(code)
@@ -1867,12 +1871,12 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
 
   // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
   const hydrateUsage = async () => {
-    if (getCloudSnapshot(sourceId)?.usage != null) return
+    if (getCloudSnapshot(accountId)?.usage != null) return
     try {
-      const res = await window.moaAPI.monitorGetSnapshot(sourceId)
+      const res = await window.moaAPI.monitorGetSnapshot(accountId)
       if (res.success && res.data) {
         setUsage(res.data as DeepSeekUsage)
-        patchCloudSnapshot(sourceId, { usage: res.data })
+        patchCloudSnapshot(accountId, { usage: res.data })
       }
     } catch {
       // 快照读取失败不阻塞页面（按无快照处理）
@@ -1886,7 +1890,7 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
     loadStatus()
     void hydrateUsage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId, source])
+  }, [accountId, source])
 
   // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
   useEffect(() => {
@@ -1912,7 +1916,7 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
     if (!source) return
     setLoggingIn(true)
     try {
-      const res = await window.moaAPI.monitorLogin(source)
+      const res = await window.moaAPI.monitorLogin(accountId)
       const inner = res.data
       if (res.success && inner?.success) {
         setError(null)
@@ -1930,9 +1934,9 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
 
   const handleLogout = async () => {
     // 快照随登出清空：换账号后不得残留旧账号数据
-    clearCloudSnapshot(sourceId)
+    clearCloudSnapshot(accountId)
     try {
-      await window.moaAPI.monitorLogout(sourceId)
+      await window.moaAPI.monitorLogout(accountId)
     } catch {
       // 登出尽力而为：本地登录态立即复位，失败无需打扰用户
     }
@@ -1945,7 +1949,7 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   const handleSaveApiKey = async () => {
     if (!apiKeyDraft.trim()) return
     try {
-      await window.moaAPI.monitorSetApiKey(sourceId, apiKeyDraft.trim())
+      await window.moaAPI.monitorSetApiKey(accountId, apiKeyDraft.trim())
       setApiKeyDraft('')
       setShowApiKeyInput(false)
       setStatus((s) => (s ? { ...s, hasApiKey: true, loggedIn: true } : s))
@@ -2240,11 +2244,75 @@ function DeepSeekPanel({ source }: { source: RemoteUsageSource }) {
   )
 }
 
-// ─── 云监控容器：按启用的监控源渲染对应面板 ───
+// ─── 云监控容器：按启用的监控源渲染对应面板（每源可挂多个账号，按账号切换查看）───
+
+/** 账号备注名：有备注用备注名，否则按通道显示 */
+function accountName(acc: MonitorAccount): string {
+  return acc.label.trim() || (acc.billing === 'plan' ? 'Plan' : '按量')
+}
+
+/** 生成新账号 id（默认账号 id 恒等于源 id；新增账号用随机 id，与历史键不冲突） */
+function newAccountId(sourceId: string): string {
+  return `${sourceId}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
+}
 
 export default function CloudMonitorView() {
   const settings = useSettingsStore((s) => s.settings)
+  const updateSetting = useSettingsStore((s) => s.updateSetting)
   const sources = settings.monitoring?.sources?.filter((s) => s.enabled) ?? []
+  const accounts = settings.monitoring?.accounts ?? []
+
+  /** 每源当前查看的账号（缺省该源第一个账号） */
+  const [selected, setSelected] = useState<Record<string, string>>({})
+  const [addingFor, setAddingFor] = useState<string | null>(null)
+  const [newLabel, setNewLabel] = useState('')
+  const [newBilling, setNewBilling] = useState<'plan' | 'usage'>('usage')
+
+  const persistAccounts = async (next: MonitorAccount[]) => {
+    const base = settings.monitoring ?? { sources: [], accounts: [], autoRefreshMinutes: 10 }
+    await updateSetting('monitoring', { ...base, accounts: next })
+  }
+
+  const accountsOf = (sourceId: string) => accounts.filter((a) => a.sourceId === sourceId)
+
+  const pickAccount = (sourceId: string): MonitorAccount | undefined => {
+    const list = accountsOf(sourceId)
+    return list.find((a) => a.id === selected[sourceId]) ?? list[0]
+  }
+
+  const addAccount = async (source: RemoteUsageSource) => {
+    const acc: MonitorAccount = {
+      id: newAccountId(source.id),
+      sourceId: source.id,
+      label: newLabel.trim(),
+      billing: newBilling
+    }
+    await persistAccounts([...accounts, acc])
+    setSelected((s) => ({ ...s, [source.id]: acc.id }))
+    setAddingFor(null)
+    setNewLabel('')
+    setNewBilling('usage')
+  }
+
+  const removeAccount = async (source: RemoteUsageSource, acc: MonitorAccount) => {
+    // 每源至少保留一个账号；删除前先登出 → 该账号的凭据 / 落盘快照 / 本地累计一并清除，
+    // 同源其它账号数据保留（不会串号）
+    if (accountsOf(source.id).length <= 1) return
+    try {
+      await window.moaAPI.monitorLogout(acc.id)
+    } catch {
+      // 凭据清理失败不阻断账号移除
+    }
+    // 渲染层模块级缓存也要清：登出路径清的是本账号，已删账号不得残留快照
+    clearCloudSnapshot(acc.id)
+    await persistAccounts(accounts.filter((a) => a.id !== acc.id))
+    // selected 的键是**源 id**（不是账号 id）：删掉后回退到该源第一个账号
+    setSelected((s) => {
+      if (s[source.id] !== acc.id) return s
+      const { [source.id]: _drop, ...rest } = s
+      return rest
+    })
+  }
 
   if (sources.length === 0) {
     return (
@@ -2258,15 +2326,91 @@ export default function CloudMonitorView() {
 
   return (
     <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-6">
-      {sources.map((src) =>
-        src.type === 'mimo' ? (
-          <MimoPanel key={src.id} source={src} />
-        ) : src.type === 'deepseek' ? (
-          <DeepSeekPanel key={src.id} source={src} />
-        ) : (
-          <CommandCodePanel key={src.id} source={src} />
+      {sources.map((src) => {
+        const list = accountsOf(src.id)
+        const acc = pickAccount(src.id)
+        return (
+          <div key={src.id} className="flex flex-col gap-2">
+            {/* 账号栏：同源多账号各看各的数据（凭据 / 快照 / 累计全部按账号隔离）；源名见下方面板标题 */}
+            <div className="flex items-center justify-end gap-2 flex-wrap">
+              <div className="flex items-center gap-1 flex-wrap">
+                {list.map((a) => (
+                  <button
+                    key={a.id}
+                    onClick={() => setSelected((s) => ({ ...s, [src.id]: a.id }))}
+                    className={`px-2 py-0.5 text-xs rounded-md border transition-colors ${
+                      acc?.id === a.id
+                        ? 'border-primary bg-primary/10 text-foreground'
+                        : 'border-border text-muted-foreground hover:border-primary/50'
+                    }`}
+                    title={a.label || undefined}
+                  >
+                    {accountName(a)}
+                  </button>
+                ))}
+                <button
+                  onClick={() => { setAddingFor((v) => (v === src.id ? null : src.id)); setNewLabel(''); setNewBilling('usage') }}
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 text-xs text-primary hover:text-primary/80"
+                  title="添加账号（Plan 与按量可各用各的账号）"
+                >
+                  <Plus className="w-3 h-3" /> 添加账号
+                </button>
+                {acc && list.length > 1 && (
+                  <button
+                    onClick={() => removeAccount(src, acc)}
+                    className="p-1 text-muted-foreground hover:text-destructive rounded-md"
+                    title="删除当前查看的账号（凭据与用量一并清除）"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* 添加账号内联表单 */}
+            {addingFor === src.id && (
+              <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
+                <input
+                  value={newLabel}
+                  onChange={(e) => setNewLabel(e.target.value)}
+                  placeholder="账号备注（可空），如：工作号"
+                  className="flex-1 min-w-0 rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                <select
+                  value={newBilling}
+                  onChange={(e) => setNewBilling(e.target.value as 'plan' | 'usage')}
+                  className="rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                >
+                  <option value="usage">按量账号</option>
+                  <option value="plan">Plan 账号</option>
+                </select>
+                <button
+                  onClick={() => addAccount(src)}
+                  className="px-2 py-1 text-xs bg-primary text-primary-foreground rounded-md hover:opacity-90"
+                >
+                  添加
+                </button>
+                <button
+                  onClick={() => setAddingFor(null)}
+                  className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  取消
+                </button>
+              </div>
+            )}
+
+            {/* key 带 accountId：切账号时面板整体重建，不复用上一账号的 state */}
+            {acc &&
+              (src.type === 'mimo' ? (
+                <MimoPanel key={`${src.id}:${acc.id}`} source={src} account={acc} />
+              ) : src.type === 'deepseek' ? (
+                <DeepSeekPanel key={`${src.id}:${acc.id}`} source={src} account={acc} />
+              ) : (
+                <CommandCodePanel key={`${src.id}:${acc.id}`} source={src} account={acc} />
+              ))}
+          </div>
         )
-      )}
+      })}
     </div>
   )
 }

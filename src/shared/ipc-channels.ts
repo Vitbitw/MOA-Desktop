@@ -6,10 +6,18 @@ export const IPC = {
   CONFIG_ADD_PROVIDER: 'config:addProvider',
   CONFIG_REMOVE_PROVIDER: 'config:removeProvider',
   CONFIG_GET_MODELS: 'config:getModels',
-  /** 编辑厂商（名称 / API 地址 / 计费通道 / Plan 三件套；仅传入字段更新） */
+  /** 编辑厂商来源级字段（名称 / API 地址；仅传入字段更新） */
   PROVIDERS_UPDATE: 'providers:update',
-  /** 改 API 密钥：只写本条厂商记录（v4 B 方案移除厂商分组） */
+  /** 改某账号的 API 密钥（入参为 accountId） */
   PROVIDERS_UPDATE_KEY: 'providers:updateKey',
+  /** 新增厂商账号（同来源可无限添加；新账号不自动成为当前账号） */
+  PROVIDERS_ADD_ACCOUNT: 'providers:addAccount',
+  /** 编辑厂商账号（备注名 / 计费通道 / Plan 三件套；仅传入字段更新） */
+  PROVIDERS_UPDATE_ACCOUNT: 'providers:updateAccount',
+  /** 删除厂商账号（来源至少保留一个账号；删当前账号会自动接任下一个） */
+  PROVIDERS_REMOVE_ACCOUNT: 'providers:removeAccount',
+  /** 切换来源的当前账号：此后该来源的调用与成本记账都用它 */
+  PROVIDERS_SET_ACTIVE_ACCOUNT: 'providers:setActiveAccount',
 
   // Conversations
   DB_GET_CONVERSATIONS: 'db:getConversations',
@@ -38,6 +46,8 @@ export const IPC = {
   USAGE_GET_TODAY: 'usage:getToday',
 
   // Cloud Usage Monitoring
+  // 入参一律是 **accountId**（不是 sourceId）：主进程按账号解析所属源，
+  // 凭据 / 快照 / 本地累计全部按账号读写，杜绝同源不同账号串号
   MONITOR_GET_STATUS: 'monitor:getStatus',
   MONITOR_LOGIN: 'monitor:login',
   MONITOR_LOGOUT: 'monitor:logout',

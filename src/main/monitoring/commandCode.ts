@@ -29,23 +29,23 @@ const LOGIN_PARTITION = 'persist:commandcode'
 
 let loginWin: BrowserWindow | null = null
 
-// ─── 凭证 key 约定 ───
-export function usageTokenKey(sourceId: string): string {
-  return sourceId
+// ─── 凭证 key 约定（按**账号**键控：同源不同账号各存各的，默认账号 id = 源 id）───
+export function usageTokenKey(accountId: string): string {
+  return accountId
 }
-export function usageApiKeyKey(sourceId: string): string {
-  return `${sourceId}.apiKey`
+export function usageApiKeyKey(accountId: string): string {
+  return `${accountId}.apiKey`
 }
 
 // ─── 登录窗 ───
 
-/** 捕获登录 cookie（轮询与关窗兜底共用）。命中则保存 token 并返回 true */
-async function tryCaptureToken(ses: Electron.Session, sourceId: string): Promise<boolean> {
+/** 捕获登录 cookie（轮询与关窗兜底共用）。命中则保存到该账号并返回 true */
+async function tryCaptureToken(ses: Electron.Session, accountId: string): Promise<boolean> {
   try {
     const cookies = await ses.cookies.get({ name: SESSION_TOKEN_NAME })
     const hit = cookies.find((c) => (c.domain ?? '').includes('commandcode.ai') && c.value)
     if (hit?.value) {
-      saveUsageCredential(usageTokenKey(sourceId), hit.value)
+      saveUsageCredential(usageTokenKey(accountId), hit.value)
       return true
     }
   } catch {
@@ -55,13 +55,15 @@ async function tryCaptureToken(ses: Electron.Session, sourceId: string): Promise
 }
 
 /**
- * 打开登录窗加载 Studio 页面；用户在窗内登录后捕获 session cookie 并保存。
+ * 打开登录窗加载 Studio 页面；用户在窗内登录后把 session cookie 存到**指定账号**。
  * 轮询每 1.5s 检查 cookie；命中即保存、关窗、resolve success。
  * 轮询差一拍时观众秒关窗：close 时兜底再查一次分区 cookie，仍命中则视为成功。
  * 窗口被用户直接关闭且无 cookie → resolve { cancelled: true }（静默）。
+ * 注意：登录分区按类型共享，同一时刻只能登录一个账号（多账号请逐个登录）。
  */
 export function loginToCommandCode(
   source: RemoteUsageSource,
+  accountId: string,
   parent?: BrowserWindow | null
 ): Promise<{ success: boolean; cancelled?: boolean; error?: string }> {
   return new Promise(async (resolve) => {
@@ -107,7 +109,7 @@ export function loginToCommandCode(
     // 轮询查找登录态 cookie
     const pollTimer = setInterval(async () => {
       if (captured) return
-      if (await tryCaptureToken(ses, source.id)) {
+      if (await tryCaptureToken(ses, accountId)) {
         captured = true
         clearInterval(pollTimer)
         finish({ success: true })
@@ -127,7 +129,7 @@ export function loginToCommandCode(
             return
           }
           attempts++
-          if (await tryCaptureToken(ses, source.id)) {
+          if (await tryCaptureToken(ses, accountId)) {
             captured = true
             clearInterval(graceTimer)
             finish({ success: true })
@@ -162,17 +164,17 @@ export function loginToCommandCode(
   })
 }
 
-/** 清除某监控源的登录态与 API Key */
-export function logoutCommandCode(sourceId: string): void {
-  removeUsageCredential(usageTokenKey(sourceId))
-  removeUsageCredential(usageApiKeyKey(sourceId))
+/** 清除某账号的登录态与 API Key（只动本账号，同源其它账号不受影响） */
+export function logoutCommandCode(accountId: string): void {
+  removeUsageCredential(usageTokenKey(accountId))
+  removeUsageCredential(usageApiKeyKey(accountId))
 }
 
-/** 查询某监控源的认证状态 */
-export function getMonitorStatus(sourceId: string): MonitorStatus {
+/** 查询某账号的认证状态 */
+export function getMonitorStatus(accountId: string): MonitorStatus {
   return {
-    loggedIn: !!getUsageCredential(usageTokenKey(sourceId)),
-    hasApiKey: !!getUsageCredential(usageApiKeyKey(sourceId))
+    loggedIn: !!getUsageCredential(usageTokenKey(accountId)),
+    hasApiKey: !!getUsageCredential(usageApiKeyKey(accountId))
   }
 }
 
@@ -546,7 +548,7 @@ async function fetchUsageRecords(token: string): Promise<UsageFetch> {
  *   若它返回按模型/时间桶的聚合，就能补上「整月按模型明细」，替代只有最近 100 条的窗口明细） */
 const PROBE_CHARTS = process.env.MOA_MONITOR_PROBE === '1'
 
-async function probeCharts(sourceId: string, token: string): Promise<void> {
+async function probeCharts(accountId: string, token: string): Promise<void> {
   const describe = (v: unknown, depth = 0): string => {
     if (Array.isArray(v)) return `[${v.length}]${v.length > 0 ? describe(v[0], depth + 1) : ''}`
     if (isObj(v)) {
@@ -599,7 +601,7 @@ async function probeCharts(sourceId: string, token: string): Promise<void> {
     }
     console.log(`[Monitor] probe charts ${ref}`)
   } catch (err) {
-    console.log(`[Monitor] probe charts(${sourceId}) 失败: ${err instanceof Error ? err.message : String(err)}`)
+    console.log(`[Monitor] probe charts(${accountId}) 失败: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
@@ -989,19 +991,19 @@ export type RefreshResult =
   | { ok: false; code: 'not_authenticated' | 'session_expired' | 'network' | 'unknown'; error?: string }
 
 /**
- * 拉取某监控源的云端用量。
+ * 拉取某**账号**的云端用量（凭据、明细落库、日志一律按 accountId，换账号互不串）。
  * 并行请求 5 个端点 + 明细分页（游标翻页，见 fetchUsageRecords），任一 401/403 → session_expired；
  * 网络异常 → network；其余 → unknown。
  */
-export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promise<RefreshResult> {
-  const token = getUsageCredential(usageTokenKey(source.id))
+export async function refreshCommandCodeUsage(accountId: string): Promise<RefreshResult> {
+  const token = getUsageCredential(usageTokenKey(accountId))
   if (!token) return { ok: false, code: 'not_authenticated' }
-  const apiKey = getUsageCredential(usageApiKeyKey(source.id))
+  const apiKey = getUsageCredential(usageApiKeyKey(accountId))
 
   // 明细分页：游标必须逐页串行，故提前启动、与其余端点并行推进
   const usageFetchPromise = fetchUsageRecords(token)
   // 诊断：探测 charts 端点结构（MOA_MONITOR_PROBE=1，默认关闭，不影响主流程）
-  if (PROBE_CHARTS) void probeCharts(source.id, token)
+  if (PROBE_CHARTS) void probeCharts(accountId, token)
 
   const hasApiKey = !!apiKey
   const requests: Array<Promise<CcResponse | null>> = [
@@ -1042,10 +1044,10 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     .join('; ')
 
   if (rejectedDetail) {
-    console.warn(`[Monitor] refresh(${source.id}) 端点请求失败: ${rejectedDetail}`)
+    console.warn(`[Monitor] refresh(${accountId}) 端点请求失败: ${rejectedDetail}`)
   } else if (DEBUG) {
     console.log(
-      `[Monitor] refresh(${source.id}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} charts=${getStatus(5)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}`
+      `[Monitor] refresh(${accountId}): summary=${getStatus(0)} credits=${getStatus(1)} windows=${getStatus(2)} subscription=${getStatus(3)} subAlpha=${getStatus(4)} charts=${getStatus(5)} | usage=${usageFetch.status} limit=${usageFetch.requestedLimit} pages=${usageFetch.pages} records=${usageFetch.records.length}${usageFetch.truncated ? ' truncated' : ''}`
     )
   }
 
@@ -1079,7 +1081,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
   // 累积落库（本地累计口径）：按记录 id 去重，可安全重复采集；失败不影响本次展示
   if (usageFetch.status === 200 && usageFetch.records.length > 0) {
     try {
-      persistUsageRecords(source.id, normalizeUsageRecords(usageFetch.records))
+      persistUsageRecords(accountId, normalizeUsageRecords(usageFetch.records))
     } catch (err) {
       console.warn('[Monitor] 用量记录落库失败:', err)
     }
@@ -1176,7 +1178,7 @@ export async function refreshCommandCodeUsage(source: RemoteUsageSource): Promis
     statuses: activeIdx.map((i) => getStatus(i))
   })
   if (totalFailure) {
-    console.warn(`[Monitor] refresh(${source.id}) 全端点失败 → ${totalFailure.code}: ${totalFailure.error}`)
+    console.warn(`[Monitor] refresh(${accountId}) 全端点失败 → ${totalFailure.code}: ${totalFailure.error}`)
     return { ok: false, code: totalFailure.code, error: totalFailure.error }
   }
 

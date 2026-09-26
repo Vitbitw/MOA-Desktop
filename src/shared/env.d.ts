@@ -1,4 +1,4 @@
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, PricingProbeState, ProbeProgressEvent, ExpertGenResult, GenerateExpertsRequest, ToastData, ProviderUpdatePatch } from './types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, MonitorUsage, MonitorStatus, MonitorErrorCode, CumulativeModelUsage, PricingProbeResultItem, PricingProbeSource, PricingProbeState, ProbeProgressEvent, ExpertGenResult, GenerateExpertsRequest, ToastData, ProviderUpdatePatch, ProviderAccountPatch, ProviderAccountInput } from './types'
 import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from './ipc-channels'
 
 interface MoaAPI {
@@ -7,10 +7,18 @@ interface MoaAPI {
   addProvider: (data: { name: string; baseUrl: string; apiKey: string; billing?: 'usage' | 'plan'; plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } }) => Promise<{ success: boolean; data: unknown; error?: string }>
   removeProvider: (id: string) => Promise<{ success: boolean; error?: string }>
   getModels: (providerId: string) => Promise<{ success: boolean; data: unknown; error?: string }>
-  /** T1：编辑厂商（仅传入字段更新；plan 传 null 清空订阅费三列） */
+  /** T1：编辑厂商来源级字段（名称 / API 地址，仅传入字段更新） */
   updateProvider: (id: string, patch: ProviderUpdatePatch) => Promise<{ success: boolean; error?: string }>
-  /** T1：改 API 密钥 —— 只写本条厂商记录（v4 B 方案移除厂商分组） */
-  updateProviderKey: (id: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
+  /** 改某账号的 API 密钥（入参 accountId，只写本账号） */
+  updateProviderKey: (accountId: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
+  /** v5：新增厂商账号（同来源可无限添加；新账号不自动成为当前账号） */
+  addProviderAccount: (providerId: string, input: ProviderAccountInput) => Promise<{ success: boolean; data?: unknown; error?: string }>
+  /** 编辑账号（备注名 / 通道 / Plan 三件套；plan 传 null 清空订阅费） */
+  updateProviderAccount: (accountId: string, patch: ProviderAccountPatch) => Promise<{ success: boolean; error?: string }>
+  /** 删除账号（来源至少保留一个；删当前账号自动接任下一个） */
+  removeProviderAccount: (accountId: string) => Promise<{ success: boolean; error?: string }>
+  /** 切换当前账号：此后该来源的调用与成本记账都用它 */
+  setActiveProviderAccount: (providerId: string, accountId: string) => Promise<{ success: boolean; error?: string }>
 
   // Conversations
   getConversations: () => Promise<{ success: boolean; data: unknown; error?: string }>
@@ -50,17 +58,17 @@ interface MoaAPI {
     Promise<{ success: boolean; data: UsageSummary; error?: string }>
   getUsageToday: () => Promise<{ success: boolean; data: UsageToday; error?: string }>
 
-  // Cloud Usage Monitoring (Command Code)
-  getMonitorStatus: (source: RemoteUsageSource) =>
+  // Cloud Usage Monitoring (Command Code) —— 入参一律 accountId（凭据 / 快照 / 累计按账号隔离）
+  getMonitorStatus: (accountId: string) =>
     Promise<{ success: boolean; data: MonitorStatus; error?: string }>
-  monitorLogin: (source: RemoteUsageSource) =>
+  monitorLogin: (accountId: string) =>
     Promise<{ success: boolean; data: { success: boolean; cancelled?: boolean; error?: string }; error?: string }>
-  monitorLogout: (sourceId: string) => Promise<{ success: boolean; error?: string }>
-  monitorSetApiKey: (sourceId: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
-  monitorRefresh: (source: RemoteUsageSource) =>
+  monitorLogout: (accountId: string) => Promise<{ success: boolean; error?: string }>
+  monitorSetApiKey: (accountId: string, apiKey: string) => Promise<{ success: boolean; error?: string }>
+  monitorRefresh: (accountId: string) =>
     Promise<{ success: boolean; data?: MonitorUsage; error?: string; code?: MonitorErrorCode }>
-  /** 本地累计的按模型用量（Command Code；由多次采集去重累积） */
-  monitorGetCumulative: (sourceId: string) =>
+  /** 本地累计的按模型用量（Command Code；由多次采集去重累积，按账号隔离） */
+  monitorGetCumulative: (accountId: string) =>
     Promise<{ success: boolean; data?: CumulativeModelUsage; error?: string }>
   /** 后台采集器状态（是否在采集 / 间隔 / 上次采集时间 / 上次错误） */
   monitorCollectorStatus: () => Promise<{
@@ -69,7 +77,7 @@ interface MoaAPI {
     error?: string
   }>
   /** 上次会话持久化的用量快照（应用重启后先渲染它，再按统一自动刷新间隔决定是否刷新）；无快照时 data 为 null */
-  monitorGetSnapshot: (sourceId: string) => Promise<{ success: boolean; data?: MonitorUsage | null; error?: string }>
+  monitorGetSnapshot: (accountId: string) => Promise<{ success: boolean; data?: MonitorUsage | null; error?: string }>
 
   // Pricing Probe
   probePricing: (sources: PricingProbeSource[], force?: boolean) =>

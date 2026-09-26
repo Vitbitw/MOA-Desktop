@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENT } from '../shared/ipc-channels'
 import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from '../shared/ipc-channels'
-import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, RemoteUsageSource, MonitorUsage, MonitorStatus, PricingProbeSource, PricingProbeState, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
+import type { SubOutputUpdate, AggregationChunk, UsageSummary, UsageRange, UsageGroupBy, UsageToday, MonitorUsage, MonitorStatus, PricingProbeSource, PricingProbeState, ProbeProgressEvent, ToastData, GenerateExpertsRequest } from '../shared/types'
 
 contextBridge.exposeInMainWorld('moaAPI', {
   // Config / Providers
@@ -9,9 +9,14 @@ contextBridge.exposeInMainWorld('moaAPI', {
   addProvider: (data: unknown) => ipcRenderer.invoke('config:addProvider', data),
   removeProvider: (id: string) => ipcRenderer.invoke('config:removeProvider', id),
   getModels: (providerId: string) => ipcRenderer.invoke('config:getModels', providerId),
-  // T1：编辑厂商 / 改 API 密钥（只写本条记录）
+  // T1：编辑厂商来源级字段 / 改账号 API 密钥（入参 accountId）
   updateProvider: (id: string, patch: unknown) => ipcRenderer.invoke(IPC.PROVIDERS_UPDATE, id, patch),
-  updateProviderKey: (id: string, apiKey: string) => ipcRenderer.invoke(IPC.PROVIDERS_UPDATE_KEY, id, apiKey),
+  updateProviderKey: (accountId: string, apiKey: string) => ipcRenderer.invoke(IPC.PROVIDERS_UPDATE_KEY, accountId, apiKey),
+  // v5：厂商账号（同来源无限添加；通道 / 订阅费 / Key 挂账号）
+  addProviderAccount: (providerId: string, input: unknown) => ipcRenderer.invoke(IPC.PROVIDERS_ADD_ACCOUNT, providerId, input),
+  updateProviderAccount: (accountId: string, patch: unknown) => ipcRenderer.invoke(IPC.PROVIDERS_UPDATE_ACCOUNT, accountId, patch),
+  removeProviderAccount: (accountId: string) => ipcRenderer.invoke(IPC.PROVIDERS_REMOVE_ACCOUNT, accountId),
+  setActiveProviderAccount: (providerId: string, accountId: string) => ipcRenderer.invoke(IPC.PROVIDERS_SET_ACTIVE_ACCOUNT, providerId, accountId),
 
   // Conversations
   getConversations: () => ipcRenderer.invoke('db:getConversations'),
@@ -51,15 +56,15 @@ contextBridge.exposeInMainWorld('moaAPI', {
     ipcRenderer.invoke(IPC.USAGE_GET_SUMMARY, params),
   getUsageToday: () => ipcRenderer.invoke(IPC.USAGE_GET_TODAY),
 
-  // Cloud Usage Monitoring
-  getMonitorStatus: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_GET_STATUS, source),
-  monitorLogin: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_LOGIN, source),
-  monitorLogout: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_LOGOUT, sourceId),
-  monitorSetApiKey: (sourceId: string, apiKey: string) => ipcRenderer.invoke(IPC.MONITOR_SET_API_KEY, sourceId, apiKey),
-  monitorRefresh: (source: RemoteUsageSource) => ipcRenderer.invoke(IPC.MONITOR_REFRESH, source),
-  monitorGetCumulative: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_GET_CUMULATIVE, sourceId),
+  // Cloud Usage Monitoring（入参一律 accountId：凭据/快照/累计按账号隔离）
+  getMonitorStatus: (accountId: string) => ipcRenderer.invoke(IPC.MONITOR_GET_STATUS, accountId),
+  monitorLogin: (accountId: string) => ipcRenderer.invoke(IPC.MONITOR_LOGIN, accountId),
+  monitorLogout: (accountId: string) => ipcRenderer.invoke(IPC.MONITOR_LOGOUT, accountId),
+  monitorSetApiKey: (accountId: string, apiKey: string) => ipcRenderer.invoke(IPC.MONITOR_SET_API_KEY, accountId, apiKey),
+  monitorRefresh: (accountId: string) => ipcRenderer.invoke(IPC.MONITOR_REFRESH, accountId),
+  monitorGetCumulative: (accountId: string) => ipcRenderer.invoke(IPC.MONITOR_GET_CUMULATIVE, accountId),
   monitorCollectorStatus: () => ipcRenderer.invoke(IPC.MONITOR_COLLECTOR_STATUS),
-  monitorGetSnapshot: (sourceId: string) => ipcRenderer.invoke(IPC.MONITOR_GET_SNAPSHOT, sourceId),
+  monitorGetSnapshot: (accountId: string) => ipcRenderer.invoke(IPC.MONITOR_GET_SNAPSHOT, accountId),
 
   // Pricing Probe
   probePricing: (sources: PricingProbeSource[], force?: boolean) => ipcRenderer.invoke(IPC.PRICING_PROBE_RUN, sources, force),

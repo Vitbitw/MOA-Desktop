@@ -33,12 +33,12 @@ const TOKEN_KEYS = ['userToken', 'user_token', 'USER_TOKEN']
 
 let loginWin: BrowserWindow | null = null
 
-// ─── 凭证 key 约定（与 commandCode 一致）───
-export function usageTokenKey(sourceId: string): string {
-  return sourceId
+// ─── 凭证 key 约定（与 commandCode 一致；按**账号**键控，默认账号 id = 源 id）───
+export function usageTokenKey(accountId: string): string {
+  return accountId
 }
-export function usageApiKeyKey(sourceId: string): string {
-  return `${sourceId}.apiKey`
+export function usageApiKeyKey(accountId: string): string {
+  return `${accountId}.apiKey`
 }
 
 // ─── 登录窗 ───
@@ -46,13 +46,13 @@ export function usageApiKeyKey(sourceId: string): string {
 /** 从登录窗页面的 localStorage 读取 userToken；命中（value 为非空字符串）则保存并返回 true。
  * 注意：userToken 的值是 JSON 包装 `{"value": "<token>", ...}`，未登录时 value 为 null，
  * 不能仅凭「值非空」判定命中，否则会误把占位结构当登录态导致登录窗被误关。 */
-async function tryCaptureToken(win: BrowserWindow, sourceId: string): Promise<boolean> {
+async function tryCaptureToken(win: BrowserWindow, accountId: string): Promise<boolean> {
   try {
     const token = await win.webContents.executeJavaScript(
       `(() => { const keys = ${JSON.stringify(TOKEN_KEYS)}; for (const k of keys) { const raw = localStorage.getItem(k); if (!raw) continue; try { const parsed = JSON.parse(raw); if (parsed !== null && typeof parsed === 'object') { const inner = parsed.value; if (typeof inner === 'string' && inner.trim()) return inner.trim(); continue; } if (typeof parsed === 'string' && parsed.trim()) return parsed.trim(); continue; } catch { if (raw.trim()) return raw.trim(); } } return ''; })()`
     )
     if (typeof token === 'string' && token) {
-      saveUsageCredential(usageTokenKey(sourceId), token)
+      saveUsageCredential(usageTokenKey(accountId), token)
       return true
     }
   } catch {
@@ -68,6 +68,7 @@ async function tryCaptureToken(win: BrowserWindow, sourceId: string): Promise<bo
  */
 export function loginToDeepSeek(
   source: RemoteUsageSource,
+  accountId: string,
   parent?: BrowserWindow | null
 ): Promise<{ success: boolean; cancelled?: boolean; error?: string }> {
   return new Promise(async (resolve) => {
@@ -119,7 +120,7 @@ export function loginToDeepSeek(
       if (captured || settled) return
       pollTimer = setInterval(async () => {
         if (captured) return
-        if (await tryCaptureToken(win, source.id)) {
+        if (await tryCaptureToken(win, accountId)) {
           captured = true
           finish({ success: true })
           win.close()
@@ -143,7 +144,7 @@ export function loginToDeepSeek(
             return
           }
           attempts++
-          if (await tryCaptureToken(win, source.id)) {
+          if (await tryCaptureToken(win, accountId)) {
             captured = true
             clearInterval(graceTimer)
             finish({ success: true })
@@ -171,16 +172,17 @@ export function loginToDeepSeek(
 }
 
 /** 清除某监控源的登录态与 API Key */
-export function logoutDeepSeek(sourceId: string): void {
-  removeUsageCredential(usageTokenKey(sourceId))
-  removeUsageCredential(usageApiKeyKey(sourceId))
+/** 清除某账号的登录态与 API Key（只动本账号） */
+export function logoutDeepSeek(accountId: string): void {
+  removeUsageCredential(usageTokenKey(accountId))
+  removeUsageCredential(usageApiKeyKey(accountId))
 }
 
-/** 查询某监控源的认证状态：登录态 = 有 userToken 或有 API Key */
-export function getDeepSeekStatus(sourceId: string): MonitorStatus {
+/** 查询某账号的认证状态：登录态 = 有 userToken 或有 API Key */
+export function getDeepSeekStatus(accountId: string): MonitorStatus {
   return {
-    loggedIn: !!getUsageCredential(usageTokenKey(sourceId)) || !!getUsageCredential(usageApiKeyKey(sourceId)),
-    hasApiKey: !!getUsageCredential(usageApiKeyKey(sourceId))
+    loggedIn: !!getUsageCredential(usageTokenKey(accountId)) || !!getUsageCredential(usageApiKeyKey(accountId)),
+    hasApiKey: !!getUsageCredential(usageApiKeyKey(accountId))
   }
 }
 
@@ -434,9 +436,9 @@ export type DeepSeekRefreshResult =
  * 并行请求：余额（API Key，可选）+ 平台用量 amount/cost（userToken，回退 API Key）。
  * 用量接口 401/403 → session_expired；其余网络异常 → network。
  */
-export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<DeepSeekRefreshResult> {
-  const apiKey = getUsageCredential(usageApiKeyKey(source.id))
-  const userToken = getUsageCredential(usageTokenKey(source.id))
+export async function refreshDeepSeekUsage(accountId: string): Promise<DeepSeekRefreshResult> {
+  const apiKey = getUsageCredential(usageApiKeyKey(accountId))
+  const userToken = getUsageCredential(usageTokenKey(accountId))
   if (!apiKey && !userToken) return { ok: false, code: 'not_authenticated' }
 
   const usageToken = userToken || apiKey!
@@ -462,7 +464,7 @@ export async function refreshDeepSeekUsage(source: RemoteUsageSource): Promise<D
   const amtRes = get(hasBalanceSource ? 1 : 0)
   const costRes = get(hasBalanceSource ? 2 : 1)
   if (DEBUG) {
-    console.log(`[Monitor] deepseek refresh(${source.id}): balance=${balRes?.status ?? 0} amount=${amtRes?.status ?? 0} cost=${costRes?.status ?? 0} (balanceSrc=${userToken ? 'userSummary' : apiKey ? 'userBalance' : 'none'}, usageAuth=${userToken ? 'userToken' : 'apiKey'})`)
+    console.log(`[Monitor] deepseek refresh(${accountId}): balance=${balRes?.status ?? 0} amount=${amtRes?.status ?? 0} cost=${costRes?.status ?? 0} (balanceSrc=${userToken ? 'userSummary' : apiKey ? 'userBalance' : 'none'}, usageAuth=${userToken ? 'userToken' : 'apiKey'})`)
   }
 
   // 用量接口 401/403 → 登录态失效（userToken 过期或 API Key 无权访问平台用量）
