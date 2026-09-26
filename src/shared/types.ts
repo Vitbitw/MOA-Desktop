@@ -457,12 +457,65 @@ export interface MimoTokenPlan {
   items: MimoTokenPlanItem[]
 }
 
+/** MiMo 订阅套餐信息（/tokenPlan/subscription/status + /tokenPlan/detail 归一化；字段缺失时省略） */
+export interface MimoSubscription {
+  /** 套餐代码（如 standard / standard_year / lite，未知原样保留） */
+  planId?: string
+  /** 展示名（服务端名称字段优先；缺失时 UI 按 planId 映射） */
+  planName?: string
+  /** 订阅状态（服务端原样，如 ACTIVE / active / EXPIRED；未知值原样保留） */
+  status?: string
+  /** 有效期截止 / 下次续费时间（epoch 秒） */
+  expireAtTs?: number
+  /** 自动续费是否开启 */
+  autoRenew?: boolean
+}
+
 /** MiMo 用量归一化数据。区块可选：对应端点失败时 absent（见 sourcesAvailable） */
 export interface MimoUsage {
   fetchedAt: number
-  sourcesAvailable: { balance: boolean; tokenPlan: boolean }
+  sourcesAvailable: {
+    balance: boolean
+    tokenPlan: boolean
+    /** 订阅套餐（/tokenPlan/subscription/status + /tokenPlan/detail） */
+    subscription: boolean
+    /** 5小时/7天滚动窗口（服务端提供时才为 true） */
+    windows: boolean
+    /** 汇总（由 /usage/detail/list 当月行聚合） */
+    summary: boolean
+    /** 服务端聚合明细（/usage/detail/list 当月行） */
+    detailList: boolean
+  }
   balance?: MimoBalance
   tokenPlan?: MimoTokenPlan
+  /** 订阅套餐（含有效期）；无订阅时 absent（sourcesAvailable.subscription 仍为 true） */
+  subscription?: MimoSubscription
+  /** 额度窗口：5h/7d 滚动窗口（若服务端提供）；monthly = Token Plan 周期额度 */
+  windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo; monthly?: UsageWindowInfo }
+  summary?: {
+    totalCount: number
+    /** 总成本（已归一为 USD，展示层按 settings.currency 换算） */
+    totalCost: number
+    totalTokens: number
+    /** 成功率（0-1 或百分数，UI 兼容两种）；服务端未提供时省略 */
+    successRate?: number
+    /** 统计区间（如 'current-month' = 当前自然月，与模型明细同源同区间） */
+    periodBasis?: string
+  }
+  /** 服务端聚合口径的模型明细（/usage/detail/list 当月行按 model 聚合） */
+  monthlyModels?: {
+    rows: Array<{
+      model: string
+      requests: number
+      /** 成本（USD 归一） */
+      cost: number
+      tokensIn: number
+      tokensOut: number
+      tokensTotal: number
+    }>
+    /** 覆盖区间（当月行的最早/最晚日期，epoch 毫秒） */
+    window?: { fromTs?: number; toTs?: number }
+  }
 }
 
 /** 任意监控源的归一化用量（monitor:refresh 返回值，按 source.type 区分结构） */

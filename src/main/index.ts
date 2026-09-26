@@ -831,7 +831,7 @@ function registerIpcHandlers() {
   handleIpcRaw(IPC.MONITOR_REFRESH, async (_e, source: RemoteUsageSource) => {
     // 页面刷新与后台采集共用同一「自动刷新间隔」：这里先占位，
     // 采集器据此跳过同一间隔内的重复拉取（见 collector.markUsageCollected）
-    if (source.type === 'commandcode') markUsageCollected()
+    if (source.type === 'commandcode' || source.type === 'mimo') markUsageCollected()
     const result =
       source.type === 'mimo'
         ? await refreshMimoUsage(source)

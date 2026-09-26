@@ -55,6 +55,9 @@ test-e2e/probe-cc-app-refresh.cjs
 test-e2e/probe-cc-usage-requests.cjs
 test-e2e/probe-cc-monthly-cap.cjs
 test-e2e/cc-app-bundle.cjs
+# MiMo 平台接口联测探针（一次性诊断工具，输出含账号数据，不参与版本控制）
+test-e2e/mimo-api-probe.cjs
+mimo-probe-out.json
 
 # Hermes / AI辅助开发
 .hermes/

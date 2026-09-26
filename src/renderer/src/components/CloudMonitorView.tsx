@@ -12,6 +12,7 @@ import type {
   CumulativeModelUsage,
   DeepSeekBalanceInfo,
   DeepSeekUsage,
+  MimoSubscription,
   MimoUsage,
   MonitorStatus,
   MonitorErrorCode,
@@ -117,31 +118,42 @@ function WindowCard({
 /**
  * 月度额度卡（账单月）。已用% 与官网同口径：1 − 余额 ÷ 套餐月度额度（见主进程 computeMonthlyWindow）；
  * 拿不到百分比（无套餐/未知套餐/扣款失败）时退回只显示余额。
+ * MiMo 用法：额度以 Credits 计（非货币）→ 传 creditsText 覆盖右侧余额文案；hint 覆盖口径提示。
  */
 function MonthlyCard({
   credits,
   window: win,
   resetAtTs,
-  currency
+  currency,
+  creditsText,
+  hint
 }: {
   credits?: number
   window?: UsageWindowInfo
   /** 账单周期结束时间（epoch 秒）——额度重置时刻 */
   resetAtTs?: number
   currency: 'USD' | 'CNY'
+  /** 右侧额度文案（如「剩余 3.21 亿 Credits」）；给出时替代货币余额显示 */
+  creditsText?: string
+  /** 口径提示（title）；缺省用 Command Code 的官方口径说明 */
+  hint?: string
 }) {
   const used = win?.usedPercent
+  const moneyText = credits !== undefined ? formatCost(credits, currency) : undefined
+  // 进度行：货币口径带「余额」前缀（Command Code 原样式）；MiMo 的 creditsText 原样展示
+  const rightText = creditsText ?? (moneyText !== undefined ? `余额 ${moneyText}` : undefined)
+  const fallbackText = creditsText ?? moneyText ?? '暂无数据'
   return (
     <div
       className="rounded-lg border border-border bg-card px-4 py-3"
-      title="已用% = 1 − 余额 ÷ 套餐月度额度（与官网口径一致）；额度在账单周期结束时重置"
+      title={hint ?? '已用% = 1 − 余额 ÷ 套餐月度额度（与官网口径一致）；额度在账单周期结束时重置'}
     >
       <div className="text-xs text-muted-foreground mb-2">月度额度</div>
-      {used !== undefined && credits !== undefined ? (
+      {used !== undefined && rightText !== undefined ? (
         <>
           <div className="flex items-baseline justify-between mb-1.5">
             <span className="text-lg font-semibold tabular-nums text-foreground">{used.toFixed(2)}% 已用</span>
-            <span className="text-xs text-muted-foreground">余额 {formatCost(credits, currency)}</span>
+            <span className="text-xs text-muted-foreground">{rightText}</span>
           </div>
           <div className="h-1.5 rounded-full bg-muted overflow-hidden">
             <div className={`h-full rounded-full ${barColor(used)}`} style={{ width: `${Math.min(100, used)}%` }} />
@@ -151,9 +163,7 @@ function MonthlyCard({
           )}
         </>
       ) : (
-        <div className="text-lg font-semibold tabular-nums text-foreground">
-          {credits !== undefined ? formatCost(credits, currency) : '暂无数据'}
-        </div>
+        <div className="text-lg font-semibold tabular-nums text-foreground">{fallbackText}</div>
       )}
     </div>
   )
@@ -358,6 +368,52 @@ function AutoRefreshControl() {
   )
 }
 
+// ─── 窗口到点补拉（Command Code / MiMo 共用） ───
+
+/**
+ * 5h/7d 越过重置时刻后，页面上的数值仍是重置前拉的旧窗口 → 立即补拉一次
+ *（否则最长要等一个轮询间隔才翻新，倒计时则会一直停在"即将重置"）。
+ * 每个 resetAt 最多尝试 3 次、两次补拉至少间隔 30s：防止服务端持续返回旧窗口时无休止轮询。
+ * usage 走对象身份依赖（刷新成功才换新对象），窗口数组不进依赖——避免每次渲染重置定时器。
+ */
+function useWindowResetRefresh(opts: {
+  /** 自动刷新开启且已登录（关闭时不补拉） */
+  active: boolean
+  refreshMinutes: number
+  usage: { windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo } } | null
+  lastFetchedAt: number | null
+  refreshRef: React.MutableRefObject<() => Promise<void>>
+}): void {
+  const { active, refreshMinutes, usage, lastFetchedAt, refreshRef } = opts
+  const resetRefreshTriesRef = useRef<Map<number, number>>(new Map())
+  const lastResetRefreshAtRef = useRef(0)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!active || lastFetchedAt == null) return
+      if (resetRefreshTriesRef.current.size > 100) resetRefreshTriesRef.current.clear()
+      const pending = expiredWindows(
+        [usage?.windows?.fiveHour, usage?.windows?.weekly],
+        Date.now(),
+        lastFetchedAt
+      ).filter(
+        (w): w is UsageWindowInfo & { resetAt: number } =>
+          w.resetAt !== undefined && (resetRefreshTriesRef.current.get(w.resetAt) ?? 0) < 3
+      )
+      if (pending.length === 0) return
+      const now = Date.now()
+      if (now - lastResetRefreshAtRef.current < 30_000) return
+      lastResetRefreshAtRef.current = now
+      for (const w of pending) {
+        resetRefreshTriesRef.current.set(w.resetAt, (resetRefreshTriesRef.current.get(w.resetAt) ?? 0) + 1)
+      }
+      refreshRef.current()
+    }, 5_000)
+    return () => clearInterval(timer)
+    // refreshMinutes 仅决定提示语义，不参与触发条件（active 已含「>0」判定）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, usage, lastFetchedAt, refreshRef, refreshMinutes])
+}
+
 // ─── 面板：Command Code 云端用量 ───
 
 function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
@@ -543,34 +599,14 @@ function CommandCodePanel({ source }: { source: RemoteUsageSource }) {
     }
   }, [refreshMinutes, loggedIn, sourceId])
 
-  // 窗口到点补拉：5h/7d 越过重置时刻后，页面上的数值仍是重置前拉的旧窗口 →
-  // 立即补拉一次（否则最长要等一个轮询间隔才翻新，倒计时则会一直停在“即将重置”）。
-  // 每个 resetAt 最多尝试 3 次、两次补拉至少间隔 30s：防止服务端持续返回旧窗口时无休止轮询。
-  const resetRefreshTriesRef = useRef<Map<number, number>>(new Map())
-  const lastResetRefreshAtRef = useRef(0)
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (refreshMinutes <= 0 || !loggedIn || lastFetchedAt == null) return
-      if (resetRefreshTriesRef.current.size > 100) resetRefreshTriesRef.current.clear()
-      const pending = expiredWindows(
-        [usage?.windows?.fiveHour, usage?.windows?.weekly],
-        Date.now(),
-        lastFetchedAt
-      ).filter(
-        (w): w is UsageWindowInfo & { resetAt: number } =>
-          w.resetAt !== undefined && (resetRefreshTriesRef.current.get(w.resetAt) ?? 0) < 3
-      )
-      if (pending.length === 0) return
-      const now = Date.now()
-      if (now - lastResetRefreshAtRef.current < 30_000) return
-      lastResetRefreshAtRef.current = now
-      for (const w of pending) {
-        resetRefreshTriesRef.current.set(w.resetAt, (resetRefreshTriesRef.current.get(w.resetAt) ?? 0) + 1)
-      }
-      refreshRef.current()
-    }, 5_000)
-    return () => clearInterval(timer)
-  }, [refreshMinutes, loggedIn, usage, lastFetchedAt])
+  // 窗口到点补拉：5h/7d 重置后立即刷新（共用 hook，见 useWindowResetRefresh）
+  useWindowResetRefresh({
+    active: refreshMinutes > 0 && loggedIn,
+    refreshMinutes,
+    usage,
+    lastFetchedAt,
+    refreshRef
+  })
 
   // ── 动作 ──
   const handleLogin = async () => {
@@ -1028,7 +1064,114 @@ function fmtYi(v: number): string {
   return `${(v / 1e8).toFixed(2)} 亿`
 }
 
+// ─── MiMo 订阅套餐展示辅助（监控项目与 Command Code 订阅区对齐） ───
+
+/** 套餐代码 → 展示名（与控制台 planNames 一致；未知代码原样显示） */
+const MIMO_SUB_PLAN_NAMES: Record<string, string> = {
+  lite: 'Lite 月度套餐',
+  standard: 'Standard 月度套餐',
+  pro: 'Pro 月度套餐',
+  max: 'Max 月度套餐',
+  lite_year: 'Lite 年度套餐',
+  standard_year: 'Standard 年度套餐',
+  pro_year: 'Pro 年度套餐',
+  max_year: 'Max 年度套餐'
+}
+
+/** 订阅状态 → 展示文案（服务端值形态未公开：已知映射，未知原样显示） */
+const MIMO_SUB_STATUS_LABELS: Record<string, string> = {
+  ACTIVE: '使用中',
+  active: '使用中',
+  VALID: '有效',
+  valid: '有效',
+  TRIAL: '试用中',
+  TRIALING: '试用中',
+  EXPIRED: '已过期',
+  expired: '已过期',
+  CANCELED: '已取消',
+  CANCELLED: '已取消',
+  canceled: '已取消',
+  INACTIVE: '未激活',
+  inactive: '未激活'
+}
+
+/** 订阅状态 → 文案色调（绿色=生效中 / 红=失效类 / 灰=其余，按包含匹配容错大小写与变体） */
+function mimoStatusTone(status?: string): string {
+  if (!status) return 'text-muted-foreground'
+  const s = status.toUpperCase()
+  if (['ACTIVE', 'VALID', 'IN_EFFECT', 'NORMAL', 'RENEW', 'TRIAL'].some((k) => s.includes(k))) return 'text-green-600'
+  if (['EXPIRED', 'CANCEL', 'INACTIVE', 'FROZEN', 'SUSPEND', 'CLOSED', 'FAILED'].some((k) => s.includes(k)))
+    return 'text-destructive'
+  return 'text-muted-foreground'
+}
+
+/** 订阅套餐区：套餐名 / 「状态与到期」合并卡（与 Command Code 订阅区同布局） */
+function MimoSubscriptionSection({
+  subscription,
+  available
+}: {
+  subscription?: MimoSubscription
+  available: boolean
+}) {
+  if (!available && !subscription) {
+    return (
+      <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+        暂无数据
+      </div>
+    )
+  }
+  if (!subscription) {
+    return (
+      <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+        当前账号未查询到订阅信息（可能未订阅套餐）
+      </div>
+    )
+  }
+
+  const planName = subscription.planName
+    ? subscription.planName
+    : subscription.planId
+      ? (MIMO_SUB_PLAN_NAMES[subscription.planId] ?? subscription.planId)
+      : '—'
+  const statusLabel = subscription.status
+    ? (MIMO_SUB_STATUS_LABELS[subscription.status] ?? subscription.status)
+    : '—'
+  const endTs = subscription.expireAtTs
+  const endLabel = endTs !== undefined ? fmtDateUtc(endTs) : null
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="rounded-lg border border-border bg-card px-4 py-3">
+        <div className="text-xs text-muted-foreground mb-1">当前套餐</div>
+        <div className="text-lg font-semibold text-foreground">{planName}</div>
+        {subscription.planId && planName !== subscription.planId && (
+          <div className="text-xs text-muted-foreground mt-0.5">{subscription.planId}</div>
+        )}
+      </div>
+      <div className="rounded-lg border border-border bg-card px-4 py-3">
+        <div className="text-xs text-muted-foreground mb-1">订阅状态与到期</div>
+        <div className="flex items-baseline justify-between gap-3">
+          <span className={`text-lg font-semibold ${mimoStatusTone(subscription.status)}`}>{statusLabel}</span>
+          {endLabel && (
+            <span className="text-sm tabular-nums text-foreground whitespace-nowrap">
+              <span className="text-xs text-muted-foreground">到期 </span>
+              {endLabel}
+            </span>
+          )}
+        </div>
+        {subscription.autoRenew !== undefined && (
+          <div className={`text-xs mt-0.5 ${subscription.autoRenew ? 'text-muted-foreground' : 'text-yellow-600'}`}>
+            {subscription.autoRenew ? '自动续费开启' : '自动续费关闭'}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function MimoPanel({ source }: { source: RemoteUsageSource }) {
+  const settings = useSettingsStore((s) => s.settings)
+  const currency = settings.currency
   const sourceId = source.id
 
   const [status, setStatus] = useState<MonitorStatus | null>(
@@ -1041,6 +1184,16 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
   const [loggingIn, setLoggingIn] = useState(false)
+  // 本地累计（云端列表是「日期×模型」聚合行，累计口径让跨月数字只增不减）
+  const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(
+    () => getCloudSnapshot(sourceId)?.cumulative ?? null
+  )
+  const [collector, setCollector] = useState<CollectorStatusInfo | null>(
+    () => getCloudSnapshot(sourceId)?.collector ?? null
+  )
+  const [detailMode, setDetailMode] = useState<'monthly' | 'cumulative'>(
+    () => getCloudSnapshot(sourceId)?.detailMode ?? 'monthly'
+  )
   // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
   const lastFetchedAt = usage?.fetchedAt ?? null
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -1109,6 +1262,27 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
     }
   }
 
+  // 本地累计 + 采集器状态（累计口径的数据来源）
+  const loadCumulative = async () => {
+    if (!sourceId) return
+    try {
+      const [cumRes, stRes] = await Promise.all([
+        window.moaAPI.monitorGetCumulative(sourceId),
+        window.moaAPI.monitorCollectorStatus()
+      ])
+      if (cumRes.success && cumRes.data) {
+        setCumulative(cumRes.data)
+        patchCloudSnapshot(sourceId, { cumulative: cumRes.data })
+      }
+      if (stRes.success && stRes.data) {
+        setCollector(stRes.data)
+        patchCloudSnapshot(sourceId, { collector: stRes.data })
+      }
+    } catch {
+      // 累计读取失败不阻塞页面（首次为空属正常）
+    }
+  }
+
   // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
   const hydrateUsage = async () => {
     if (getCloudSnapshot(sourceId)?.usage != null) return
@@ -1125,16 +1299,42 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
     }
   }
 
-  // 挂载：读取状态；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
+  // 挂载：读取状态 + 本地累计；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
   useEffect(() => {
     loadStatus()
+    void loadCumulative()
     void hydrateUsage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId])
 
-  // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
+  // 每次刷新成功后同步累计数据（lastFetchedAt 变化 = 刷新完成）
   useEffect(() => {
-    if (snapshotReady && status?.loggedIn && shouldFetchOnMount(usage, refreshMinutes)) {
+    if (lastFetchedAt) void loadCumulative()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastFetchedAt])
+
+  // 页面打开期间轮询本地累计：后台采集写入的新记录自动出现，否则数字看着像"不动"
+  useEffect(() => {
+    if (!sourceId) return
+    const timer = setInterval(() => {
+      void loadCumulative()
+    }, 60_000)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId])
+
+  // 明细口径选择写回快照：切视图往返后保持用户选择
+  useEffect(() => {
+    if (sourceId) patchCloudSnapshot(sourceId, { detailMode })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId, detailMode])
+
+  // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示。
+  // 旧版快照（升级前保存，无 detailList 标记）不判新鲜，直接重拉到新结构。
+  useEffect(() => {
+    if (!snapshotReady || !status?.loggedIn) return
+    const legacySnapshot = usage != null && usage.sourcesAvailable.detailList === undefined
+    if (shouldFetchOnMount(usage, refreshMinutes) || legacySnapshot) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1150,6 +1350,15 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
       if (timerRef.current) clearInterval(timerRef.current)
     }
   }, [refreshMinutes, loggedIn])
+
+  // 窗口到点补拉：5h/7d（或月度 resetAt）重置后立即刷新（共用 hook，见 useWindowResetRefresh）
+  useWindowResetRefresh({
+    active: refreshMinutes > 0 && loggedIn,
+    refreshMinutes,
+    usage,
+    lastFetchedAt,
+    refreshRef
+  })
 
   // ── 动作 ──
   const handleLogin = async () => {
@@ -1189,6 +1398,36 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
   const balance = usage?.balance
   const tokenPlan = usage?.tokenPlan
   const balSym = balance?.currency === 'USD' ? '$' : '¥'
+  const summary = usage?.summary
+  const subscription = usage?.subscription
+  const windowsAvailable = usage?.sourcesAvailable.windows ?? false
+  const detailListAvailable = usage?.sourcesAvailable.detailList ?? false
+  // 明细口径：服务端聚合（/usage/detail/list 当月行，默认）/ 本地累计（本地观测累积）
+  const monthlyRows = usage?.monthlyModels?.rows ?? []
+  const monthlyAvailable = monthlyRows.length > 0 && detailListAvailable
+  const cumulativeModels = cumulative?.models ?? []
+  const effectiveDetailMode: 'monthly' | 'cumulative' =
+    detailMode === 'monthly' && !monthlyAvailable ? 'cumulative' : detailMode
+  const shownModels = effectiveDetailMode === 'monthly' ? monthlyRows : cumulativeModels
+  const monthlyWindow = usage?.monthlyModels?.window
+  const monthlySpan =
+    monthlyWindow?.fromTs !== undefined && monthlyWindow?.toTs !== undefined
+      ? fmtSpan(monthlyWindow.fromTs, monthlyWindow.toTs)
+      : null
+  const cumulativeSinceLabel = cumulative?.sinceTs !== undefined ? fmtSpan(cumulative.sinceTs, cumulative.sinceTs) : null
+  // 采集器是否还活着：持久化的最近采集时间超过 2×间隔（且至少 10 分钟）即视为可能停止；
+  // 自动刷新关闭时不判断（不采集是预期行为，避免误报「采集已停止」）
+  const collectorState = cumulative?.collectorState
+  const staleThresholdMs = Math.max(2 * (collector?.intervalMinutes ?? refreshMinutes) * 60_000, 10 * 60_000)
+  const collectorStale =
+    refreshMinutes > 0 &&
+    collectorState?.lastRunAt !== undefined &&
+    collectorState.lastRunAt > 0 &&
+    Date.now() - collectorState.lastRunAt > staleThresholdMs
+  // 月度额度卡右侧文案：套餐剩余 Credits（各条目 limit−used 求和）
+  const planRemainingCredits = tokenPlan
+    ? tokenPlan.items.reduce((s, it) => s + Math.max(it.limit - it.used, 0), 0)
+    : undefined
 
   return (
     <div className="flex flex-col gap-4">
@@ -1279,7 +1518,7 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
       {statusKnown && !loggedIn && (
         <div className="rounded-lg border border-border bg-card px-6 py-14 flex flex-col items-center gap-3">
           <p className="text-sm text-muted-foreground">
-            尚未登录 Xiaomi MiMo。登录后将展示账户余额与 Token Plan 套餐用量。
+            尚未登录 Xiaomi MiMo。登录后将展示 订阅套餐、5小时/7天/月度额度、用量汇总与模型明细。
           </p>
           <button
             onClick={handleLogin}
@@ -1301,59 +1540,238 @@ function MimoPanel({ source }: { source: RemoteUsageSource }) {
 
       {loggedIn && usage && (
         <>
-          {/* 账户余额 */}
+          {/* 订阅套餐（含到期时间）——与 Command Code 订阅区对齐 */}
           <section>
-            <h3 className="text-xs font-semibold text-muted-foreground mb-2">账户余额</h3>
-            {balance ? (
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                <div className="rounded-lg border border-border bg-card px-4 py-3">
-                  <div className="text-xs text-muted-foreground mb-1">总余额</div>
-                  <div className="text-2xl font-bold tabular-nums text-foreground">
-                    {balSym}
-                    {balance.balance.toFixed(2)}
+            <h3 className="text-xs font-semibold text-muted-foreground mb-2">订阅套餐</h3>
+            <MimoSubscriptionSection
+              subscription={subscription}
+              available={usage.sourcesAvailable.subscription ?? false}
+            />
+          </section>
+
+          {/* 额度区：5h / 7d / 月度（+ 账户余额与 Token Plan 分项，MiMo 特有明细随额度展示） */}
+          <section>
+            <h3 className="text-xs font-semibold text-muted-foreground mb-2">额度</h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <WindowCard
+                title="5小时窗口"
+                info={usage.windows?.fiveHour}
+                fetchedAt={lastFetchedAt ?? undefined}
+                autoRefreshOn={refreshMinutes > 0}
+              />
+              <WindowCard
+                title="7天窗口"
+                info={usage.windows?.weekly}
+                fetchedAt={lastFetchedAt ?? undefined}
+                autoRefreshOn={refreshMinutes > 0}
+              />
+              <MonthlyCard
+                window={usage.windows?.monthly}
+                resetAtTs={subscription?.expireAtTs ?? usage.windows?.monthly?.resetAt}
+                currency={currency}
+                {...(planRemainingCredits !== undefined
+                  ? { creditsText: `剩余 ${fmtYi(planRemainingCredits)} Credits` }
+                  : {})}
+                hint="已用% 来自 Token Plan 套餐用量（与官网进度条同口径）；额度在套餐周期结束（续费/到期）时重置"
+              />
+            </div>
+
+            {/* 账户余额（现金/赠送/透支）：MiMo 独有，随额度一并展示 */}
+            {balance && (
+              <div className="mt-3">
+                <div className="text-xs text-muted-foreground mb-1.5">账户余额</div>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                  <div className="rounded-lg border border-border bg-card px-4 py-3">
+                    <div className="text-xs text-muted-foreground mb-1">总余额</div>
+                    <div className="text-xl font-bold tabular-nums text-foreground">
+                      {balSym}
+                      {balance.balance.toFixed(2)}
+                    </div>
                   </div>
+                  <StatCard label="现金余额" value={`${balSym}${balance.cashBalance.toFixed(2)}`} />
+                  <StatCard label="赠送余额" value={`${balSym}${balance.giftBalance.toFixed(2)}`} />
+                  <StatCard label="冻结金额" value={`${balSym}${balance.frozenBalance.toFixed(2)}`} />
+                  <StatCard label="透支额度" value={`${balSym}${balance.overdraftLimit.toFixed(2)}`} />
+                  <StatCard label="剩余透支额度" value={`${balSym}${balance.remainingOverdraftLimit.toFixed(2)}`} />
                 </div>
-                <StatCard label="现金余额" value={`${balSym}${balance.cashBalance.toFixed(2)}`} />
-                <StatCard label="赠送余额" value={`${balSym}${balance.giftBalance.toFixed(2)}`} />
-                <StatCard label="冻结金额" value={`${balSym}${balance.frozenBalance.toFixed(2)}`} />
-                <StatCard label="透支额度" value={`${balSym}${balance.overdraftLimit.toFixed(2)}`} />
-                <StatCard label="剩余透支额度" value={`${balSym}${balance.remainingOverdraftLimit.toFixed(2)}`} />
               </div>
-            ) : (
-              <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
-                暂无余额数据
+            )}
+
+            {/* 当前套餐用量（与官网 plan-manage 同名同源：/tokenPlan/usage 的 used/limit/percent） */}
+            {tokenPlan && tokenPlan.items.length > 0 && (
+              <div className="mt-3">
+                <div className="text-xs text-muted-foreground mb-1.5">当前套餐用量</div>
+                <div className="rounded-lg border border-border bg-card divide-y divide-border overflow-hidden">
+                  {tokenPlan.items.map((it) => {
+                    const label = MIMO_PLAN_LABELS[it.name] ?? it.name
+                    const pct = Math.min(100, it.percent)
+                    return (
+                      <div key={it.name} className="px-4 py-3">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-sm font-medium text-foreground">{label}</span>
+                          <span className="text-xs text-muted-foreground tabular-nums">{Math.round(pct)}% 已用</span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                          <div className={`h-full rounded-full ${barColor(pct)}`} style={{ width: `${pct}%` }} />
+                        </div>
+                        <div className="mt-1.5 text-xs text-muted-foreground tabular-nums">
+                          已用 {fmtYi(it.used)} / 总量 {fmtYi(it.limit)} · 剩余{' '}
+                          {fmtYi(Math.max(it.limit - it.used, 0))} Credits
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
             )}
           </section>
 
-          {/* Token Plan 套餐 */}
+          {/* 汇总卡片：由 /usage/detail/list 当月行聚合，与模型明细（服务端聚合口径）同源同区间 */}
           <section>
-            <h3 className="text-xs font-semibold text-muted-foreground mb-2">Token Plan 套餐</h3>
-            <div className="rounded-lg border border-border bg-card divide-y divide-border overflow-hidden">
-              {tokenPlan && tokenPlan.items.length > 0 ? (
-                tokenPlan.items.map((it) => {
-                  const label = MIMO_PLAN_LABELS[it.name] ?? it.name
-                  const pct = Math.min(100, it.percent)
+            <div className="flex flex-wrap items-baseline gap-x-2 mb-2">
+              <h3 className="text-xs font-semibold text-muted-foreground">汇总</h3>
+              <span
+                className="text-xs text-muted-foreground"
+                title="由当月明细行（/usage/detail/list）聚合，与「模型明细 · 服务端聚合」同源同区间，两者合计应相等；本地累计口径覆盖更长区间，与汇总不应相等"
+              >
+                {summary?.periodBasis === 'current-month' ? '当前自然月' : '当月'} · 与模型明细同口径
+              </span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <StatCard label="总请求数" value={summary ? fmtNum(summary.totalCount) : '—'} />
+              <StatCard label="总成本" value={summary ? formatCost(summary.totalCost, currency) : '—'} />
+              <StatCard label="总 Tokens" value={summary ? fmtNum(summary.totalTokens) : '—'} />
+              <StatCard
+                label="成功率"
+                value={
+                  summary?.successRate !== undefined
+                    ? `${summary.successRate > 1 ? summary.successRate : summary.successRate * 100}%`
+                    : '—'
+                }
+              />
+            </div>
+          </section>
+
+          {/* 模型明细：服务端聚合（当月日期×模型）/ 本地累计 */}
+          <section>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-2">
+              <h3 className="text-xs font-semibold text-muted-foreground">模型明细</h3>
+              <div className="flex items-center gap-1">
+                {(
+                  [
+                    [
+                      'monthly',
+                      '服务端聚合',
+                      '服务端按「日期 × 模型」聚合的当月明细；数据源 /usage/detail/list（当前自然月）'
+                    ],
+                    [
+                      'cumulative',
+                      '本地累计',
+                      '本地按「日期 × 模型」自然键 upsert 累积（自首次采集起，跨月只增不减）；采集停止期间的用量会漏采'
+                    ]
+                  ] as const
+                ).map(([mode, label, hint]) => {
+                  const disabled = mode === 'monthly' && !monthlyAvailable
                   return (
-                    <div key={it.name} className="px-4 py-3">
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-sm font-medium text-foreground">{label}</span>
-                        <span className="text-xs text-muted-foreground tabular-nums">{Math.round(pct)}% 已用</span>
-                      </div>
-                      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-                        <div className={`h-full rounded-full ${barColor(pct)}`} style={{ width: `${pct}%` }} />
-                      </div>
-                      <div className="mt-1.5 text-xs text-muted-foreground tabular-nums">
-                        已用 {fmtYi(it.used)} / 总量 {fmtYi(it.limit)} · 剩余 {fmtYi(Math.max(it.limit - it.used, 0))} Credits
-                      </div>
-                    </div>
+                    <button
+                      key={mode}
+                      onClick={() => setDetailMode(mode)}
+                      disabled={disabled}
+                      title={disabled ? '当月明细暂无数据（当月无用量或接口未返回行），仅可查看本地累计' : hint}
+                      className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                        effectiveDetailMode === mode
+                          ? 'border-primary/50 bg-primary/10 text-foreground'
+                          : 'border-border text-muted-foreground hover:bg-accent'
+                      } ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    >
+                      {label}
+                    </button>
                   )
-                })
-              ) : (
-                <div className="px-4 py-10 text-center text-sm text-muted-foreground">
-                  暂无 Token Plan 数据（可能未订阅套餐或接口暂无返回）
-                </div>
-              )}
+                })}
+              </div>
+            </div>
+
+            {/* 口径说明行 */}
+            {effectiveDetailMode === 'monthly' ? (
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mb-2 text-xs text-muted-foreground">
+                <span>服务端按「日期 × 模型」聚合 · 当前自然月</span>
+                {monthlySpan && <span>· 覆盖 {monthlySpan}</span>}
+                <span>· 日期为 UTC 时间，准实时更新（与官网账单口径一致）</span>
+                <span className="cursor-help" title="来自 /usage/detail/list；按 model 聚合出请求数 / 输入 / 输出 / 总 Tokens / 成本">
+                  · 口径说明
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mb-2 text-xs text-muted-foreground">
+                {cumulative && cumulative.records > 0 ? (
+                  <>
+                    <span>本地累计 {cumulative.records.toLocaleString()} 行（日期 × 模型）</span>
+                    {cumulativeSinceLabel && <span>· 自 {cumulativeSinceLabel} 起</span>}
+                    {cumulative.toTs !== undefined && <span>· 最近记录 {fmtSpan(cumulative.toTs, cumulative.toTs)}</span>}
+                    {collectorState && collectorState.lastRunAt !== undefined && (
+                      <span className={collectorStale ? 'text-yellow-600' : undefined}>
+                        · 最近采集 {fmtTime(collectorState.lastRunAt)}（已 {collectorState.runs} 轮
+                        {collectorState.runs > collectorState.okRuns ? ` · 失败 ${collectorState.runs - collectorState.okRuns}` : ''}）
+                      </span>
+                    )}
+                    {collectorStale && <span className="text-yellow-600">· 采集可能已停止</span>}
+                    {collectorState === undefined && cumulative.lastCollectedAt !== undefined && (
+                      <span>· 最近采集 {fmtTime(cumulative.lastCollectedAt)}</span>
+                    )}
+                    {collector && !collector.enabled && (
+                      <span className="text-yellow-600">· 自动刷新已关闭（仅手动刷新时累积）</span>
+                    )}
+                    {collector?.enabled && collector.intervalMinutes > 0 && (
+                      <span>· 每 {collector.intervalMinutes} 分钟自动采集</span>
+                    )}
+                    {collector?.lastError && <span className="text-yellow-600">· 最近一次采集失败（{collector.lastError}）</span>}
+                    <span
+                      className="cursor-help"
+                      title="本地累计由每次采集到的「日期 × 模型」行按自然键 upsert 累积（数值变化覆盖、恒等不计）；采集未运行期间的用量会漏采，故仅代表“已观测到的用量”"
+                    >
+                      · 口径说明
+                    </span>
+                  </>
+                ) : (
+                  <span>暂无本地累计数据（自动刷新或手动刷新后会逐步累积）</span>
+                )}
+              </div>
+            )}
+            <div className="rounded-lg border border-border bg-card overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-muted-foreground border-b border-border">
+                    <th className="text-left px-4 py-2 font-medium">模型</th>
+                    <th className="text-right px-4 py-2 font-medium">请求数</th>
+                    <th className="text-right px-4 py-2 font-medium">↑ 输入</th>
+                    <th className="text-right px-4 py-2 font-medium">↓ 输出</th>
+                    <th className="text-right px-4 py-2 font-medium">总 Tokens</th>
+                    <th className="text-right px-4 py-2 font-medium">成本</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shownModels.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-12 text-center text-sm text-muted-foreground">
+                        {effectiveDetailMode === 'monthly'
+                          ? '暂无当月明细数据（当月无用量或接口未返回行）'
+                          : '暂无本地累计数据（自动刷新或手动刷新后会逐步累积）'}
+                      </td>
+                    </tr>
+                  ) : (
+                    shownModels.map((m) => (
+                      <tr key={m.model} className="border-b border-border/50 last:border-b-0 hover:bg-accent/30">
+                        <td className="px-4 py-2 text-foreground">{m.model}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.requests)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensIn)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensOut)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensTotal)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{formatCost(m.cost, currency)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
           </section>
         </>

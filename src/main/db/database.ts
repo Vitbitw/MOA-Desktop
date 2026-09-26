@@ -89,6 +89,12 @@ export class Database {
     } catch {
       // Column already exists — ignore
     }
+    // 本地累计支持聚合行（MiMo 日期×模型行带 requestCount；CC 逐条记录默认 1）
+    try {
+      this.exec('ALTER TABLE cc_usage_records ADD COLUMN requests INTEGER NOT NULL DEFAULT 1')
+    } catch {
+      // Column already exists — ignore
+    }
     // 功能更名：request_logs.source 的 'proxy' 值 → 'gateway'（幂等，历史行一并归并）
     this.exec("UPDATE request_logs SET source = 'gateway' WHERE source = 'proxy'")
     // 迁移立即落盘，避免进程退出时丢失结构变更

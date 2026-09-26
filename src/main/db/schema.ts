@@ -56,9 +56,11 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, timest
 CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC);
 
--- Command Code 用量记录本地累计：
--- 服务端 /internal/usage 对部分套餐只返回最近 100 条且无游标（实测 GOAT 套餐，跨度仅约 20 分钟），
--- 因此把每次采集到的记录按 (source_id, record_id) 去重累积，供「本地累计」口径的模型明细使用。
+-- 用量记录本地累计（Command Code / Xiaomi MiMo 共用，按 source_id 隔离）：
+--   Command Code：服务端 /internal/usage 对部分套餐只返回最近 100 条且无游标（实测 GOAT 套餐，
+--     跨度仅约 20 分钟），把每次采集到的记录按 (source_id, record_id) 去重累积。
+--   Xiaomi MiMo：服务端 /usage/detail/list 返回「日期×模型」聚合行，按 (date|model) 自然键
+--     upsert 累积（跨月只增不减）；requests 记录该行的请求次数（CC 逐条记录恒为 1）。
 CREATE TABLE IF NOT EXISTS cc_usage_records (
   source_id       TEXT NOT NULL,
   record_id       TEXT NOT NULL,
@@ -68,6 +70,7 @@ CREATE TABLE IF NOT EXISTS cc_usage_records (
   tokens_out      INTEGER NOT NULL DEFAULT 0,
   tokens_total    INTEGER NOT NULL DEFAULT 0,
   cost            REAL NOT NULL DEFAULT 0,
+  requests        INTEGER NOT NULL DEFAULT 1, -- 该记录代表的请求次数（聚合行为行内 requestCount）
   first_seen_at   INTEGER NOT NULL,          -- 本地首次采集到的时间（epoch 毫秒）
   PRIMARY KEY (source_id, record_id)
 );
