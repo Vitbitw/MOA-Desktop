@@ -4,7 +4,7 @@
 
 | 命令 | 脚本 | 作用 |
 | --- | --- | --- |
-| `npm run test:all` | （串行跑下表全部 21 个测试脚本） | 一键全量回归：任一失败即退出码 1（`test:monitor`、`test:login-window` 含在内） |
+| `npm run test:all` | （串行跑下表全部 22 个测试脚本） | 一键全量回归：任一失败即退出码 1（`test:monitor`、`test:login-window` 含在内） |
 | `npm run test:sse` | `sse-parser.cjs` | SSE 解析器：多行 data / event 透传 / 多工具调用增量 / 末帧 usage / finish_reason |
 | `npm run test:throttle` | `stream-throttle.cjs` | 节流推送器：窗口合并、终态 flush+dispose 语义 |
 | `npm run test:stream` | `stream-call.cjs` | 通用流式调用层 streamChat：三档超时 / 回退链 / 200 直回 JSON 抢救 / abort / extraBody 透传 / tool_calls 增量 |
@@ -20,6 +20,11 @@
 | `npm run test:cloud-cache` | `cloud-monitor-cache.cjs` | 云监控页面快照缓存：get/patch/clear 语义（局部更新不丢字段、登出清空）+ 挂载拉取判定（新鲜/过期/自动刷新关闭） |
 | `npm run test:snapshot-store` | `monitor-snapshot-store.cjs` | 云监控用量快照持久化：save/get 往返、同源覆盖与源间隔离、clear、损坏 JSON 与 DB 抛错降级 |
 | `npm run test:collector` | `collector-dispatch.cjs` | 后台采集调度（stub 定时器 + 假时钟驱动真实 collector）：页面刷新占位只抑制本账号、其余账号照采（核心回归：曾用「任一账号新鲜」做全局预跳过导致整轮被吞）、间隔内不重拉、新账号下一轮可采、关闭不采 |
+| `npm run test:accumulator` | `usage-accumulator.cjs` | 用量本地累计（真实 sql.js + SCHEMA）：CC 逐条 / MiMo 聚合行双口径、ON CONFLICT upsert 语义、requests 列口径、clear 与源隔离 |
+| `npm run test:probe-state` | `pricing-probe-state.cjs` | 定价探查运行状态同步（渲染端 probeStore）：结果文案映射（ok/skipped/失败）、auto 事件 → busy/runningIds 同步、manual 完成仅复位 |
+| `npm run test:probe-cc` | `pricing-probe-cc.cjs` | 定价探查 CC 增强：monthlyCredits 严格解析 / 套餐→探查目标（URL+额度列）/ prompt 指列 / 显示名→/models ID 规范化（防回归：vision-exp、27B）/ Usage limits 请求数与月额度合并 / 边界去重 |
+| `npm run test:vendor-billing` | `vendor-billing.cjs` | providerManager v5「来源 + 账号」：三件套/账号级更新/Key 写入回滚（MF-1）/backfill 一次性标记 |
+| `npm run test:provider-access` | `provider-access.cjs` | 回环免 Key 判定（localhost / 127.0.0.0/8 / ::1）与 hasProviderAccess 组合矩阵 |
 | `npm run test:account-migration` | `provider-account-migration.cjs` | v5「来源 + 账号」真实数据库迁移（真 sql.js 建老库再走 `Database.init()`）：通道/订阅费下沉到默认账号 + 删来源级列、幂等、已有账号不覆盖、active 不变量兜底、迁移后读链回归 |
 | `npm run test:expert-team` | `expert-team.cjs` | 主席团专家团：LLM 输出宽容解析 / 生成模型解析与错误路径 / 席位映射与自动扩充缩减 |
 | `npm run test:arch-persist` | `architecture-persist.cjs` | MoA 协作架构持久化（**唯一启动完整应用的测试**：需图形会话，不纳入 `test:all`）：切换即改即存 / 重启保持 + UI 同步 / 生成专家团写入不清架构 |
