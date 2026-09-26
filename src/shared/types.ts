@@ -514,18 +514,21 @@ export interface MimoTokenPlan {
   items: MimoTokenPlanItem[]
 }
 
-/** MiMo 订阅套餐信息（/tokenPlan/subscription/status + /tokenPlan/detail 归一化；字段缺失时省略） */
+/** MiMo 订阅套餐信息（/tokenPlan/detail 归一化；字段缺失时省略）。
+ *  权威状态字段是 expired 布尔（实测 detail 无字符串 status），status 为兼容保留。 */
 export interface MimoSubscription {
-  /** 套餐代码（如 standard / standard_year / lite，未知原样保留） */
+  /** 套餐代码（如 standard:year / pro，未知原样保留） */
   planId?: string
   /** 展示名（服务端名称字段优先；缺失时 UI 按 planId 映射） */
   planName?: string
-  /** 订阅状态（服务端原样，如 ACTIVE / active / EXPIRED；未知值原样保留） */
+  /** 订阅状态字符串（实测 detail 不提供；兼容保留，缺失时 UI 用 expired 派生） */
   status?: string
-  /** 有效期截止 / 下次续费时间（epoch 秒） */
+  /** 有效期截止 / 下次续费时间（epoch 秒，来自 currentPeriodEnd） */
   expireAtTs?: number
-  /** 自动续费是否开启 */
+  /** 自动续费是否开启（detail.enableAutoRenew） */
   autoRenew?: boolean
+  /** 是否已过期（detail.expired；订阅状态的权威口径） */
+  expired?: boolean
 }
 
 /** MiMo 用量归一化数据。区块可选：对应端点失败时 absent（见 sourcesAvailable） */
@@ -534,38 +537,36 @@ export interface MimoUsage {
   sourcesAvailable: {
     balance: boolean
     tokenPlan: boolean
-    /** 订阅套餐（/tokenPlan/subscription/status + /tokenPlan/detail） */
+    /** 订阅套餐（/tokenPlan/detail） */
     subscription: boolean
-    /** 5小时/7天滚动窗口（服务端提供时才为 true） */
+    /** 月度额度窗口（Token Plan 周期；MiMo 无 5h/7d 滚动窗口） */
     windows: boolean
-    /** 汇总（由 /usage/detail/list 当月行聚合） */
+    /** 汇总（当月明细行聚合） */
     summary: boolean
-    /** 服务端聚合明细（/usage/detail/list 当月行） */
+    /** 服务端聚合明细（/usage/detail/list 按量 + /usage/token-plan/list 套餐） */
     detailList: boolean
   }
   balance?: MimoBalance
   tokenPlan?: MimoTokenPlan
   /** 订阅套餐（含有效期）；无订阅时 absent（sourcesAvailable.subscription 仍为 true） */
   subscription?: MimoSubscription
-  /** 额度窗口：5h/7d 滚动窗口（若服务端提供）；monthly = Token Plan 周期额度 */
-  windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo; monthly?: UsageWindowInfo }
+  /** 额度窗口：monthly = Token Plan 周期额度（MiMo 无 5h/7d 滚动窗口） */
+  windows?: { monthly?: UsageWindowInfo }
   summary?: {
     totalCount: number
-    /** 总成本（已归一为 USD，展示层按 settings.currency 换算） */
-    totalCost: number
+    /** 总成本（USD 归一）= 按量计费金额；区间内无按量行（纯套餐）时省略（UI 显示 —） */
+    totalCost?: number
     totalTokens: number
-    /** 成功率（0-1 或百分数，UI 兼容两种）；服务端未提供时省略 */
-    successRate?: number
     /** 统计区间（如 'current-month' = 当前自然月，与模型明细同源同区间） */
     periodBasis?: string
   }
-  /** 服务端聚合口径的模型明细（/usage/detail/list 当月行按 model 聚合） */
+  /** 服务端聚合口径的模型明细（按量与套餐明细按「日期 × 模型」合并后按 model 聚合） */
   monthlyModels?: {
     rows: Array<{
       model: string
       requests: number
-      /** 成本（USD 归一） */
-      cost: number
+      /** 成本（USD 归一）；仅含按量计费金额，该模型无按量行时省略（UI 显示 —） */
+      cost?: number
       tokensIn: number
       tokensOut: number
       tokensTotal: number
@@ -643,6 +644,16 @@ export interface PricingWindow {
   days?: number[]
 }
 
+/** 用量限额（订阅计划页 Usage limits 区块）：官方估算的「请求数/窗口」（按套餐额度与模型单价折算） */
+export interface ProbedUsageLimits {
+  /** 5 小时滚动窗口可发请求数（官方估算） */
+  fiveHour?: number
+  /** 每周滚动窗口可发请求数（官方估算） */
+  weekly?: number
+  /** 每计费月可发请求数（官方估算） */
+  monthly?: number
+}
+
 /** 一条探查到的官方定价（统一存储为 USD / 1M tokens） */
 export interface ProbedPricingEntry {
   /** 模型 ID 前缀（最长前缀匹配，与 DEFAULT_PRICING 语义一致） */
@@ -655,6 +666,8 @@ export interface ProbedPricingEntry {
   windows?: PricingWindow[]
   /** 模型月度额度（订阅计划页 Monthly credits 列，USD）；仅 Command Code 等有该概念的源有值 */
   monthlyCredits?: number
+  /** 用量限额（订阅计划页 Usage limits 区块，官方估算的「请求数/窗口」）；仅 Command Code 等有该概念的源有值 */
+  usageLimits?: ProbedUsageLimits
   /** 窗口时区（IANA），探查时从源写入，默认 Asia/Shanghai */
   timezone?: string
   /** 官方页原始币种（存储价格统一折算为 USD） */
@@ -684,6 +697,12 @@ export interface PricingProbeSource {
   enabled: boolean
   /** 探查前是否先执行 /models 获取/更新该厂商的模型 ID 作为提取关键词（缺省 = true） */
   fetchModelsBeforeProbe?: boolean
+  /**
+   * 是否补全「套餐计划页未覆盖的模型」定价（缺省 = true；仅 Command Code 源生效）。
+   * 开启后额外抓全站模型页（commandcode.ai/models），为套餐外模型（如 premium / 未在计划页列出的）
+   * 定向补充定价；关闭则只保留套餐计划页覆盖的模型。
+   */
+  fetchAllModelsPricing?: boolean
 }
 
 /** 单个源的页面级探查缓存（独立于 sources 持久化，UI 编辑源时不会误覆盖） */

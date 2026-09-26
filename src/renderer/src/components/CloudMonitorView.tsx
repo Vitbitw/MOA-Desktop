@@ -127,7 +127,8 @@ function MonthlyCard({
   resetAtTs,
   currency,
   creditsText,
-  hint
+  hint,
+  title = '月度额度'
 }: {
   credits?: number
   window?: UsageWindowInfo
@@ -138,6 +139,8 @@ function MonthlyCard({
   creditsText?: string
   /** 口径提示（title）；缺省用 Command Code 的官方口径说明 */
   hint?: string
+  /** 卡片标题；缺省「月度额度」（Command Code 口径） */
+  title?: string
 }) {
   const used = win?.usedPercent
   const moneyText = credits !== undefined ? formatCost(credits, currency) : undefined
@@ -149,7 +152,7 @@ function MonthlyCard({
       className="rounded-lg border border-border bg-card px-4 py-3"
       title={hint ?? '已用% = 1 − 余额 ÷ 套餐月度额度（与官网口径一致）；额度在账单周期结束时重置'}
     >
-      <div className="text-xs text-muted-foreground mb-2">月度额度</div>
+      <div className="text-xs text-muted-foreground mb-2">{title}</div>
       {used !== undefined && rightText !== undefined ? (
         <>
           <div className="flex items-baseline justify-between mb-1.5">
@@ -170,9 +173,9 @@ function MonthlyCard({
   )
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="rounded-lg border border-border bg-card px-4 py-3">
+    <div className="rounded-lg border border-border bg-card px-4 py-3" title={hint}>
       <div className="text-xs text-muted-foreground mb-1">{label}</div>
       <div className="text-lg font-semibold tabular-nums text-foreground">{value}</div>
     </div>
@@ -381,7 +384,14 @@ function useWindowResetRefresh(opts: {
   /** 自动刷新开启且已登录（关闭时不补拉） */
   active: boolean
   refreshMinutes: number
-  usage: { windows?: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo } } | null
+  usage: {
+    windows?: {
+      fiveHour?: UsageWindowInfo
+      weekly?: UsageWindowInfo
+      /** 月度/套餐周期额度（MiMo 的 resetAt = 套餐周期结束时刻） */
+      monthly?: UsageWindowInfo
+    }
+  } | null
   lastFetchedAt: number | null
   refreshRef: React.MutableRefObject<() => Promise<void>>
 }): void {
@@ -393,7 +403,7 @@ function useWindowResetRefresh(opts: {
       if (!active || lastFetchedAt == null) return
       if (resetRefreshTriesRef.current.size > 100) resetRefreshTriesRef.current.clear()
       const pending = expiredWindows(
-        [usage?.windows?.fiveHour, usage?.windows?.weekly],
+        [usage?.windows?.fiveHour, usage?.windows?.weekly, usage?.windows?.monthly],
         Date.now(),
         lastFetchedAt
       ).filter(
@@ -1133,11 +1143,20 @@ function MimoSubscriptionSection({
   const planName = subscription.planName
     ? subscription.planName
     : subscription.planId
-      ? (MIMO_SUB_PLAN_NAMES[subscription.planId] ?? subscription.planId)
+      ? (MIMO_SUB_PLAN_NAMES[subscription.planId.replace(':', '_')] ?? subscription.planId)
       : '—'
-  const statusLabel = subscription.status
-    ? (MIMO_SUB_STATUS_LABELS[subscription.status] ?? subscription.status)
-    : '—'
+  // 状态口径：detail.expired 布尔是权威（实测无字符串 status）；缺失时退回 status 映射
+  const expired = subscription.expired
+  const statusLabel =
+    expired === true
+      ? '已过期'
+      : expired === false
+        ? '生效中'
+        : subscription.status
+          ? (MIMO_SUB_STATUS_LABELS[subscription.status] ?? subscription.status)
+          : '—'
+  const statusTone =
+    expired === true ? 'text-destructive' : expired === false ? 'text-green-600' : mimoStatusTone(subscription.status)
   const endTs = subscription.expireAtTs
   const endLabel = endTs !== undefined ? fmtDateUtc(endTs) : null
 
@@ -1153,7 +1172,7 @@ function MimoSubscriptionSection({
       <div className="rounded-lg border border-border bg-card px-4 py-3">
         <div className="text-xs text-muted-foreground mb-1">订阅状态与到期</div>
         <div className="flex items-baseline justify-between gap-3">
-          <span className={`text-lg font-semibold ${mimoStatusTone(subscription.status)}`}>{statusLabel}</span>
+          <span className={`text-lg font-semibold ${statusTone}`}>{statusLabel}</span>
           {endLabel && (
             <span className="text-sm tabular-nums text-foreground whitespace-nowrap">
               <span className="text-xs text-muted-foreground">到期 </span>
@@ -1403,7 +1422,6 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
   const balSym = balance?.currency === 'USD' ? '$' : '¥'
   const summary = usage?.summary
   const subscription = usage?.subscription
-  const windowsAvailable = usage?.sourcesAvailable.windows ?? false
   const detailListAvailable = usage?.sourcesAvailable.detailList ?? false
   // 明细口径：服务端聚合（/usage/detail/list 当月行，默认）/ 本地累计（本地观测累积）
   const monthlyRows = usage?.monthlyModels?.rows ?? []
@@ -1521,7 +1539,7 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
       {statusKnown && !loggedIn && (
         <div className="rounded-lg border border-border bg-card px-6 py-14 flex flex-col items-center gap-3">
           <p className="text-sm text-muted-foreground">
-            尚未登录 Xiaomi MiMo。登录后将展示 订阅套餐、5小时/7天/月度额度、用量汇总与模型明细。
+            尚未登录 Xiaomi MiMo。登录后将展示 订阅套餐、套餐额度与账户余额、用量汇总与模型明细。
           </p>
           <button
             onClick={handleLogin}
@@ -1552,23 +1570,21 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
             />
           </section>
 
-          {/* 额度区：5h / 7d / 月度（+ 账户余额与 Token Plan 分项，MiMo 特有明细随额度展示） */}
+          {/* 额度区：套餐周期额度（MiMo 无 5h/7d 滚动窗口）+ 账户余额与 Token Plan 分项，随额度一并展示 */}
           <section>
             <h3 className="text-xs font-semibold text-muted-foreground mb-2">额度</h3>
+            <div className="flex flex-wrap items-baseline gap-x-2 mb-2 text-xs text-muted-foreground">
+              <span>MiMo Token Plan 按套餐周期计量，无 5 小时 / 7 天滚动窗口</span>
+              <span
+                className="cursor-help"
+                title="官方 FAQ：Token Plan 为固定周期 Credits 池（no 5-hour cap or weekly usage limit）；额度在套餐周期结束（续费/到期）时整体重置"
+              >
+                · 口径说明
+              </span>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <WindowCard
-                title="5小时窗口"
-                info={usage.windows?.fiveHour}
-                fetchedAt={lastFetchedAt ?? undefined}
-                autoRefreshOn={refreshMinutes > 0}
-              />
-              <WindowCard
-                title="7天窗口"
-                info={usage.windows?.weekly}
-                fetchedAt={lastFetchedAt ?? undefined}
-                autoRefreshOn={refreshMinutes > 0}
-              />
               <MonthlyCard
+                title="套餐额度"
                 window={usage.windows?.monthly}
                 resetAtTs={subscription?.expireAtTs ?? usage.windows?.monthly?.resetAt}
                 currency={currency}
@@ -1629,29 +1645,25 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
             )}
           </section>
 
-          {/* 汇总卡片：由 /usage/detail/list 当月行聚合，与模型明细（服务端聚合口径）同源同区间 */}
+          {/* 汇总卡片：由当月明细行聚合（按量 + 套餐双通道），与模型明细（服务端聚合口径）同源同区间 */}
           <section>
             <div className="flex flex-wrap items-baseline gap-x-2 mb-2">
               <h3 className="text-xs font-semibold text-muted-foreground">汇总</h3>
               <span
                 className="text-xs text-muted-foreground"
-                title="由当月明细行（/usage/detail/list）聚合，与「模型明细 · 服务端聚合」同源同区间，两者合计应相等；本地累计口径覆盖更长区间，与汇总不应相等"
+                title="由当月明细行（/usage/detail/list 按量 + /usage/token-plan/list 套餐，按「日期 × 模型」合并）聚合，与「模型明细 · 服务端聚合」同源同区间，两者合计应相等；本地累计口径覆盖更长区间，与汇总不应相等"
               >
                 {summary?.periodBasis === 'current-month' ? '当前自然月' : '当月'} · 与模型明细同口径
               </span>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <StatCard label="总请求数" value={summary ? fmtNum(summary.totalCount) : '—'} />
-              <StatCard label="总成本" value={summary ? formatCost(summary.totalCost, currency) : '—'} />
-              <StatCard label="总 Tokens" value={summary ? fmtNum(summary.totalTokens) : '—'} />
               <StatCard
-                label="成功率"
-                value={
-                  summary?.successRate !== undefined
-                    ? `${summary.successRate > 1 ? summary.successRate : summary.successRate * 100}%`
-                    : '—'
-                }
+                label="按量成本"
+                hint="按量计费金额（账户币种原值折 USD）；套餐通道按 Credits 计量、无金额口径，不计入本数字。当月无按量用量时显示 —"
+                value={summary && summary.totalCost !== undefined ? formatCost(summary.totalCost, currency) : '—'}
               />
+              <StatCard label="总 Tokens" value={summary ? fmtNum(summary.totalTokens) : '—'} />
             </div>
           </section>
 
@@ -1665,7 +1677,7 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
                     [
                       'monthly',
                       '服务端聚合',
-                      '服务端按「日期 × 模型」聚合的当月明细；数据源 /usage/detail/list（当前自然月）'
+                      '服务端按「日期 × 模型」聚合的当月明细；数据源为按量明细（/usage/detail/list）与套餐明细（/usage/token-plan/list）合并（当前自然月）'
                     ],
                     [
                       'cumulative',
@@ -1700,7 +1712,7 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
                 <span>服务端按「日期 × 模型」聚合 · 当前自然月</span>
                 {monthlySpan && <span>· 覆盖 {monthlySpan}</span>}
                 <span>· 日期为 UTC 时间，准实时更新（与官网账单口径一致）</span>
-                <span className="cursor-help" title="来自 /usage/detail/list；按 model 聚合出请求数 / 输入 / 输出 / 总 Tokens / 成本">
+                <span className="cursor-help" title="来自 /usage/detail/list（按量，含金额）+ /usage/token-plan/list（套餐，无金额），按「日期 × 模型」合并后按 model 聚合出请求数 / 输入 / 输出 / 总 Tokens / 成本">
                   · 口径说明
                 </span>
               </div>
@@ -1749,7 +1761,12 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
                     <th className="text-right px-4 py-2 font-medium">↑ 输入</th>
                     <th className="text-right px-4 py-2 font-medium">↓ 输出</th>
                     <th className="text-right px-4 py-2 font-medium">总 Tokens</th>
-                    <th className="text-right px-4 py-2 font-medium">成本</th>
+                    <th
+                      className="text-right px-4 py-2 font-medium"
+                      title="成本 = 按量计费金额（账户币种折 USD）；套餐通道按 Credits 计量、无金额口径，纯套餐行显示 —"
+                    >
+                      成本
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1769,7 +1786,7 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
                         <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensIn)}</td>
                         <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensOut)}</td>
                         <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensTotal)}</td>
-                        <td className="px-4 py-2 text-right tabular-nums">{formatCost(m.cost, currency)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{m.cost !== undefined ? formatCost(m.cost, currency) : '—'}</td>
                       </tr>
                     ))
                   )}

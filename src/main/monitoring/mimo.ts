@@ -3,9 +3,12 @@
 //   1. 应用内登录窗：加载 platform.xiaomimimo.com，轮询捕获登录 Cookie（api-platform_serviceToken / userId 等）
 //   2. 用量拉取（监控项目与 Command Code 对齐）：
 //      - /api/v1/balance（账户余额）、/api/v1/tokenPlan/usage（Token Plan 套餐用量）
-//      - /api/v1/tokenPlan/detail + /tokenPlan/subscription/status（订阅套餐区）
-//      - /api/v1/usage/detail/list（当月 日期×模型 明细 → 汇总 + 模型明细 + 本地累计）
-//      - 5小时/7天窗口：响应里出现窗口形态字段时防御性解析（无则区块降级）
+//      - /api/v1/tokenPlan/detail（订阅套餐：planCode / currentPeriodEnd / expired / enableAutoRenew）
+//      - /api/v1/usage/detail/list（按量通道：当月 日期×模型 明细，含金额）
+//      - /api/v1/usage/token-plan/list（套餐通道：当月 日期×模型 明细，无金额）
+//      - 两通道明细按「日期 × 模型」合并 → 汇总 + 模型明细 + 本地累计
+//      - 注：MiMo Token Plan 无 5小时/7天滚动窗口（官方 FAQ「no 5-hour cap or weekly usage limit」，
+//        实测两个明细接口也无窗口字段），额度只有「套餐周期池」与「余额」两个口径，不解析窗口字段
 //   3. 归一化为 MimoUsage，区块级优雅降级
 // 网络请求统一走 fetchProxy（尊重用户的网络代理设置）。
 // POST 端点须带 `?api-platform_ph=<cookie 值去引号>`（平台网关要求，详见 mimoPost）。
@@ -22,8 +25,7 @@ import type {
   MimoSubscription,
   MimoTokenPlan,
   MimoUsage,
-  RemoteUsageSource,
-  UsageWindowInfo
+  RemoteUsageSource
 } from '../../shared/types'
 
 const API_BASE = 'https://platform.xiaomimimo.com/api/v1'
@@ -259,7 +261,10 @@ function parseBalance(body: unknown): MimoBalance | undefined {
 }
 
 /** 解析 Token Plan 用量（{ code:0, data: { usage: { percent, items: [{name,used,limit,percent}] } } }）
- * 金额单位为 Credit 原数值（如 Standard 套餐总上限 200M），展示层自行换算。 */
+ * 金额单位为 Credit 原数值（如 Standard 年度套餐总上限 1320 亿），展示层自行换算。
+ * 服务端 percent 字段量纲存在歧义（实测 usage.percent=0.01 与 used/limit 真比值 0.63% 不一致），
+ * 统一按 used/limit 重算，保证与「已用/总量」文字自洽；
+ * limit=0 的补偿积分条目与官方前端一致地跳过（无意义的 0/0 进度行）。 */
 function parseTokenPlan(body: unknown): { percent: number; items: NonNullable<MimoTokenPlan['items']> } | undefined {
   if (!isObj(body) || body.code !== 0) return undefined
   const data = isObj(body.data) ? body.data : null
@@ -272,16 +277,18 @@ function parseTokenPlan(body: unknown): { percent: number; items: NonNullable<Mi
       const used = toNum(raw.used)
       const limit = toNum(raw.limit)
       if (used === undefined || limit === undefined) continue
+      if (raw.name === 'compensation_total_token' && limit === 0) continue
       items.push({
         name: raw.name,
         used,
         limit,
-        percent: toNum(raw.percent) ?? (limit > 0 ? (used / limit) * 100 : 0)
+        percent: limit > 0 ? Math.min(100, (used / limit) * 100) : 0
       })
     }
   }
   if (items.length === 0) return undefined
-  return { percent: toNum(usage.percent) ?? 0, items }
+  const canonical = items.find((i) => i.name === 'plan_total_token') ?? items[0]
+  return { percent: canonical.percent, items }
 }
 
 // ─── 订阅套餐 / 窗口 / 明细（监控项目对齐 Command Code） ───
@@ -346,126 +353,46 @@ function pickTimeTs(objs: Array<Record<string, unknown> | null>, keys: string[])
   return undefined
 }
 
-const SUB_PLAN_ID_KEYS = ['planId', 'plan_id', 'planCode', 'plan_code', 'packageCode', 'skuCode', 'productId', 'product_id', 'planSku']
-const SUB_PLAN_NAME_KEYS = ['planName', 'plan_name', 'packageName', 'package_name', 'displayName', 'title', 'skuName']
-const SUB_STATUS_KEYS = ['status', 'state', 'subscriptionStatus', 'subStatus', 'subscribeStatus']
-const SUB_EXPIRE_KEYS = [
-  'expireAt', 'expire_at', 'expireTime', 'expire_time', 'validUntil', 'valid_until',
-  'endTime', 'end_time', 'expirationTime', 'expiration_time', 'nextRenewalTime', 'next_renewal_time',
-  'renewTime', 'renew_time', 'periodEnd', 'period_end', 'currentPeriodEnd', 'gmtExpireTime', 'dueTime'
-]
-const SUB_AUTORENEW_KEYS = ['autoRenew', 'auto_renew', 'autoRenewal', 'auto_renewal', 'willAutoRenew', 'autoRenewFlag', 'renewStatus']
+const SUB_PLAN_ID_KEYS = ['planCode', 'plan_code', 'planId', 'plan_id']
+const SUB_PLAN_NAME_KEYS = ['planName', 'plan_name', 'packageName']
+const SUB_STATUS_KEYS = ['status', 'state', 'subscriptionStatus']
+const SUB_EXPIRE_KEYS = ['currentPeriodEnd', 'current_period_end', 'expireTime', 'expireAt', 'endTime', 'validUntil']
+const SUB_AUTORENEW_KEYS = ['enableAutoRenew', 'enable_auto_renew', 'autoRenew', 'hasAutoRenewSubscribed']
 
 /**
- * 解析订阅套餐：/tokenPlan/detail 与 /tokenPlan/subscription/status 两个响应合并取值
- * （字段归属未知 → 两侧同查，防御性取第一个命中）。
+ * 解析订阅套餐（权威来源 /tokenPlan/detail，实测 data 为扁平结构：
+ * planCode / planName / currentPeriodEnd / expired / enableAutoRenew / hasAutoRenewSubscribed）。
+ * 状态口径：detail 只有 expired 布尔（无字符串 status）→ expired 是权威状态，status 兼容保留。
  * 返回 recognized=false 表示结构无法识别（sourcesAvailable.subscription 保持 false）；
- * recognized=true 但 subscription 缺省 = 明确的「无订阅」。
+ * recognized=true 但 subscription 缺省 = 明确的「无订阅」（detail.data 为空对象）。
  */
-function parseSubscription(
-  detailBody: unknown,
-  statusBody: unknown
-): { recognized: boolean; subscription?: MimoSubscription } {
-  const roots = [unwrapData(detailBody), unwrapData(statusBody)].filter(isObj)
-  // 常见嵌套容器：data.detail / data.subscription / data.plan / data.info
-  const containers: Array<Record<string, unknown> | null> = []
-  for (const r of roots) {
-    containers.push(r)
-    for (const k of ['data', 'detail', 'subscription', 'subscribe', 'plan', 'info', 'result']) {
-      const v = r[k]
-      if (isObj(v)) {
-        containers.push(v)
-        for (const k2 of ['subscription', 'plan', 'info', 'detail']) {
-          const v2 = v[k2]
-          if (isObj(v2)) containers.push(v2)
-        }
-      }
-    }
-  }
+function parseSubscription(detailBody: unknown): { recognized: boolean; subscription?: MimoSubscription } {
+  const data = unwrapData(detailBody)
+  if (!isObj(data)) return { recognized: false }
 
-  const planId = pickStr(containers, SUB_PLAN_ID_KEYS)
-  const planName = pickStr(containers, SUB_PLAN_NAME_KEYS)
-  const status = pickStr(containers, SUB_STATUS_KEYS)
-  const expireAtTs = pickTimeTs(containers, SUB_EXPIRE_KEYS)
-  const autoRenew = pickBool(containers, SUB_AUTORENEW_KEYS)
+  const planId = pickStr([data], SUB_PLAN_ID_KEYS)
+  const planName = pickStr([data], SUB_PLAN_NAME_KEYS)
+  const status = pickStr([data], SUB_STATUS_KEYS)
+  const expireAtTs = pickTimeTs([data], SUB_EXPIRE_KEYS)
+  const autoRenew = pickBool([data], SUB_AUTORENEW_KEYS)
+  const expired = pickBool([data], ['expired'])
 
   const subscription: MimoSubscription = {
     ...(planId ? { planId } : {}),
     ...(planName ? { planName } : {}),
     ...(status ? { status } : {}),
     ...(expireAtTs !== undefined ? { expireAtTs } : {}),
-    ...(autoRenew !== undefined ? { autoRenew } : {})
+    ...(autoRenew !== undefined ? { autoRenew } : {}),
+    ...(expired !== undefined ? { expired } : {})
   }
   if (Object.keys(subscription).length > 0) return { recognized: true, subscription }
 
-  // 无字段命中：200 + {code:0} 但无 data（或 data 为空对象）→ 识别为「无订阅」
-  for (const body of [detailBody, statusBody]) {
-    if (!isObj(body)) continue
-    if (body.code === 0 && (body.data === null || (isObj(body.data) && Object.keys(body.data).length === 0))) {
-      return { recognized: true }
-    }
-  }
+  // 无字段命中：200 + {code:0} 但 data 为空对象 → 识别为「无订阅」
+  if (Object.keys(data).length === 0) return { recognized: true }
   return { recognized: false }
 }
 
-function parseWindow(w: unknown): UsageWindowInfo | undefined {
-  if (!isObj(w)) return undefined
-  const used = toNum(w.used ?? w.usage ?? w.consumed)
-  const cap = toNum(w.cap ?? w.limit ?? w.total ?? w.quota)
-  const usedPercent =
-    used !== undefined && cap !== undefined && cap > 0
-      ? (used / cap) * 100
-      : toNum(w.used_percent ?? w.usedPercent ?? w.percent ?? w.usedPercentValue)
-  const resetAt = toNum(w.reset_at ?? w.resets_at ?? w.resetAt ?? w.resetsAt ?? w.nextResetAt ?? w.next_reset_at)
-  const info: UsageWindowInfo = {}
-  if (usedPercent !== undefined) info.usedPercent = Math.min(100, Math.max(0, usedPercent))
-  if (resetAt !== undefined) info.resetAt = resetAt > 1e12 ? Math.round(resetAt / 1000) : resetAt
-  return Object.keys(info).length > 0 ? info : undefined
-}
-
-/** 键名归一：去分隔符转小写（five_hour → fivehour） */
-function normKey(k: string): string {
-  return k.replace(/[_\-\s]/g, '').toLowerCase()
-}
-
-const FIVE_HOUR_KEYS = new Set(['fivehour', '5h', 'fivehourwindow', 'window5h', 'hour5', 'primarywindow'])
-const WEEKLY_KEYS = new Set(['weekly', 'sevenday', 'sevendays', '7d', 'weekwindow', 'window7d', 'secondarywindow'])
-
-/**
- * 在响应对象树里防御性搜寻 5小时/7天窗口（深度受限）。
- * 字段形态未知（平台前端未暴露该区块），按 CC 的多形态兼容思路做键名匹配；
- * 匹配到的值再经 parseWindow 校验（非对象/无百分比与重置时间的会被丢弃）。
- */
-function scanWindows(node: unknown, depth = 0): { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo } {
-  const out: { fiveHour?: UsageWindowInfo; weekly?: UsageWindowInfo } = {}
-  if (depth > 5 || !node || typeof node !== 'object') return out
-  if (Array.isArray(node)) {
-    for (const el of node.slice(0, 20)) {
-      const r = scanWindows(el, depth + 1)
-      out.fiveHour = out.fiveHour ?? r.fiveHour
-      out.weekly = out.weekly ?? r.weekly
-      if (out.fiveHour && out.weekly) return out
-    }
-    return out
-  }
-  const obj = node as Record<string, unknown>
-  for (const [k, v] of Object.entries(obj)) {
-    const nk = normKey(k)
-    if (FIVE_HOUR_KEYS.has(nk) && !out.fiveHour) out.fiveHour = parseWindow(v)
-    else if (WEEKLY_KEYS.has(nk) && !out.weekly) out.weekly = parseWindow(v)
-  }
-  if (out.fiveHour && out.weekly) return out
-  for (const v of Object.values(obj)) {
-    if (!v || typeof v !== 'object') continue
-    const r = scanWindows(v, depth + 1)
-    out.fiveHour = out.fiveHour ?? r.fiveHour
-    out.weekly = out.weekly ?? r.weekly
-    if (out.fiveHour && out.weekly) return out
-  }
-  return out
-}
-
-/** 明细行（/usage/detail/list 单行归一化；金额为账户币种原值） */
+/** 明细行（/usage/detail/list 与 /usage/token-plan/list 单行归一化；金额为账户币种原值） */
 interface MimoDetailRow {
   /** 日期键（'YYYY-MM-DD'；缺失时 'unknown'）——本地累计按 (date|model) 去重 */
   dateKey: string
@@ -476,12 +403,8 @@ interface MimoDetailRow {
   tokensIn: number
   tokensOut: number
   tokensTotal: number
-  /** 成本（账户币种原值，聚合后再归一 USD） */
-  costNative: number
-  successCount?: number
-  failCount?: number
-  totalCount?: number
-  successRate?: number
+  /** 成本（账户币种原值，聚合后再归一 USD）；仅按量通道提供，套餐通道行为 undefined */
+  costNative?: number
 }
 
 const ROW_ARRAY_KEYS = ['list', 'rows', 'records', 'items', 'details', 'detailList', 'usages', 'data', 'recordsList']
@@ -513,13 +436,9 @@ function dateKeyToTs(key: string): number | undefined {
   return undefined
 }
 
-function toInt(v: unknown): number | undefined {
-  const n = toNum(v)
-  return n === undefined ? undefined : Math.round(n)
-}
-
-/** 解析 /usage/detail/list 的单行（控制台列：date/model/totalToken/inputHitToken/inputMissToken/outputToken/requestCount/consumedAmount） */
-function parseDetailRow(raw: unknown): MimoDetailRow | undefined {
+/** 解析明细单行（两接口列名同族：date/model/totalToken/inputHitToken/inputMissToken/outputToken/requestCount；
+ *  withAmount=true（/usage/detail/list）额外读 consumedAmount 金额，套餐通道（token-plan/list）无金额字段） */
+function parseDetailRow(raw: unknown, withAmount: boolean): MimoDetailRow | undefined {
   if (!isObj(raw)) return undefined
   const dateRaw = raw.date ?? raw.day ?? raw.statDate ?? raw.reportDate
   const dateKey = typeof dateRaw === 'string' && dateRaw.trim() !== '' ? dateRaw.trim() : typeof dateRaw === 'number' && Number.isFinite(dateRaw) ? String(dateRaw) : 'unknown'
@@ -530,7 +449,7 @@ function parseDetailRow(raw: unknown): MimoDetailRow | undefined {
   const tokensOut = toNum(raw.tokensOut ?? raw.tokens_out ?? raw.outputToken ?? raw.output_token)
   const tokensTotal = toNum(raw.totalToken ?? raw.total_token ?? raw.tokensTotal ?? raw.tokens_total) ?? (tokensIn !== undefined || tokensOut !== undefined ? (tokensIn ?? 0) + (tokensOut ?? 0) : undefined)
   const requests = toNum(raw.requestCount ?? raw.request_count ?? raw.requests ?? raw.count) ?? 1
-  const costNative = toNum(raw.consumedAmount ?? raw.consumed_amount ?? raw.consumptionAmount ?? raw.amount ?? raw.cost) ?? 0
+  const costNative = withAmount ? (toNum(raw.consumedAmount ?? raw.consumed_amount ?? raw.consumptionAmount ?? raw.amount ?? raw.cost) ?? 0) : undefined
 
   const modelRaw = raw.model ?? raw.modelName ?? raw.model_name
   const model = typeof modelRaw === 'string' ? modelRaw.trim() : ''
@@ -542,17 +461,12 @@ function parseDetailRow(raw: unknown): MimoDetailRow | undefined {
     tokensIn !== undefined ||
     tokensOut !== undefined ||
     tokensTotal !== undefined ||
-    costNative > 0 ||
+    (costNative !== undefined && costNative > 0) ||
     raw.requestCount !== undefined ||
     raw.request_count !== undefined
   if (!hasSignal) return undefined
 
   const dateTs = dateKeyToTs(dateKey)
-  const successCount = toInt(raw.successCount ?? raw.success_count ?? raw.succeedCount)
-  const failCount = toInt(raw.failCount ?? raw.fail_count ?? raw.failedCount ?? raw.errorCount)
-  const totalCount = toInt(raw.totalCount ?? raw.total_count ?? raw.allCount)
-  const successRate = toNum(raw.successRate ?? raw.success_rate ?? raw.succeedRate)
-
   return {
     dateKey,
     ...(dateTs !== undefined ? { dateTs } : {}),
@@ -561,21 +475,17 @@ function parseDetailRow(raw: unknown): MimoDetailRow | undefined {
     tokensIn: Math.max(0, tokensIn ?? 0),
     tokensOut: Math.max(0, tokensOut ?? 0),
     tokensTotal: Math.max(0, tokensTotal ?? 0),
-    costNative: Math.max(0, costNative),
-    ...(successCount !== undefined ? { successCount: Math.max(0, successCount) } : {}),
-    ...(failCount !== undefined ? { failCount: Math.max(0, failCount) } : {}),
-    ...(totalCount !== undefined ? { totalCount: Math.max(0, totalCount) } : {}),
-    ...(successRate !== undefined ? { successRate } : {})
+    ...(costNative !== undefined ? { costNative: Math.max(0, costNative) } : {})
   }
 }
 
-/** 解析明细响应：返回行数组 + 账户币种（响应内 currency 优先，其次余额接口，兜底 CNY） */
+/** 解析按量明细响应（/usage/detail/list）：返回行数组 + 账户币种（响应内 currency 优先，其次余额接口，兜底 CNY） */
 function parseUsageDetailList(body: unknown, balance?: MimoBalance): { rows: MimoDetailRow[]; currency: string } | null {
   const arr = extractRowArray(body)
   if (!arr) return null
   const rows: MimoDetailRow[] = []
   for (const raw of arr) {
-    const r = parseDetailRow(raw)
+    const r = parseDetailRow(raw, true)
     if (r) rows.push(r)
   }
   const root = unwrapData(body)
@@ -584,27 +494,63 @@ function parseUsageDetailList(body: unknown, balance?: MimoBalance): { rows: Mim
   return { rows, currency }
 }
 
+/** 解析套餐通道明细响应（POST /usage/token-plan/list；行无金额字段，costNative 恒缺省） */
+function parseTokenPlanList(body: unknown): MimoDetailRow[] | null {
+  const arr = extractRowArray(body)
+  if (!arr) return null
+  const rows: MimoDetailRow[] = []
+  for (const raw of arr) {
+    const r = parseDetailRow(raw, false)
+    if (r) rows.push(r)
+  }
+  return rows
+}
+
+/** 合并按量与套餐两通道明细：同 (日期, 模型) 相加；成本只由按量行贡献（纯套餐行 costNative 缺省） */
+function mergeDetailRows(amountRows: MimoDetailRow[], planRows: MimoDetailRow[]): MimoDetailRow[] {
+  const byKey = new Map<string, MimoDetailRow>()
+  const merge = (r: MimoDetailRow): void => {
+    const key = `${r.dateKey}|${r.model}`
+    const cur = byKey.get(key)
+    if (!cur) {
+      byKey.set(key, { ...r })
+      return
+    }
+    cur.requests += r.requests
+    cur.tokensIn += r.tokensIn
+    cur.tokensOut += r.tokensOut
+    cur.tokensTotal += r.tokensTotal
+    if (r.costNative !== undefined) cur.costNative = (cur.costNative ?? 0) + r.costNative
+  }
+  for (const r of amountRows) merge(r)
+  for (const r of planRows) merge(r)
+  return [...byKey.values()]
+}
+
 /** 币种归一：CNY → USD（展示层再按 settings.currency 换算回去，链路与全应用一致） */
 function toUsd(native: number, currency: string): number {
   return currency === 'USD' ? native : native / CNY_TO_USD
 }
 
-/** 明细行聚合 → 模型明细行（成本归一 USD；按成本降序、tokensTotal 次之） */
+/** 明细行聚合 → 模型明细行（成本归一 USD 且仅含按量金额；按成本降序、tokensTotal 次之） */
 function aggregateDetailRows(
   rows: MimoDetailRow[],
   currency: string
 ): NonNullable<MimoUsage['monthlyModels']> {
   const byModel = new Map<
     string,
-    { requests: number; costNative: number; tokensIn: number; tokensOut: number; tokensTotal: number }
+    { requests: number; costNative: number; hasCost: boolean; tokensIn: number; tokensOut: number; tokensTotal: number }
   >()
   let minTs: number | undefined
   let maxTs: number | undefined
   for (const r of rows) {
     const key = r.model || '其他'
-    const cur = byModel.get(key) ?? { requests: 0, costNative: 0, tokensIn: 0, tokensOut: 0, tokensTotal: 0 }
+    const cur = byModel.get(key) ?? { requests: 0, costNative: 0, hasCost: false, tokensIn: 0, tokensOut: 0, tokensTotal: 0 }
     cur.requests += r.requests
-    cur.costNative += r.costNative
+    if (r.costNative !== undefined) {
+      cur.costNative += r.costNative
+      cur.hasCost = true
+    }
     cur.tokensIn += r.tokensIn
     cur.tokensOut += r.tokensOut
     cur.tokensTotal += r.tokensTotal
@@ -618,60 +564,36 @@ function aggregateDetailRows(
     .map(([model, v]) => ({
       model,
       requests: v.requests,
-      cost: toUsd(v.costNative, currency),
+      ...(v.hasCost ? { cost: toUsd(v.costNative, currency) } : {}),
       tokensIn: v.tokensIn,
       tokensOut: v.tokensOut,
       tokensTotal: v.tokensTotal
     }))
-    .sort((a, b) => b.cost - a.cost || b.tokensTotal - a.tokensTotal)
+    .sort((a, b) => (b.cost ?? 0) - (a.cost ?? 0) || b.tokensTotal - a.tokensTotal)
   return {
     rows: modelRows,
     ...(minTs !== undefined && maxTs !== undefined ? { window: { fromTs: minTs, toTs: maxTs } } : {})
   }
 }
 
-/** 明细行 → 汇总（成功率：优先 success/fail 计数求比，其次行级 successRate 按请求数加权） */
+/** 明细行 → 汇总（成本 = 按量计费金额；MiMo 两接口均无成功率数据，不产出该字段） */
 function aggregateSummary(rows: MimoDetailRow[], currency: string): NonNullable<MimoUsage['summary']> {
   let totalCount = 0
   let costNative = 0
   let totalTokens = 0
-  let successSum = 0
-  let failSum = 0
-  let explicitTotal = 0
-  let weightedRate = 0
-  let weight = 0
-  let hasCounters = false
-  let hasRates = false
+  let hasCost = false
   for (const r of rows) {
     totalCount += r.requests
-    costNative += r.costNative
     totalTokens += r.tokensTotal
-    if (r.successCount !== undefined || r.failCount !== undefined) {
-      hasCounters = true
-      successSum += r.successCount ?? 0
-      failSum += r.failCount ?? 0
+    if (r.costNative !== undefined) {
+      costNative += r.costNative
+      hasCost = true
     }
-    if (r.totalCount !== undefined) explicitTotal += r.totalCount
-    if (r.successRate !== undefined && r.requests > 0) {
-      hasRates = true
-      weightedRate += r.successRate * r.requests
-      weight += r.requests
-    }
-  }
-  const denom = successSum + failSum > 0 ? successSum + failSum : explicitTotal > 0 ? explicitTotal : 0
-  let successRate: number | undefined
-  if (hasCounters && denom > 0) {
-    successRate = successSum / denom
-  } else if (hasRates && weight > 0) {
-    const avg = weightedRate / weight
-    // 行级成功率可能是百分数（>1）也可能是 0-1：按量级归一为 0-1（展示层再 ×100）
-    successRate = avg > 1 ? avg / 100 : avg
   }
   return {
     totalCount,
-    totalCost: toUsd(costNative, currency),
+    ...(hasCost ? { totalCost: toUsd(costNative, currency) } : {}),
     totalTokens,
-    ...(successRate !== undefined ? { successRate } : {}),
     periodBasis: 'current-month'
   }
 }
@@ -683,22 +605,22 @@ export async function refreshMimoUsage(accountId: string): Promise<MimoRefreshRe
   const now = new Date()
   const listPayload = { year: now.getFullYear(), month: now.getMonth() + 1 }
 
-  const [balRes, planRes, detailRes, subRes, listRes, overviewRes] = await Promise.all([
+  const [balRes, planRes, detailRes, listRes, tpListRes] = await Promise.all([
     mimoGet('/balance', cookie),
     mimoGet('/tokenPlan/usage', cookie),
+    // 订阅套餐权威来源；/tokenPlan/subscription/status 实测为空壳端点（{code:0}无 data），已弃用
     mimoGet('/tokenPlan/detail', cookie),
-    mimoGet('/tokenPlan/subscription/status', cookie),
     mimoPost('/usage/detail/list', listPayload, cookie),
-    // 控制台「账单及用量」总览卡（costUsage/tokenUsage/pluginUsage）：响应里可能携带窗口/成功率等未在 UI 展示的字段
-    mimoGet('/usage', cookie)
+    // 套餐通道明细（官方控制台 /console/usage 的「套餐用量」页）：行无金额，与按量明细合并后统一聚合
+    mimoPost('/usage/token-plan/list', listPayload, cookie)
   ])
   if (DEBUG) {
     console.log(
-      `[Monitor] mimo refresh(${accountId}): balance=${balRes.status} tokenPlan=${planRes.status} detail=${detailRes.status} subStatus=${subRes.status} usageList=${listRes.status} overview=${overviewRes.status}`
+      `[Monitor] mimo refresh(${accountId}): balance=${balRes.status} tokenPlan=${planRes.status} detail=${detailRes.status} usageList=${listRes.status} tokenPlanList=${tpListRes.status}`
     )
   }
 
-  const statuses = [balRes.status, planRes.status, detailRes.status, subRes.status, listRes.status, overviewRes.status]
+  const statuses = [balRes.status, planRes.status, detailRes.status, listRes.status, tpListRes.status]
   // 401/403 → 会话失效（cookie 过期，约 24h）
   if (statuses.some((s) => s === 401 || s === 403)) {
     return { ok: false, code: 'session_expired' }
@@ -731,12 +653,9 @@ export async function refreshMimoUsage(accountId: string): Promise<MimoRefreshRe
     }
   }
 
-  // ③ 订阅套餐（detail 与 subscription/status 合并取值）
-  if (detailRes.status === 200 || subRes.status === 200) {
-    const parsed = parseSubscription(
-      detailRes.status === 200 ? detailRes.body : null,
-      subRes.status === 200 ? subRes.body : null
-    )
+  // ③ 订阅套餐（planCode / currentPeriodEnd / expired / enableAutoRenew）
+  if (detailRes.status === 200) {
+    const parsed = parseSubscription(detailRes.body)
     if (parsed.recognized) {
       data.sourcesAvailable.subscription = true
       if (parsed.subscription && Object.keys(parsed.subscription).length > 0) {
@@ -745,63 +664,48 @@ export async function refreshMimoUsage(accountId: string): Promise<MimoRefreshRe
     }
   }
 
-  // ④ 5小时/7天窗口：所有响应树里防御性搜寻（平台字段形态未公开，命中即用）
-  const winScan = { fiveHour: undefined as UsageWindowInfo | undefined, weekly: undefined as UsageWindowInfo | undefined }
-  for (const res of [planRes, detailRes, subRes, listRes, overviewRes, balRes]) {
-    if (res.status !== 200) continue
-    const r = scanWindows(res.body)
-    winScan.fiveHour = winScan.fiveHour ?? r.fiveHour
-    winScan.weekly = winScan.weekly ?? r.weekly
-    if (winScan.fiveHour && winScan.weekly) break
-  }
-  if (winScan.fiveHour || winScan.weekly) {
-    data.windows = {
-      ...(winScan.fiveHour ? { fiveHour: winScan.fiveHour } : {}),
-      ...(winScan.weekly ? { weekly: winScan.weekly } : {})
-    }
-    data.sourcesAvailable.windows = true
-  }
-
-  // ⑤ 当月明细（/usage/detail/list）→ 汇总 + 模型明细（服务端聚合口径）+ 本地累计落库
+  // ④ 当月明细：按量（含金额）与套餐（无金额）两通道按「日期 × 模型」合并 → 汇总 + 模型明细 + 本地累计落库
   let persisted = 0
-  if (listRes.status === 200) {
-    const parsed = parseUsageDetailList(listRes.body, data.balance)
-    if (parsed) {
-      data.sourcesAvailable.detailList = true
-      data.sourcesAvailable.summary = true
-      data.monthlyModels = aggregateDetailRows(parsed.rows, parsed.currency)
-      // 汇总与明细同源同区间（当前自然月）：口径一致，合计应相等
-      data.summary = aggregateSummary(parsed.rows, parsed.currency)
+  const amount = listRes.status === 200 ? parseUsageDetailList(listRes.body, data.balance) : null
+  const planRows = tpListRes.status === 200 ? parseTokenPlanList(tpListRes.body) : null
+  if (amount || planRows) {
+    data.sourcesAvailable.detailList = true
+    data.sourcesAvailable.summary = true
+    const merged = mergeDetailRows(amount?.rows ?? [], planRows ?? [])
+    // 币种：按量响应内 currency 优先（套餐通道无币种字段）；纯套餐账号兜底余额币种
+    const currency = amount?.currency ?? (data.balance?.currency === 'USD' ? 'USD' : 'CNY')
+    data.monthlyModels = aggregateDetailRows(merged, currency)
+    // 汇总与明细同源同区间（当前自然月）：口径一致，合计应相等
+    data.summary = aggregateSummary(merged, currency)
 
-      if (parsed.rows.length > 0) {
-        try {
-          const records: AccumulatedRecordInput[] = parsed.rows.map((r) => ({
-            id: `${r.dateKey}|${r.model || '__other__'}`,
-            ...(r.dateTs !== undefined ? { createdAtMs: r.dateTs } : {}),
-            model: r.model || '其他',
-            tokensIn: r.tokensIn,
-            tokensOut: r.tokensOut,
-            tokensTotal: r.tokensTotal,
-            cost: toUsd(r.costNative, parsed.currency),
-            requests: r.requests
-          }))
-          persisted = persistUsageRecords(accountId, records)
-        } catch (err) {
-          console.warn('[Monitor] MiMo 用量记录落库失败:', err)
-        }
+    if (merged.length > 0) {
+      try {
+        const records: AccumulatedRecordInput[] = merged.map((r) => ({
+          id: `${r.dateKey}|${r.model || '__other__'}`,
+          ...(r.dateTs !== undefined ? { createdAtMs: r.dateTs } : {}),
+          model: r.model || '其他',
+          tokensIn: r.tokensIn,
+          tokensOut: r.tokensOut,
+          tokensTotal: r.tokensTotal,
+          cost: toUsd(r.costNative ?? 0, currency),
+          requests: r.requests
+        }))
+        persisted = persistUsageRecords(accountId, records)
+      } catch (err) {
+        console.warn('[Monitor] MiMo 用量记录落库失败:', err)
       }
     }
   }
 
-  // ⑥ 月度额度窗口：Token Plan 周期已用%（resetAt = 订阅有效期截止，即续费/重置时刻）
+  // ⑤ 月度额度窗口：Token Plan 周期已用%（resetAt = 订阅有效期截止，即续费/重置时刻）
   if (data.tokenPlan) {
     data.windows = {
-      ...(data.windows ?? {}),
       monthly: {
         usedPercent: Math.min(100, Math.max(0, data.tokenPlan.percent)),
         ...(data.subscription?.expireAtTs !== undefined ? { resetAt: data.subscription.expireAtTs } : {})
       }
     }
+    data.sourcesAvailable.windows = true
   }
 
   return { ok: true, data, persisted }

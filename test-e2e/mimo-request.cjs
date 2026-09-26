@@ -12,6 +12,14 @@
 //
 // 本测试用 stub fetchProxy 驱动**真实** refreshMimoUsage（esbuild 打包 + electron /
 // key-store / usageAccumulator stub，不触网），断言 URL 构造与错误语义，防止 ph query 被「简化」掉。
+//
+// 2026-09-26 扩充（MiMo 对齐真实口径）：
+//   - 订阅状态/到期来自 /tokenPlan/detail（planCode/currentPeriodEnd/expired/enableAutoRenew）；
+//     原 /tokenPlan/subscription/status 为空壳端点（{code:0} 无 data），已弃用——请求不应再发。
+//   - 当月明细双通道：/usage/detail/list（按量，含金额）+ /usage/token-plan/list（套餐，无金额），
+//     按「日期 × 模型」合并；套餐行成本缺省（UI 显示 "—"），汇总成本仅含按量金额。
+//   - Token Plan 无 5h/7d 滚动窗口：解析层不产出 fiveHour/weekly；monthly.usedPercent
+//     按 used/limit 重算（服务端 percent 量纲不可信）、resetAt = 订阅到期时刻。
 const path = require('path')
 const esbuild = require('esbuild')
 
@@ -108,22 +116,66 @@ function resetRequests() {
 
 /** 全 200 的默认路由（含真实形态的响应数据） */
 function happyRoute(url, method) {
+  if (method === 'POST' && url.includes('/usage/token-plan/list')) {
+    // 套餐通道（官方控制台「套餐用量」页）：行无金额；含一行与按量同 (日期, 模型)（验证合并）
+    // 与一行纯套餐（验证 cost 缺省）
+    return {
+      status: 200,
+      body: {
+        code: 0,
+        data: [
+          { date: '2026-09-26', model: 'mimo-v2.6-flash', inputHitToken: 50, inputMissToken: 50, outputToken: 100, totalToken: 200, requestCount: 3 },
+          { date: '2026-09-25', model: 'mimo-v2.5', inputHitToken: 100, inputMissToken: 0, outputToken: 50, totalToken: 150, requestCount: 1 }
+        ]
+      }
+    }
+  }
   if (method === 'POST' && url.includes('/usage/detail/list')) {
     return {
       status: 200,
       body: {
         code: 0,
         data: [
-          { date: '2026-09-26', model: 'mimo-v2.6-flash', currency: 'CNY', totalToken: 100, tokensIn: 10, tokensOut: 90, requestCount: 2, consumedAmount: 3 }
+          { date: '2026-09-26', model: 'mimo-v2.6-flash', currency: 'CNY', inputHitToken: 20, inputMissToken: 30, outputToken: 90, totalToken: 140, requestCount: 2, consumedAmount: 3 }
         ]
       }
     }
   }
   if (url.includes('/balance')) return { status: 200, body: { code: 0, data: { currency: 'CNY', balance: 129.25, cashBalance: 26.31, giftBalance: 102.93 } } }
-  if (url.includes('/tokenPlan/usage')) return { status: 200, body: { code: 0, data: { usage: { percent: 10, items: [{ name: 'standard', used: 1, limit: 10 }] } } } }
-  if (url.includes('/tokenPlan/detail')) return { status: 200, body: { code: 0, data: { planId: 'pro' } } }
-  if (url.includes('/tokenPlan/subscription/status')) return { status: 200, body: { code: 0, data: {} } }
-  if (url.includes('/usage')) return { status: 200, body: { code: 0, data: {} } }
+  if (url.includes('/tokenPlan/usage')) {
+    return {
+      status: 200,
+      body: {
+        code: 0,
+        data: {
+          usage: {
+            // 服务端 percent 量纲实测不可信（0.01 与 used/limit 不成比例）：解析层按 used/limit 重算
+            percent: 0.01,
+            items: [
+              { name: 'plan_total_token', used: 5e8, limit: 1e9, percent: 0.01 },
+              { name: 'compensation_total_token', used: 0, limit: 0, percent: 0 }
+            ]
+          }
+        }
+      }
+    }
+  }
+  if (url.includes('/tokenPlan/detail')) {
+    return {
+      status: 200,
+      body: {
+        code: 0,
+        data: {
+          planCode: 'standard:year',
+          planName: 'Standard',
+          currentPeriodEnd: '2027-09-22 23:59:59',
+          expired: false,
+          enableAutoRenew: true,
+          hasAutoRenewSubscribed: true
+        }
+      }
+    }
+  }
   return { status: 200, body: { code: 0, data: {} } }
 }
 
@@ -135,7 +187,7 @@ async function main() {
   installFetch()
 
   // ── S1：真实形态凭证（ph 带引号，含 / + == 特殊字符）→ POST 必带去引号编码的 query ──
-  console.log('\nS1 POST 端点带 ph query（真实凭证形态）')
+  console.log('\nS1 POST 端点带 ph query + 双通道/订阅解析（真实响应形态）')
   {
     globalThis.__creds = {
       'acc-1': 'api-platform_serviceToken="tok123=="; userId=1221469480; api-platform_slh="slh456=="; api-platform_ph="wZksK9y0Ho/f+n1ukVgddA=="'
@@ -144,18 +196,56 @@ async function main() {
     const res = await refreshMimoUsage('acc-1')
     ok(res.ok === true, '全 200 时 ok=true（修复前 POST 恒 401 → session_expired）', res)
     const post = reqOf('POST', '/usage/detail/list')
+    const planPost = reqOf('POST', '/usage/token-plan/list')
     const get = reqOf('GET', '/balance')
     eq(
       post && post.url,
       `${API}/usage/detail/list?api-platform_ph=wZksK9y0Ho%2Ff%2Bn1ukVgddA%3D%3D`,
       'POST URL 带去引号 + URL 编码的 ph（与官网前端实测形态一致）'
     )
+    eq(
+      planPost && planPost.url,
+      `${API}/usage/token-plan/list?api-platform_ph=wZksK9y0Ho%2Ff%2Bn1ukVgddA%3D%3D`,
+      '套餐明细 POST 同样带 ph'
+    )
     eq(get && get.url, `${API}/balance`, 'GET 不带 ph query')
     ok(requests.every((r) => r.method === 'POST' || !r.url.includes('api-platform_ph')), '所有 GET 请求均无 ph')
-    // 解析链路仍生效
-    ok(res.ok && res.data.sourcesAvailable.detailList === true, 'sourcesAvailable.detailList=true（POST 明细解析生效）', res.ok ? res.data.sourcesAvailable : res)
-    ok(res.ok && res.data.monthlyModels.rows.length === 1 && res.data.monthlyModels.rows[0].model === 'mimo-v2.6-flash', '模型明细行解析正确')
-    ok(res.ok && res.data.summary.totalCount === 2, '汇总 requestCount 解析正确')
+    ok(!requests.some((r) => r.url.includes('/tokenPlan/subscription/status')), '空壳端点 /tokenPlan/subscription/status 不再请求')
+
+    // 解析链路：双通道合并（同 (日期, 模型) 相加；套餐行无金额）
+    ok(res.ok && res.data.sourcesAvailable.detailList === true, 'sourcesAvailable.detailList=true（双通道明细解析生效）', res.ok ? res.data.sourcesAvailable : res)
+    const rows = res.ok ? res.data.monthlyModels.rows : []
+    const flash = rows.find((r) => r.model === 'mimo-v2.6-flash')
+    const planOnly = rows.find((r) => r.model === 'mimo-v2.5')
+    ok(rows.length === 2, '模型明细 2 行（合并行 flash + 纯套餐行 v2.5）', rows)
+    ok(flash && flash.requests === 5 && flash.tokensTotal === 340, '同 (日期, 模型) 双通道相加：请求 2+3 / tokens 140+200', flash)
+    ok(flash && flash.cost !== undefined && Math.abs(flash.cost * 7.2 - 3) < 1e-6, '成本 = 按量金额（3 元 → USD 归一）', flash)
+    ok(!planOnly || planOnly.cost === undefined, '纯套餐行成本缺省（UI 显示 "—"，不伪造金额）', planOnly)
+    ok(res.ok && res.data.summary.totalCount === 6, '汇总 = 合并后总量（flash 2+3 + 纯套餐行 1）', res.ok ? res.data.summary : res)
+    ok(
+      res.ok && res.data.summary.totalCost !== undefined && Math.abs(res.data.summary.totalCost * 7.2 - 3) < 1e-6,
+      '汇总按量成本仅含金额通道',
+      res.ok ? res.data.summary : res
+    )
+
+    // 订阅状态：来自 /tokenPlan/detail（planCode / currentPeriodEnd / expired / enableAutoRenew）
+    const sub = res.ok ? res.data.subscription : null
+    ok(sub && sub.planId === 'standard:year', '订阅 planId = standard:year', sub)
+    ok(sub && sub.planName === 'Standard', '订阅 planName = Standard', sub)
+    ok(sub && sub.expired === false, '订阅状态：expired=false（生效中）', sub)
+    ok(sub && sub.autoRenew === true, '自动续费 enableAutoRenew=true 解析', sub)
+    ok(sub && typeof sub.expireAtTs === 'number' && sub.expireAtTs > Date.now() / 1000, '到期时间 currentPeriodEnd 解析为未来 epoch', sub)
+
+    // Token Plan：percent 按 used/limit 重算（服务端量纲不可信）、limit=0 补偿条目过滤
+    const tp = res.ok ? res.data.tokenPlan : null
+    ok(tp && tp.percent === 50, 'tokenPlan.percent = used/limit × 100（不信服务端 percent）', tp)
+    ok(tp && tp.items.length === 1, 'limit=0 的补偿积分条目不产出（与官方前端一致）', tp && tp.items)
+
+    // 额度窗口：MiMo 无 5h/7d；monthly.resetAt = 订阅到期时刻
+    const win = res.ok ? res.data.windows : null
+    ok(win && win.fiveHour === undefined && win.weekly === undefined, '不产出 5h/7d 窗口（MiMo 无该口径）', win)
+    ok(win && win.monthly !== undefined && win.monthly.usedPercent === 50, '月度窗口 usedPercent 与套餐口径一致', win)
+    ok(sub != null && win != null && win.monthly.resetAt === sub.expireAtTs, '月度窗口 resetAt = 订阅到期时刻', { win, sub })
   }
 
   // ── S2：ph 无引号（Cookie 头形态差异）→ 同样正确取值编码 ──
