@@ -2,7 +2,9 @@
 // 职责：
 //   1. 抓取官方定价页文本：HTTP（fetchProxy，尊重网络代理）优先 + 隐藏浏览器渲染兜底（兼容 SPA）
 //   2. 用配置的大模型从页面文本提取结构化定价（含峰谷/错峰时段价）
-//   3. 校验、币种归一化（CNY ÷7.2 → USD）、写入 AppSettings.probedPricing（独立探查定价层）
+//   3. Command Code 源增强：plan pattern 规范化到 /models 模型 ID、计划页额度区块提取（Usage limits 请求数 +
+//      Monthly credits）、套餐外模型（premium）定价补全（全站 models 页定向提取）
+//   4. 校验、币种归一化（CNY ÷7.2 → USD）、写入 AppSettings.probedPricing（独立探查定价层）
 // 探查模型要求 OpenAI 兼容端点（同标题生成假设）；网络请求统一走 fetchProxy。
 
 import { BrowserWindow } from 'electron'
@@ -11,11 +13,11 @@ import { getAllProviders, fetchAndCacheModels } from '../providers/providerManag
 import { getMoaConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
 import { getUsageSnapshot } from '../monitoring/snapshotStore'
-import { CC_PLAN_PAGE } from '../monitoring/commandCode'
+import { CC_PLAN_PAGE, CC_MODELS_URL } from '../monitoring/commandCode'
 import { defaultPricingProbeUrlByName } from '../../shared/defaults'
 import { splitModelKey } from '../../shared/modelKey'
 import { hasProviderAccess } from '../../shared/providerAccess'
-import type { ProbedPricingEntry, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
+import type { ProbedPricingEntry, ProbedUsageLimits, PricingProbeSource, PricingWindow, PricingPageCache, ProbeProgressEvent, SubModelOutput } from '../../shared/types'
 
 const HTTP_TIMEOUT_MS = 20_000
 const BROWSER_LOAD_TIMEOUT_MS = 20_000
@@ -35,6 +37,14 @@ const MAX_PAGE_CHARS = 12_000
 const FRAGMENT_PAD = 400
 /** CNY → USD 固定折算率（与 usageFormat.ts 的 7.2 一致） */
 const CNY_TO_USD_RATE = 7.2
+/** 额度区块锚：请求数限额表表头（goat/pro/max 三套餐页通用）；`fullText.indexOf` 定位 */
+const CREDITS_ANCHOR_REQUESTS = 'Requests / 5 hours'
+/** 额度区块锚：月额度表表头（goat/pro 有；max 页无此表 → 只提请求数） */
+const CREDITS_ANCHOR_MONTHLY = 'Monthly credits'
+/** 额度区块各锚向后截取的字符数（表格文本密度 ~60 字符/行，5.5k ≈ 90 行；两片合计 ≤ MAX_PAGE_CHARS） */
+const CREDITS_SLICE_CHARS = 5_500
+/** 套餐外模型补全的缺失数量上限：超过则视为异常（页面改版等），不发起全站页补全 */
+const ALL_MODELS_FILL_MAX = 60
 const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
 /** 诊断开关（MOA_MONITOR_DEBUG=1）：输出探测进度细节与页面统计，排查定价解析异常时开启 */
 const DEBUG = process.env.MOA_MONITOR_DEBUG === '1'
@@ -118,6 +128,66 @@ function keywordVariants(k: string): string[] {
 function quantile(sorted: number[], q: number): number | undefined {
   if (sorted.length === 0) return undefined
   return sorted[Math.floor((sorted.length - 1) * q)]
+}
+
+/**
+ * canonicalize 专用规范化：括号视作分隔符（"(exp)"/"(latest)" 的括注内容参与匹配）+
+ * 双向字母/数字边界拆词（"27B" → "27 B"，与 keywordVariants 的拆词形态对称）。
+ * 不做 1:1 长度保持（仅用于比较，不用于索引换算）。
+ */
+function canonNorm(s: string): string {
+  return normalizeForMatch(s.replace(/[()]/g, ' '))
+    .replace(/([A-Za-z])(\d)/g, '$1 $2')
+    .replace(/(\d)([A-Za-z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * 把探查 pattern 规范化为所绑定厂商 /models 的模型 ID（无法对应则保留原样）。
+ * 官方页定价表用显示名（"Kimi K3"），而 UI 模型行与成本匹配用 /models ID（"moonshotai/Kimi-K3"）——
+ * 不规范化会出现「同一模型两行、其中一行无价」（显示名行有价但 ID 行匹配不上）。
+ * 匹配顺序：精确 → 变体归一化相等（原文 + 剥尾部括注形态）→ 词序列连续子序列（剩余词最少者）。
+ * 多候选相等时取 keywords 中先出现者（列表顺序稳定）。
+ */
+export function canonicalizePattern(pattern: string, keywords: string[]): string {
+  if (keywords.length === 0) return pattern
+  if (keywords.includes(pattern)) return pattern
+  // 剥尾部括注（"(latest)" / "(exp)" 等噪声），原文形态优先于剥后形态
+  const stripped = pattern.replace(/\s*\([^)]*\)\s*$/, '').trim()
+  const forms = stripped && stripped !== pattern ? [pattern, stripped] : [pattern]
+  // 1) 变体归一化相等
+  for (const form of forms) {
+    const nf = canonNorm(form)
+    if (!nf) continue
+    for (const k of keywords) {
+      for (const v of keywordVariants(k)) {
+        if (canonNorm(v) === nf) return k
+      }
+    }
+  }
+  // 2) 词序列连续子序列（"Tencent Hy3" → "tencent/hy3-paid" 剩 1 词；"Nemotron 3 Ultra" → nvidia 长 ID）
+  let best: string | undefined
+  let bestRemain = Infinity
+  for (const form of forms) {
+    const nf = canonNorm(form)
+    if (!nf) continue
+    for (const k of keywords) {
+      for (const v of keywordVariants(k)) {
+        const nv = canonNorm(v)
+        if (!nv) continue
+        if (seqCovered(nf, nv)) {
+          const remain = nv.split(' ').length - nf.split(' ').length
+          if (remain < bestRemain) {
+            bestRemain = remain
+            best = k
+          }
+        }
+      }
+    }
+    if (best) break
+  }
+  return best ?? pattern
 }
 
 /**
@@ -367,6 +437,13 @@ export interface ProbeTarget {
   creditsColumn?: string
 }
 
+/** 源绑定的厂商是否为 Command Code（按 baseUrl 判定；探查增强逻辑——额度区块/全站补全——的共用门槛） */
+export function isCommandCodeSource(source: PricingProbeSource): boolean {
+  const providerId = resolveSourceProviderId(source)
+  const provider = providerId ? getAllProviders().find((p) => p.id === providerId) : undefined
+  return !!provider?.baseUrl?.includes('api.commandcode.ai')
+}
+
 /**
  * 解析源的探查目标。
  * 绑定厂商为 Command Code（baseUrl 含 api.commandcode.ai）时，读云监控快照里的订阅 planId，
@@ -376,9 +453,7 @@ export interface ProbeTarget {
  * 其余源原样返回（零影响）。多账号时**Plan 账号优先**（其快照才带订阅），再按配置顺序找第一个能解析出套餐的。
  */
 export function resolveProbeTarget(source: PricingProbeSource): ProbeTarget {
-  const providerId = resolveSourceProviderId(source)
-  const provider = providerId ? getAllProviders().find((p) => p.id === providerId) : undefined
-  if (!provider?.baseUrl?.includes('api.commandcode.ai')) return { url: source.url }
+  if (!isCommandCodeSource(source)) return { url: source.url }
   try {
     // v5：套餐信息按**账号**存。同一源可能有 Plan 账号与按量账号——优先取 Plan 账号的订阅快照，
     // 拿不到再看其它账号，避免用按量账号的空订阅去否定套餐计划页。
@@ -511,23 +586,146 @@ function buildMissingFragment(fullText: string, missing: string[]): string {
   return merged.map((r) => fullText.slice(r.lo, r.hi)).join('\n---\n')
 }
 
-/** 补漏 prompt：只要求从片段中提取指定模型的定价 */
+/** 定向补提 prompt：从片段中提取指定模型的定价（用于同页补漏与全站 models 页补全两处调用） */
 function buildFillPrompt(pageText: string, missing: string[], creditsColumn?: string): string {
   const columnRule = creditsColumn
     ? `\n- monthlyCredits 只取列标题为「${creditsColumn}」的那一列（同页多个额度列时其余忽略）；页面没有此列就省略。`
     : ''
-  return `你是模型定价解析器。以下是某厂商官方定价页的文本片段（HTML/纯文本混合，忽略无关标记）。
+  return `你是模型定价解析器。以下是官方定价页的文本片段（HTML/纯文本混合，忽略无关标记）。
 
-⚠️ 上一轮解析遗漏了以下模型，请从片段中重点找到它们的定价并提取：
+⚠️ 请从片段中重点找到以下模型的定价并提取（其余模型不在本次范围）：
 ${missing.map((m, i) => `${i + 1}. ${m}`).join('\n')}
 
 匹配规则与输出要求同上：
 - 只输出 JSON 数组，每项：{ "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "monthlyCredits": 数字(可选，该模型月度额度、取现价), "windows": 数组(可选) }
-- 页面里没有明确价格的模型一律不要输出；不确定不要编造。${columnRule}${columnRule}
+- 页面里没有明确价格的模型一律不要输出；不确定不要编造。${columnRule}
 - 除 JSON 数组外不要输出任何内容，不要 markdown 代码块。
 
 页面片段：
 ${pageText}`
+}
+
+// ─── 计划页额度区块：Usage limits（请求数限额）+ Monthly credits（月度额度）───
+
+/**
+ * 定位计划页额度区块片段（两段拼接）：
+ *  1) 请求数限额表：锚「Requests / 5 hours」（goat/pro/max 三套餐页通用表头），前留 400 字符带入"official 估算"上下文说明；
+ *  2) 月额度表：锚「Monthly credits」（goat/pro 有；max 页无此表 → 只提请求数）。
+ * 锚都不存在返回 undefined（非计划页/页面改版 → 跳过，不影响定价主流程）。
+ */
+function locateCreditsFragment(fullText: string): string | undefined {
+  const parts: string[] = []
+  const iReq = fullText.indexOf(CREDITS_ANCHOR_REQUESTS)
+  if (iReq !== -1) parts.push(fullText.slice(Math.max(0, iReq - 400), iReq + CREDITS_SLICE_CHARS))
+  const iMc = fullText.indexOf(CREDITS_ANCHOR_MONTHLY)
+  if (iMc !== -1) parts.push(fullText.slice(Math.max(0, iMc - 200), iMc + CREDITS_SLICE_CHARS))
+  if (parts.length === 0) return undefined
+  return parts.join('\n---\n').slice(0, MAX_PAGE_CHARS)
+}
+
+/** 额度区块提取 prompt：Usage limits（每模型请求数/窗口）+ Monthly credits（月度额度） */
+function buildCreditsPrompt(pageText: string, creditsColumn?: string): string {
+  const columnRule = creditsColumn
+    ? `\n- monthlyCredits 只取列标题为「${creditsColumn}」的那一列（同页多个额度列时其余一律忽略）；页面没有此列就省略。`
+    : ''
+  return `你是订阅套餐额度解析器。以下是某厂商套餐计划页的文本（HTML/纯文本混合，忽略无关标记）。
+页面包含两类额度数据：
+1) 用量限额表（表头形如 "Model / Requests / 5 hours / Requests / week / Requests / month"）：每个模型在各窗口内可用的**请求数**（官方估算）；
+2) 月度额度表（表头含 "Monthly credits"）：每个模型的月度额度（美元，如 $70）。
+
+请提取页面上这两类表的全部数据，输出 JSON 数组，每项结构：
+{ "pattern": "模型名", "fiveHour": 数字(可选), "weekly": 数字(可选), "monthly": 数字(可选), "monthlyCredits": 数字(可选) }
+- fiveHour / weekly / monthly 分别对应 Requests / 5 hours、Requests / week、Requests / month 三列；monthlyCredits 为 Monthly credits 列值。
+- 数值必须来自页面；"Free" 等非数字一律省略该字段（不要填 0）。
+- 同一模型的请求数限额与月度额度尽量合并为一条；提不全时就拆多条。
+- 页面没有的数据不要编造。${columnRule}
+- 除 JSON 数组外不要输出任何内容，不要使用 markdown 代码块。
+
+页面文本：
+${pageText}`
+}
+
+/** 额度提取的原始条目（LLM 输出，字段名宽容解析） */
+interface RawCreditsEntry {
+  pattern?: unknown
+  model?: unknown
+  name?: unknown
+  /** 5 小时窗口请求数；LLM 可能用 fiveHour/five_hour/fiveHours 等变体 */
+  fiveHour?: unknown
+  weekly?: unknown
+  monthly?: unknown
+  monthlyCredits?: unknown
+}
+
+/** 从原始条目按候选字段名取第一个可解析为有限数的值 */
+function pickNum(rec: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const k of keys) {
+    const n = toFiniteNum(rec[k])
+    if (n !== undefined) return n
+  }
+  return undefined
+}
+
+/**
+ * 把额度提取结果按模型合并进价格条目（只更新已存在条目，匹配不上的忽略——额度不是独立条目）。
+ * usageLimits 各窗口与 monthlyCredits 独立更新：本次提不到的字段保留旧值；负值/非数字跳过。
+ * 返回发生更新的条目数。
+ */
+export function mergeCreditsIntoEntries(
+  entries: ProbedPricingEntry[],
+  raw: RawCreditsEntry[],
+  keywords: string[]
+): number {
+  let touched = 0
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const patternRaw =
+      typeof rec.pattern === 'string' ? rec.pattern : typeof rec.model === 'string' ? rec.model : typeof rec.name === 'string' ? rec.name : ''
+    if (!patternRaw.trim()) continue
+    const key = normalizeForMatch(canonicalizePattern(patternRaw.trim(), keywords))
+    const entry = entries.find((e) => normalizeForMatch(e.pattern) === key)
+    if (!entry) continue
+
+    let changed = false
+    const fiveHour = pickNum(rec, ['fiveHour', 'five_hour', 'fiveHours', 'five_hours', 'fivehour'])
+    const weekly = pickNum(rec, ['weekly', 'week', 'weekLimit', 'week_limit'])
+    const monthly = pickNum(rec, ['monthly', 'month', 'monthLimit', 'month_limit'])
+    if (fiveHour !== undefined || weekly !== undefined || monthly !== undefined) {
+      const limits: ProbedUsageLimits = { ...entry.usageLimits }
+      const setLim = (k: 'fiveHour' | 'weekly' | 'monthly', v: number | undefined) => {
+        if (v !== undefined && v >= 0) {
+          limits[k] = Math.round(v)
+          changed = true
+        }
+      }
+      setLim('fiveHour', fiveHour)
+      setLim('weekly', weekly)
+      setLim('monthly', monthly)
+      if (changed) entry.usageLimits = limits
+    }
+    const mc = toMonthlyCredits(rec.monthlyCredits)
+    if (mc !== undefined) {
+      entry.monthlyCredits = mc
+      changed = true
+    }
+    if (changed) touched++
+  }
+  return touched
+}
+
+/** 合并补充条目（按归一化 pattern 去重、保留既有条目；用于补漏与全站补全）。返回新增条数 */
+function appendNewEntries(entries: ProbedPricingEntry[], extra: ProbedPricingEntry[]): number {
+  const known = new Set(entries.map((e) => normalizeForMatch(e.pattern)).filter(Boolean))
+  let added = 0
+  for (const ex of extra) {
+    const key = normalizeForMatch(ex.pattern)
+    if (!key || known.has(key)) continue
+    known.add(key)
+    entries.push(ex)
+    added++
+  }
+  return added
 }
 
 /** 日志用简短片段：压缩空白后取前 40 字符 */
@@ -726,7 +924,7 @@ function normalizeWindow(w: unknown, currency: 'USD' | 'CNY'): PricingWindow | n
   return win
 }
 
-function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[]): ProbedPricingEntry[] {
+function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[], keywords: string[] = []): ProbedPricingEntry[] {
   const tz = source.timezone || 'Asia/Shanghai'
   const now = Date.now()
   // T2 探查分绑（设计 §5）：源绑定了 provider → 条目带 providerId/billing，命中时按通道过滤；未绑 → 通用条目（两字段不写）
@@ -744,7 +942,8 @@ function buildProbedEntries(source: PricingProbeSource, raw: RawProbeEntry[]): P
           : typeof item.name === 'string'
             ? item.name
             : ''
-    const pattern = patternRaw.trim()
+    // pattern 规范化：页面显示名 → 所绑定厂商 /models 模型 ID（未绑定/对应不上时保留原样）
+    const pattern = canonicalizePattern(patternRaw.trim(), keywords)
     const currency = item.currency === 'CNY' ? 'CNY' : 'USD'
     const input = toFiniteNum(item.input)
     const output = toFiniteNum(item.output)
@@ -823,6 +1022,8 @@ export async function probeSource(
   // 探查目标：Command Code 按订阅套餐动态选计划页（含额度列标题），其余源原样（后续抓取/来源记录统一用 effSource）
   const target = resolveProbeTarget(source)
   const effSource = { ...source, url: target.url }
+  // Command Code 增强（额度区块 / 套餐外模型补全）门槛：仅 CC 源生效，其余源零影响
+  const isCc = isCommandCodeSource(source)
   if (DEBUG) {
     console.log(`[PricingProbe] ${effSource.name}(${effSource.id}) probe model: ${model.baseUrl} / ${model.modelId}${force ? ' [force]' : ''} url=${effSource.url}`)
   }
@@ -861,7 +1062,7 @@ export async function probeSource(
     )
   }
 
-  let entries = buildProbedEntries(effSource, extractJsonArray(result.content) ?? [])
+  let entries = buildProbedEntries(effSource, extractJsonArray(result.content) ?? [], keywords)
   if (entries.length === 0) {
     // 失败时打印原始响应便于定位（可能是格式不符 / 页面无相关价格）
     console.warn(
@@ -876,26 +1077,63 @@ export async function probeSource(
     const fillText = buildMissingFragment(fullText, missing)
     const fill = await callProbeLLM(model, buildFillPrompt(fillText, missing, target.creditsColumn))
     if (fill.status === 'success' && fill.content) {
-      const extra = buildProbedEntries(effSource, extractJsonArray(fill.content) ?? [])
-      if (extra.length > 0) {
-        const known = new Set(entries.map((e) => e.pattern && normalizeForMatch(e.pattern)))
-        let added = 0
-        for (const ex of extra) {
-          const key = ex.pattern ? normalizeForMatch(ex.pattern) : ''
-          if (!key || known.has(key)) continue
-          known.add(key)
-          entries = [...entries, ex]
-          added++
-        }
-        if (DEBUG) {
-          console.log(`[PricingProbe] ${source.name}(${source.id}) fill missing ${missing.length} models → +${added} entries`)
-        }
+      const added = appendNewEntries(entries, buildProbedEntries(effSource, extractJsonArray(fill.content) ?? [], keywords))
+      if (DEBUG && added > 0) {
+        console.log(`[PricingProbe] ${source.name}(${source.id}) fill missing ${missing.length} models → +${added} entries`)
       }
     }
   }
 
+  // 额度区块（仅 Command Code 计划页）：Usage limits 每模型请求数 + Monthly credits 月度额度 → 合并进价格条目
+  if (isCc) {
+    const creditsText = locateCreditsFragment(fullText)
+    if (creditsText) {
+      const cr = await callProbeLLM(model, buildCreditsPrompt(creditsText, target.creditsColumn))
+      if (cr.status === 'success' && cr.content) {
+        const creditsRaw = extractJsonArray<RawCreditsEntry>(cr.content) ?? []
+        const touched = mergeCreditsIntoEntries(entries, creditsRaw, keywords)
+        if (DEBUG) {
+          console.log(`[PricingProbe] ${source.name}(${source.id}) credits extract: ${creditsRaw.length} rows → ${touched} entries updated`)
+        }
+      } else if (DEBUG) {
+        console.warn(`[PricingProbe] ${source.name}(${source.id}) credits extract failed: ${cr.error || 'empty'}`)
+      }
+    } else if (DEBUG) {
+      console.log(`[PricingProbe] ${source.name}(${source.id}) credits anchors not found, skip credits extract`)
+    }
+  }
+
+  // 套餐外模型补全（仅 Command Code，缺省开启）：计划页未覆盖的模型（premium / 未列入套餐）→ 全站 models 页定向补价
+  if (isCc && source.fetchAllModelsPricing !== false && keywords.length > 0) {
+    const covered = new Set(entries.map((e) => e.pattern))
+    const uncovered = keywords.filter((k) => !covered.has(k))
+    if (uncovered.length > 0 && uncovered.length <= ALL_MODELS_FILL_MAX) {
+      const modelsText = await fetchPageText(CC_MODELS_URL, uncovered)
+      if (modelsText) {
+        const frag = buildMissingFragment(modelsText, uncovered)
+        const fill = await callProbeLLM(model, buildFillPrompt(frag, uncovered))
+        if (fill.status === 'success' && fill.content) {
+          const added = appendNewEntries(
+            entries,
+            buildProbedEntries({ ...effSource, url: CC_MODELS_URL }, extractJsonArray(fill.content) ?? [], keywords)
+          )
+          if (DEBUG) {
+            console.log(`[PricingProbe] ${source.name}(${source.id}) all-models fill: ${uncovered.length} uncovered → +${added} entries`)
+          }
+        } else if (DEBUG) {
+          console.warn(`[PricingProbe] ${source.name}(${source.id}) all-models fill failed: ${fill.error || 'empty'}`)
+        }
+      } else if (DEBUG) {
+        console.warn(`[PricingProbe] ${source.name}(${source.id}) all-models page fetch failed: ${CC_MODELS_URL}`)
+      }
+    } else if (DEBUG && uncovered.length > ALL_MODELS_FILL_MAX) {
+      console.log(`[PricingProbe] ${source.name}(${source.id}) uncovered=${uncovered.length} exceeds ${ALL_MODELS_FILL_MAX}, skip all-models fill`)
+    }
+  }
+
   persistProbedPricing(source.id, entries)
-  // 记录页面哈希与定价区块锚句：下次哈希不变直接沿用；变则按锚切片段快速解析
+  // 记录页面哈希与定价区块锚句：下次哈希不变直接沿用；变则按锚切片段快速解析。
+  // 注：哈希仅跟踪计划页（含额度区块），全站 models 页变化不触发重探（需「强制探查」）。
   updatePageCache(source.id, { hash, ...deriveFragmentAnchors(fullText, entries) })
   return { ok: true, entries }
 }

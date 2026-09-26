@@ -5,7 +5,7 @@ import { useProbeStore, probeResultsToMessages, type PricingSortKey } from '../s
 import { useNotificationStore } from '../store/notificationStore'
 import { formatCost } from '../lib/usageFormat'
 import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap, Pencil } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, ProviderAccount, MoaArchitecture } from '../../../shared/types'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, ProbedUsageLimits, PricingProbeSource, PricingWindow, Provider, ProviderAccount, MoaArchitecture } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { splitModelKey } from '../../../shared/modelKey'
 import { hasProviderAccess, isLocalBaseUrl } from '../../../shared/providerAccess'
@@ -1879,6 +1879,30 @@ function PricingRow({
 
 // ── Pricing Probe Section（官方定价探查）──
 
+/** 宽松归一化键：小写 + 分隔符/括号 → 空格（与主进程 probe.ts 的匹配口径一致；用于历史旧形态条目兜底） */
+function looseModelKey(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[-‐‑‒–—―_./,()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * 探查 pattern 与模型 ID 是否视为同一模型。
+ * 新探条目 pattern 已规范化到 /models ID（精确/前缀即命中）；此处的归一化兜底覆盖两类历史数据：
+ * 旧形态显示名（"Kimi K3" ↔ "moonshotai/Kimi-K3"）与带厂商前缀的条目（"Qwen/Qwen3.8-Max" ↔ "Qwen/Qwen3.8-Max"）。
+ */
+function probedPatternMatches(pattern: string, modelId: string): boolean {
+  if (!pattern) return false
+  if (pattern === modelId || modelId.startsWith(pattern)) return true
+  const p = looseModelKey(pattern)
+  const m = looseModelKey(modelId)
+  if (!p || !m) return false
+  return m === p || m.endsWith(` ${p}`) || m.includes(` ${p} `) || p.endsWith(` ${m}`) || p.includes(` ${m} `)
+}
+
 function ProbeSection() {
   const { settings, loadSettings, updateSetting } = useSettingsStore()
   const providers = useConfigStore((s) => s.providers)
@@ -1890,6 +1914,8 @@ function ProbeSection() {
     useProbeStore()
   // 模型月额度区块展开状态（按源 ID 集合；map 回调内不能用 hooks，状态放组件顶层）
   const [mcOpen, setMcOpen] = useState<Set<string>>(new Set())
+  // Usage limits 区块展开状态（按源 ID 集合）
+  const [lcOpen, setLcOpen] = useState<Set<string>>(new Set())
 
   // 探查运行状态与进度由全局订阅（probeStore.initProbeStateSubscription，App 挂载时建立）
   // 统一维护：后台自动刷新期间打开本页同样能看到「正在刷新」与进度
@@ -1999,11 +2025,9 @@ function ProbeSection() {
   }
 
   // ── 手动定价覆盖（每个源内）──
-  /** 该源探查到的条目（前缀匹配模型 ID），用于默认填入与峰谷展示 */
+  /** 该源探查到的条目（精确/前缀/归一化宽松匹配模型 ID），用于默认填入与峰谷展示 */
   const probedEntryFor = (sourceId: string, modelId: string): ProbedPricingEntry | undefined =>
-    probed.find(
-      (e) => e.sourceId === sourceId && (e.pattern === modelId || modelId.startsWith(e.pattern))
-    )
+    probed.find((e) => e.sourceId === sourceId && probedPatternMatches(e.pattern, modelId))
 
   /** 该源探查到的价格（前缀匹配模型 ID），用于定价框默认填入 */
   const probedPriceFor = (sourceId: string, modelId: string): PricingConfig | null => {
@@ -2336,6 +2360,20 @@ function ProbeSection() {
                     </span>
                   </label>
 
+                  {/* 套餐外模型定价补全（仅 Command Code）：计划页未列出的模型（如 premium）用全站 models 页补价 */}
+                  {providerForSource(s)?.baseUrl?.includes('api.commandcode.ai') && (
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>补全套餐外模型定价</span>
+                      <ToggleSwitch
+                        checked={s.fetchAllModelsPricing !== false}
+                        onChange={(v) => updateSource(s.id, { fetchAllModelsPricing: v })}
+                      />
+                      <span className="text-muted-foreground/70">
+                        额外抓全站模型页（commandcode.ai/models），为套餐计划页未列出的模型（Claude/GPT 等 premium）补充定价
+                      </span>
+                    </label>
+                  )}
+
                   <label className="block">
                     <span className="text-xs text-muted-foreground">官方定价页 URL</span>
                     <input
@@ -2423,6 +2461,81 @@ function ProbeSection() {
                     </table>
                     )}
                   </div>
+
+                  {/* Usage limits：计划页 Usage limits 区块探查结果（每模型 5h/周/月请求数估算；仅 ≥1 条目含该值时显示） */}
+                  {(() => {
+                    const ulEntries = meta.entries
+                      .filter(
+                        (e): e is ProbedPricingEntry & { usageLimits: ProbedUsageLimits } =>
+                          !!e.usageLimits &&
+                          (e.usageLimits.fiveHour !== undefined ||
+                            e.usageLimits.weekly !== undefined ||
+                            e.usageLimits.monthly !== undefined)
+                      )
+                      .sort(
+                        (a, b) =>
+                          (b.usageLimits.monthly ?? -1) - (a.usageLimits.monthly ?? -1) ||
+                          a.pattern.localeCompare(b.pattern)
+                      )
+                    if (ulEntries.length === 0) return null
+                    const open = lcOpen.has(s.id)
+                    const cell = (v: number | undefined) => (v !== undefined ? v.toLocaleString() : '—')
+                    return (
+                      <div className="border-t border-border pt-3">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() =>
+                              setLcOpen((prev) => {
+                                const next = new Set(prev)
+                                if (next.has(s.id)) next.delete(s.id)
+                                else next.add(s.id)
+                                return next
+                              })
+                            }
+                            className="flex items-center gap-1 text-xs font-semibold text-muted-foreground hover:text-foreground"
+                          >
+                            <ChevronDown
+                              className={`w-3.5 h-3.5 transition-transform ${open ? '' : '-rotate-90'}`}
+                            />
+                            Usage limits（{ulEntries.length} 条 · 官方估算请求数）
+                          </button>
+                          <a
+                            href={ulEntries[0].sourceUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-xs text-muted-foreground/70 hover:text-primary underline underline-offset-2"
+                            title={`来源（实际抓取的定价页）：${ulEntries[0].sourceUrl}`}
+                          >
+                            来源
+                          </a>
+                        </div>
+                        {open && (
+                          <table className="w-full text-xs table-fixed mt-1.5">
+                            <thead>
+                              <tr className="border-b border-border text-muted-foreground">
+                                <th className="text-left px-2 py-1 font-medium">模型</th>
+                                <th className="text-right px-2 py-1 font-medium w-[88px]">5 小时</th>
+                                <th className="text-right px-2 py-1 font-medium w-[88px]">每周</th>
+                                <th className="text-right px-2 py-1 font-medium w-[88px]">每月</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ulEntries.map((e) => (
+                                <tr key={e.pattern} className="border-b border-border/50 last:border-0">
+                                  <td className="px-2 py-1 font-mono truncate" title={e.pattern}>
+                                    {e.pattern}
+                                  </td>
+                                  <td className="px-2 py-1 text-right tabular-nums">{cell(e.usageLimits.fiveHour)}</td>
+                                  <td className="px-2 py-1 text-right tabular-nums">{cell(e.usageLimits.weekly)}</td>
+                                  <td className="px-2 py-1 text-right tabular-nums">{cell(e.usageLimits.monthly)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    )
+                  })()}
 
                   {/* 模型月额度：订阅计划页 Monthly credits 列探查结果（仅 ≥1 条目含该值时显示） */}
                   {(() => {

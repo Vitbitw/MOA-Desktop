@@ -954,6 +954,13 @@ export const CC_PLAN_PAGE: Record<string, { url: string; creditsColumn: string }
 }
 
 /**
+ * Command Code 全站模型页（公开，SSR 直出全部模型定价表）。
+ * 用途：套餐计划页只列该套餐可用模型（如 GOAT 61 个），套餐外 premium 模型（Claude/GPT 等）只在全站页有价——
+ * 定价探查用它为「计划页未覆盖的模型」补充定价（probe.ts 定向切片提取）。
+ */
+export const CC_MODELS_URL = 'https://commandcode.ai/models'
+
+/**
  * 计算月度额度窗口（官网公式，来源：官网 monthly-usage-meter 模块实测）：
  *   cap = 套餐额度；monthlyCreditsGranted > 0 时 cap = max(granted, 套餐额度)；
  *   org 套餐 cap × 席位（至少 1）。used = cap − 余额（夹在 [0, cap]），used% = used/cap。

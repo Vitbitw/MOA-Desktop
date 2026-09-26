@@ -1,4 +1,4 @@
-// 行为测试：定价探查「每模型 Monthly credits」— 严格解析 / 套餐→探查目标（URL+额度列）/ prompt 指列 / 边界去重
+// 行为测试：定价探查「每模型 Monthly credits + Usage limits 请求数」— 严格解析 / 套餐→探查目标（URL+额度列）/ prompt 指列 / pattern 规范化（显示名→/models ID）/ 额度合并 / 边界去重
 // 抽取 probe.ts + commandCode.ts 的纯函数（同 monitor-behavior.cjs 的抽取法）→ esbuild 转译 → 断言
 // 用法：node test-e2e/pricing-probe-cc.cjs
 const fs = require('fs')
@@ -24,15 +24,28 @@ const parts = [
   grab(probeSrc, 'HHMM_RE', /const HHMM_RE = [^\n]+/),
   grab(probeSrc, 'WEEKDAY_ABBR', /const WEEKDAY_ABBR[\s\S]*?\n}/),
   grab(probeSrc, 'normalizeForMatch', /function normalizeForMatch\([\s\S]*?\n\}\n/),
+  pfn('keywordVariants'),
+  pfn('seqCovered'),
+  pfn('canonNorm'),
+  pfn('canonicalizePattern'),
+  grab(probeSrc, 'MAX_PAGE_CHARS', /const MAX_PAGE_CHARS = [^\n]+/),
+  grab(probeSrc, 'CREDITS_ANCHOR_REQUESTS', /const CREDITS_ANCHOR_REQUESTS = [^\n]+/),
+  grab(probeSrc, 'CREDITS_ANCHOR_MONTHLY', /const CREDITS_ANCHOR_MONTHLY = [^\n]+/),
+  grab(probeSrc, 'CREDITS_SLICE_CHARS', /const CREDITS_SLICE_CHARS = [^\n]+/),
   pfn('toFiniteNum'),
   pfn('toMonthlyCredits'),
   pfn('parseDays'),
   pfn('normalizeWindow'),
   pfn('buildProbedEntries'),
   pfn('resolveSourceProviderId'),
+  pfn('isCommandCodeSource'),
   pfn('resolveProbeTarget'),
   pfn('buildProbePrompt'),
   pfn('buildFillPrompt'),
+  pfn('locateCreditsFragment'),
+  pfn('buildCreditsPrompt'),
+  pfn('pickNum'),
+  pfn('mergeCreditsIntoEntries'),
   grab(ccSrc, 'CC_PLAN_PAGE', /const CC_PLAN_PAGE\s*:[\s\S]*?\n}/)
 ]
 
@@ -48,7 +61,7 @@ function makeFactory(deps) {
     'readAppSettings',
     'getUsageSnapshot',
     cachedJs +
-      '\n; return { toMonthlyCredits, buildProbedEntries, resolveProbeTarget, buildProbePrompt, buildFillPrompt, CC_PLAN_PAGE }'
+      '\n; return { toMonthlyCredits, buildProbedEntries, resolveProbeTarget, buildProbePrompt, buildFillPrompt, CC_PLAN_PAGE, canonicalizePattern, locateCreditsFragment, buildCreditsPrompt, mergeCreditsIntoEntries }'
   )
   return f(
     deps.getAllProviders || (() => []),
@@ -216,6 +229,100 @@ console.log('CC_PLAN_PAGE：')
     },
     '六条映射（URL+额度列）与四页实抓一致'
   )
+}
+
+// ── 6. canonicalizePattern：页面显示名 → /models 规范 ID ──
+console.log('canonicalizePattern：')
+{
+  const f = makeFactory({})
+  const KW = [
+    'moonshotai/Kimi-K3', 'deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-flash-vision-exp',
+    'deepseek/deepseek-v4-flash-fast', 'deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4.1-flash',
+    'Qwen/Qwen3.8-Max', 'Qwen/Qwen3.8-Max-0902', 'Qwen/Qwen3.8-27B', 'z-ai/glm-5.3-flash',
+    'z-ai/glm-5.3-flashx', 'zai-org/GLM-5.3', 'xiaomi/mimo-v2.6-pro', 'xiaomi/mimo-v2.6-pro-ultraspeed',
+    'tencent/hy3-paid', 'MiniMaxAI/MiniMax-M3', 'nvidia/nemotron-3-ultra-550b-a55b', 'gpt-5.6-sol', 'stealth/pixel-canary'
+  ]
+  eq(f.canonicalizePattern('Kimi K3', KW), 'moonshotai/Kimi-K3', '显示名 → 规范 ID')
+  eq(f.canonicalizePattern('deepseek/deepseek-v4-flash', KW), 'deepseek/deepseek-v4-flash', '已规范 ID → 原样')
+  eq(f.canonicalizePattern('DeepSeek V4 Flash (latest)', KW), 'deepseek/deepseek-v4-flash', '剥 (latest) 归一化命中')
+  eq(f.canonicalizePattern('DeepSeek V4 Flash Vision (exp)', KW), 'deepseek/deepseek-v4-flash-vision-exp', '(exp) 括注含语义 → vision-exp（防回归：不落 v4-flash）')
+  eq(f.canonicalizePattern('DeepSeek V4 Flash Fast', KW), 'deepseek/deepseek-v4-flash-fast', 'Fast 变体不落基础版')
+  eq(f.canonicalizePattern('DeepSeek V4 Pro (latest)', KW), 'deepseek/deepseek-v4-pro', 'Pro (latest) 不落 flash')
+  eq(f.canonicalizePattern('Qwen 3.8 27B', KW), 'Qwen/Qwen3.8-27B', '27B 字母数字拆词（防回归：原型未映射）')
+  eq(f.canonicalizePattern('Qwen 3.8 Max', KW), 'Qwen/Qwen3.8-Max', 'Max 不落 Max-0902（剩余词最少）')
+  eq(f.canonicalizePattern('Qwen 3.8 Max 0902', KW), 'Qwen/Qwen3.8-Max-0902', 'Max 0902 精确')
+  eq(f.canonicalizePattern('GLM-5.3 Flash', KW), 'z-ai/glm-5.3-flash', 'Flash 不落 FlashX')
+  eq(f.canonicalizePattern('GLM-5.3 FlashX', KW), 'z-ai/glm-5.3-flashx', 'FlashX 精确')
+  eq(f.canonicalizePattern('GLM-5.3', KW), 'zai-org/GLM-5.3', '不带后缀 → 基础版')
+  eq(f.canonicalizePattern('MiMo V2.6 Pro', KW), 'xiaomi/mimo-v2.6-pro', 'Pro 不落 UltraSpeed')
+  eq(f.canonicalizePattern('Tencent Hy3', KW), 'tencent/hy3-paid', '子序列匹配（剩 -paid）')
+  eq(f.canonicalizePattern('Nemotron 3 Ultra', KW), 'nvidia/nemotron-3-ultra-550b-a55b', '长 ID 子序列匹配')
+  eq(f.canonicalizePattern('Pixel Canary', KW), 'stealth/pixel-canary', 'stealth/ 前缀段匹配')
+  eq(f.canonicalizePattern('Jev', KW), 'Jev', '不在 /models → 保留原样')
+  eq(f.canonicalizePattern('Kimi K3', []), 'Kimi K3', '无关键词 → 原样（非 CC 源零影响）')
+}
+
+// ── 7. buildProbedEntries 接入规范化：显示名与 ID 形态收敛去重 ──
+console.log('buildProbedEntries + keywords：')
+{
+  const f = makeFactory({})
+  const KW = ['moonshotai/Kimi-K3', 'deepseek/deepseek-v4-flash']
+  const entries = f.buildProbedEntries({ ...CC_SOURCE, providerId: undefined }, [
+    { pattern: 'Kimi K3', input: 3, output: 15, currency: 'USD', monthlyCredits: 40 },
+    { pattern: 'moonshotai/Kimi-K3', input: 3, output: 15, currency: 'USD', monthlyCredits: 40 },
+    { pattern: 'DeepSeek V4 Flash (latest)', input: 0.15, output: 0.6, currency: 'USD' }
+  ], KW)
+  eq(entries.length, 2, '显示名与 ID 形态收敛为一条（3 → 2）')
+  eq(entries[0].pattern, 'moonshotai/Kimi-K3', '保留首条且带规范 ID')
+  eq(entries[1].pattern, 'deepseek/deepseek-v4-flash', '(latest) 剥后缀规范化')
+  const raw2 = f.buildProbedEntries({ ...CC_SOURCE, providerId: undefined }, [
+    { pattern: 'Kimi K3', input: 3, output: 15, currency: 'USD' }
+  ])
+  eq(raw2[0].pattern, 'Kimi K3', '不传 keywords → pattern 原样（旧行为不变）')
+}
+
+// ── 8. mergeCreditsIntoEntries：额度合并（请求数 + 月额度独立更新，不匹配忽略） ──
+console.log('mergeCreditsIntoEntries：')
+{
+  const f = makeFactory({})
+  const KW = ['gpt-5.6-sol', 'xiaomi/mimo-v2.6-pro']
+  const entries = f.buildProbedEntries({ ...CC_SOURCE, providerId: undefined }, [
+    { pattern: 'GPT-5.6 Sol', input: 5, output: 30, currency: 'USD', monthlyCredits: 70 },
+    { pattern: 'MiMo V2.6 Pro', input: 0.435, output: 0.87, currency: 'USD' }
+  ], KW)
+  const touched = f.mergeCreditsIntoEntries(entries, [
+    { pattern: 'GPT-5.6 Sol', fiveHour: 414, weekly: 1040, monthly: 2070 },
+    { pattern: 'MiMo V2.6 Pro', fiveHour: '5,700', weekly: '14,200', monthlyCredits: '$20' },
+    { pattern: '未知模型', fiveHour: 1, weekly: 2, monthly: 3 },
+    { pattern: 'GPT-5.6 Sol', monthlyCredits: 70 }
+  ], KW)
+  eq(touched, 3, '3 条更新（未知模型忽略）')
+  eq(entries[0].usageLimits, { fiveHour: 414, weekly: 1040, monthly: 2070 }, 'usageLimits 三窗口写入')
+  eq(entries[0].monthlyCredits, 70, '已存 monthlyCredits 未被覆盖为其他值')
+  eq(entries[1].usageLimits, { fiveHour: 5700, weekly: 14200 }, '带千分位逗号字符串解析')
+  eq(entries[1].monthlyCredits, 20, '"$20" 解析并写入')
+  f.mergeCreditsIntoEntries(entries, [{ pattern: 'MiMo V2.6 Pro', monthly: 999 }], KW)
+  eq(entries[1].usageLimits, { fiveHour: 5700, weekly: 14200, monthly: 999 }, '二次合并补 monthly、已有窗口保留')
+  const t2 = f.mergeCreditsIntoEntries(entries, [{ pattern: 'GPT-5.6 Sol', fiveHour: -5, weekly: 'Free' }], KW)
+  eq(t2, 0, '负值 / "Free" → 不更新')
+  eq(entries[0].usageLimits.monthly, 2070, '已有值不受无效更新影响')
+}
+
+// ── 9. 额度区块定位与 prompt（锚句切片 / 无锚降级 / 指列规则） ──
+console.log('额度区块：')
+{
+  const f = makeFactory({})
+  const reqBlock = ' How far each window goes depends on the model. Estimated request counts per limit window : Model Requests / 5 hours Requests / week Requests / month GPT-5.6 Sol 414 1,040 2,070 Kimi K3 78 196 390'
+  const mcBlock = ' Model Input Output Cache Read Cache Write Monthly credits GPT-5.6 Sol $5.00 $30.00 $0.50 $6.25 $70 Kimi K3 $3.00 $15.00 $0.30 $3.75 $40'
+  const fullText = 'Z'.repeat(300) + reqBlock + 'Y'.repeat(80) + mcBlock + 'END'
+  const frag = f.locateCreditsFragment(fullText)
+  ok(!!frag && frag.includes('Requests / 5 hours') && frag.includes('GPT-5.6 Sol 414'), '片段含请求数表')
+  ok(!!frag && frag.includes('Monthly credits') && frag.includes('$70'), '片段含月额度表')
+  eq(f.locateCreditsFragment('无锚文本'.repeat(50)), undefined, '无锚 → undefined（跳过额度提取）')
+  const p = f.buildCreditsPrompt('TEXT', 'Monthly credits')
+  ok(p.includes('"fiveHour"') && p.includes('"weekly"') && p.includes('"monthly"') && p.includes('"monthlyCredits"'), 'prompt 含四个输出字段')
+  ok(p.includes('只取列标题为「Monthly credits」'), 'prompt 含指列规则')
+  ok(!f.buildCreditsPrompt('TEXT').includes('只取列标题为'), '无列提示 → 不含指列规则')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
