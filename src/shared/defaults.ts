@@ -20,7 +20,7 @@ export const DEFAULT_TITLE_SETTINGS = {
   language: 'auto' as const
 }
 
-/** 云端用量监控默认配置：预置启用的 Command Code / Xiaomi MiMo / DeepSeek 源 */
+/** 云端用量监控默认配置：预置启用的 Command Code / Xiaomi MiMo / DeepSeek / OpenCode Go 源 */
 export const DEFAULT_MONITORING: MonitoringSettings = {
   sources: [
     {
@@ -43,13 +43,21 @@ export const DEFAULT_MONITORING: MonitoringSettings = {
       name: 'DeepSeek 开放平台',
       studioUrl: 'https://platform.deepseek.com/usage',
       enabled: true
+    },
+    {
+      id: 'opencode',
+      type: 'opencode',
+      name: 'OpenCode Go',
+      studioUrl: 'https://opencode.ai/auth',
+      enabled: true
     }
   ],
   // 每源一个默认账号：**id = 源 id**（历史凭据与三张表的 source_id 直接沿用，零迁移）
   accounts: [
     { id: 'commandcode', sourceId: 'commandcode', label: '', billing: 'plan' },
     { id: 'mimo', sourceId: 'mimo', label: '', billing: 'plan' },
-    { id: 'deepseek', sourceId: 'deepseek', label: '', billing: 'usage' }
+    { id: 'deepseek', sourceId: 'deepseek', label: '', billing: 'usage' },
+    { id: 'opencode', sourceId: 'opencode', label: '', billing: 'plan' }
   ],
   // 统一自动刷新间隔（分钟）：云监控页面数据刷新 + Command Code 后台明细采集共用；0 = 关闭
   autoRefreshMinutes: 10

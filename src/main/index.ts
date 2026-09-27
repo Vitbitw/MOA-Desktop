@@ -23,6 +23,7 @@ import { invalidateProxyCache } from './local/fetchProxy'
 import { loginToCommandCode, logoutCommandCode, getMonitorStatus, refreshCommandCodeUsage, usageApiKeyKey } from './monitoring/commandCode'
 import { loginToMimo, refreshMimoUsage } from './monitoring/mimo'
 import { loginToDeepSeek, logoutDeepSeek, getDeepSeekStatus, refreshDeepSeekUsage } from './monitoring/deepseek'
+import { logoutOpenCode, getOpenCodeStatus, refreshOpenCodeUsage } from './monitoring/opencode'
 import { getCumulativeUsage, clearCumulativeUsage } from './monitoring/usageAccumulator'
 import { saveUsageSnapshot, getUsageSnapshot, clearUsageSnapshot } from './monitoring/snapshotStore'
 import { startUsageCollector, stopUsageCollector, getCollectorStatus, markUsageCollected } from './monitoring/collector'
@@ -830,7 +831,7 @@ function registerIpcHandlers() {
     return { prompt, completion, cost, running: moaRunning } satisfies UsageToday
   })
 
-  // ── Cloud Usage Monitoring (Command Code / Xiaomi MiMo / DeepSeek) ──
+  // ── Cloud Usage Monitoring (Command Code / Xiaomi MiMo / DeepSeek / OpenCode Go) ──
   // v5：入参一律 accountId。主进程按账号解析所属源，凭据 / 快照 / 本地累计 / 采集状态
   // 全部按账号读写——渲染层无法传入「不匹配的源」，同源多账号之间不可能串号。
   const resolveMonitorTarget = (accountId: string): RemoteUsageSource => {
@@ -843,11 +844,19 @@ function registerIpcHandlers() {
 
   handleIpc(IPC.MONITOR_GET_STATUS, (_e, accountId: string) => {
     const source = resolveMonitorTarget(accountId)
-    return source.type === 'deepseek' ? getDeepSeekStatus(accountId) : getMonitorStatus(accountId)
+    return source.type === 'deepseek'
+      ? getDeepSeekStatus(accountId)
+      : source.type === 'opencode'
+        ? getOpenCodeStatus(accountId)
+        : getMonitorStatus(accountId)
   })
 
   handleIpc(IPC.MONITOR_LOGIN, (_e, accountId: string) => {
     const source = resolveMonitorTarget(accountId)
+    // OpenCode Go 无登录窗（无 cookie 通道）：凭据唯一路径是面板配置 API Key
+    if (source.type === 'opencode') {
+      return { success: false, error: 'OpenCode Go 无登录窗，请直接配置 API Key' }
+    }
     return source.type === 'mimo'
       ? loginToMimo(source, accountId, mainWindow)
       : source.type === 'deepseek'
@@ -858,6 +867,7 @@ function registerIpcHandlers() {
   handleIpc(IPC.MONITOR_LOGOUT, (_e, accountId: string) => {
     logoutCommandCode(accountId)
     logoutDeepSeek(accountId)
+    logoutOpenCode(accountId)
     // 登出即清**该账号**的本地累计与用量快照：换账号后不得混入/展示旧账号数据，
     // 同源其它账号的数据保留
     clearCumulativeUsage(accountId)
@@ -881,13 +891,16 @@ function registerIpcHandlers() {
     const source = resolveMonitorTarget(accountId)
     // 页面刷新与后台采集共用同一「自动刷新间隔」：这里先按**本账号**占位，
     // 采集器据此跳过该账号间隔内的重复拉取（不影响同源其它账号）
+    // OpenCode Go 不参与后台采集（快照式数据无累计语义）→ 不占位
     if (source.type === 'commandcode' || source.type === 'mimo') markUsageCollected(accountId)
     const result =
       source.type === 'mimo'
         ? await refreshMimoUsage(accountId)
         : source.type === 'deepseek'
           ? await refreshDeepSeekUsage(accountId)
-          : await refreshCommandCodeUsage(accountId)
+          : source.type === 'opencode'
+            ? await refreshOpenCodeUsage(accountId)
+            : await refreshCommandCodeUsage(accountId)
     if (result.ok) {
       // 落盘快照：渲染层页面缓存只活在会话内，重启后首进由此恢复（一账号一行）
       saveUsageSnapshot(accountId, result.data)

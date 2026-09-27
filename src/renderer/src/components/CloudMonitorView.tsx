@@ -17,6 +17,8 @@ import type {
   MonitorAccount,
   MonitorStatus,
   MonitorErrorCode,
+  OpenCodeUsage,
+  OpenCodeWindowInfo,
   RemoteUsageSource,
   UsageWindowInfo
 } from '../../../shared/types'
@@ -60,13 +62,17 @@ function fmtSpan(fromTs?: number, toTs?: number): string | null {
  * - 倒计时每秒自走：只在父级重渲染时算一次的话，文案会冻在旧值（用户看到「即将重置」不再变化）
  * - 数据快照早于窗口重置时刻 → 展示的是上一个窗口的用量：数值置灰并提示
  *   （面板会在到点后补拉一次，见 CommandCodePanel 的「窗口到点补拉」）
+ * - amountText / hint 为可选扩展（OpenCode Go 的官方基准折算金额与口径说明）；
+ *   不传时渲染与既有 CC / MiMo 完全一致
  */
 function WindowCard({
   title,
   info,
   disabled,
   fetchedAt,
-  autoRefreshOn
+  autoRefreshOn,
+  amountText,
+  hint
 }: {
   title: string
   info?: UsageWindowInfo
@@ -75,6 +81,10 @@ function WindowCard({
   fetchedAt?: number
   /** 自动刷新是否开启（决定到点提示文案：正在刷新 / 请手动刷新） */
   autoRefreshOn?: boolean
+  /** 金额折算行（可选）：如「已用约 $4.44 / $12（按官方基准折算）」 */
+  amountText?: string
+  /** 卡片 tooltip（口径说明） */
+  hint?: string
 }) {
   const used = info?.usedPercent
   const [now, setNow] = useState(() => Date.now())
@@ -92,7 +102,7 @@ function WindowCard({
           : '窗口已到重置时刻 · 请手动刷新'
         : fmtRemaining(info.resetAt, now)
   return (
-    <div className="rounded-lg border border-border bg-card px-4 py-3">
+    <div className="rounded-lg border border-border bg-card px-4 py-3" title={hint}>
       <div className="text-xs text-muted-foreground mb-2">{title}</div>
       {disabled ? (
         <div className="text-sm text-muted-foreground leading-5">配置 Provider API Key 后显示</div>
@@ -105,6 +115,7 @@ function WindowCard({
           <div className={`h-1.5 rounded-full bg-muted overflow-hidden ${staleAfterReset ? 'opacity-40' : ''}`}>
             <div className={`h-full rounded-full ${barColor(used)}`} style={{ width: `${Math.min(100, used)}%` }} />
           </div>
+          {amountText && <div className="mt-1 text-xs text-muted-foreground">{amountText}</div>}
           <div className={`mt-1.5 text-xs ${staleAfterReset ? 'text-yellow-600' : 'text-muted-foreground'}`}>
             {countdownText}
           </div>
@@ -372,10 +383,10 @@ function AutoRefreshControl() {
   )
 }
 
-// ─── 窗口到点补拉（Command Code / MiMo 共用） ───
+// ─── 窗口到点补拉（Command Code / MiMo / OpenCode Go 共用） ───
 
 /**
- * 5h/7d 越过重置时刻后，页面上的数值仍是重置前拉的旧窗口 → 立即补拉一次
+ * 5h/7d（及 OpenCode Go 的滚动/月度窗口）越过重置时刻后，页面上的数值仍是重置前拉的旧窗口 → 立即补拉一次
  *（否则最长要等一个轮询间隔才翻新，倒计时则会一直停在"即将重置"）。
  * 每个 resetAt 最多尝试 3 次、两次补拉至少间隔 30s：防止服务端持续返回旧窗口时无休止轮询。
  * usage 走对象身份依赖（刷新成功才换新对象），窗口数组不进依赖——避免每次渲染重置定时器。
@@ -388,6 +399,8 @@ function useWindowResetRefresh(opts: {
     windows?: {
       fiveHour?: UsageWindowInfo
       weekly?: UsageWindowInfo
+      /** 5 小时滚动窗口（OpenCode Go；CC / MiMo 不产出该字段） */
+      rolling?: UsageWindowInfo
       /** 月度/套餐周期额度（MiMo 的 resetAt = 套餐周期结束时刻） */
       monthly?: UsageWindowInfo
     }
@@ -403,7 +416,7 @@ function useWindowResetRefresh(opts: {
       if (!active || lastFetchedAt == null) return
       if (resetRefreshTriesRef.current.size > 100) resetRefreshTriesRef.current.clear()
       const pending = expiredWindows(
-        [usage?.windows?.fiveHour, usage?.windows?.weekly, usage?.windows?.monthly],
+        [usage?.windows?.fiveHour, usage?.windows?.weekly, usage?.windows?.rolling, usage?.windows?.monthly],
         Date.now(),
         lastFetchedAt
       ).filter(
@@ -1060,6 +1073,349 @@ function CommandCodePanel({ source, account }: { source: RemoteUsageSource; acco
           </section>
         </>
       )}
+    </div>
+  )
+}
+
+// ─── 面板：OpenCode Go 云端用量 ───
+
+/** 官方额度基准：$60 月额档 → 5 小时 = 20% = $12、周 = 50% = $30、月 = 100% = $60（docs/go） */
+const OC_GO_WINDOW_CAPS_USD = { rolling: 12, weekly: 30, monthly: 60 } as const
+
+/** 金额折算口径提示（三卡共用卡片 tooltip） */
+const OC_GO_CAP_HINT =
+  '官方 Go 订阅按月度额度计：$60 档模型的 5 小时/周/月上限为 $12/$30/$60。金额 = 服务端百分比 × 官方基准折算，仅供参考；准确额度以 opencode.ai 控制台为准'
+
+/** 金额折算行文案：已用约 $x / $cap（按官方基准折算）；无百分比时返回 undefined（该行不渲染） */
+function ocAmountText(
+  win: OpenCodeWindowInfo | undefined,
+  capUsd: number,
+  currency: 'USD' | 'CNY'
+): string | undefined {
+  if (win?.usedPercent === undefined) return undefined
+  return `已用约 ${formatCost((win.usedPercent / 100) * capUsd, currency)} / ${formatCost(capUsd, currency)}（按官方基准折算）`
+}
+
+/**
+ * OpenCode Go 面板（CommandCodePanel 简化版）：
+ *   无累计区 / 采集器状态 / 明细表 / 登录按钮；凭据 = API Key 粘贴（opencode.ai/auth 控制台创建），
+ *   数据 = /zen/go/v1/usage 三个用量窗口（5 小时滚动 / 周 / 月），金额按官方 $60 档基准折算展示。
+ */
+function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account: MonitorAccount }) {
+  const settings = useSettingsStore((s) => s.settings)
+  const currency = settings.currency
+  // 凭据 / 快照 / IPC 一律按**账号**键控（默认账号 id = 源 id）
+  const accountId = account.id
+
+  const [status, setStatus] = useState<MonitorStatus | null>(
+    () => getCloudSnapshot(accountId)?.status ?? null
+  )
+  const [usage, setUsage] = useState<OpenCodeUsage | null>(
+    () => (getCloudSnapshot(accountId)?.usage as OpenCodeUsage | undefined) ?? null
+  )
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
+  const [showApiKeyInput, setShowApiKeyInput] = useState(false)
+  const [apiKeyDraft, setApiKeyDraft] = useState('')
+  // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
+  const lastFetchedAt = usage?.fetchedAt ?? null
+  // 快照恢复是否已完成（会话内模块缓存 / 主进程持久化快照）：TTL 判定须等它完成，避免快照未到先误拉
+  const [snapshotReady, setSnapshotReady] = useState(() => getCloudSnapshot(accountId)?.usage != null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // 始终指向最新的 refresh，避免定时器闭包持旧函数
+  const refreshRef = useRef<() => Promise<void>>(async () => {})
+  useEffect(() => {
+    refreshRef.current = refresh
+  })
+
+  // 无 cookie 概念：登录态 = 已配置 API Key（UI 只看 hasApiKey）
+  const hasApiKey = status?.hasApiKey ?? false
+  const loggedIn = status?.loggedIn ?? false
+  // 统一自动刷新间隔（分钟；0 = 关闭）
+  const refreshMinutes = useAutoRefreshMinutes()
+
+  // ── 数据加载 ──
+  const loadStatus = async () => {
+    try {
+      const res = await window.moaAPI.getMonitorStatus(accountId)
+      if (res.success && res.data) setStatus(res.data)
+    } catch {
+      // 状态读取失败不阻塞页面
+    }
+  }
+
+  // 登录态变化即写回快照：切视图重进时首帧直接渲染正确外观
+  useEffect(() => {
+    if (accountId && status) patchCloudSnapshot(accountId, { status })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId, status])
+
+  const refresh = async () => {
+    if (loading) return
+    setLoading(true)
+    setError(null)
+    setErrorCode(null)
+    try {
+      const res = await window.moaAPI.monitorRefresh(accountId)
+      if (res.success && res.data) {
+        setUsage(res.data as OpenCodeUsage)
+        // 写回快照：视图切走组件卸载后，重进直接恢复
+        patchCloudSnapshot(accountId, { usage: res.data })
+      } else {
+        const code = res.code ?? 'unknown'
+        setErrorCode(code)
+        if (code === 'not_authenticated') {
+          // 未配置 API Key：不报错条，直接给输入入口（见凭据条）
+          setStatus((s) => (s ? { ...s, loggedIn: false, hasApiKey: false } : s))
+          setShowApiKeyInput(true)
+        } else if (code === 'session_expired') {
+          setError('API Key 无效或已过期，请更新')
+        } else if (code === 'network') {
+          setError('拉取用量数据失败（网络不通）。若处于受限网络，请在「设置 → 网络代理」中开启代理后重试')
+        } else {
+          setError(res.error || '拉取用量数据失败')
+        }
+      }
+    } catch (err) {
+      setErrorCode('network')
+      setError(err instanceof Error ? err.message : '拉取用量数据失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
+  const hydrateUsage = async () => {
+    if (getCloudSnapshot(accountId)?.usage != null) return
+    try {
+      const res = await window.moaAPI.monitorGetSnapshot(accountId)
+      if (res.success && res.data) {
+        setUsage(res.data as OpenCodeUsage)
+        patchCloudSnapshot(accountId, { usage: res.data })
+      }
+    } catch {
+      // 快照读取失败不阻塞页面（按无快照处理）
+    } finally {
+      setSnapshotReady(true)
+    }
+  }
+
+  // 挂载：读取状态；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
+  useEffect(() => {
+    loadStatus()
+    void hydrateUsage()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId])
+
+  // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
+  useEffect(() => {
+    if (snapshotReady && status?.hasApiKey && shouldFetchOnMount(usage, refreshMinutes)) {
+      refresh()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.hasApiKey, snapshotReady])
+
+  // 自动刷新定时器（统一间隔；经 refreshRef 调用最新 refresh）
+  useEffect(() => {
+    if (refreshMinutes <= 0 || !loggedIn || !accountId) return
+    timerRef.current = setInterval(() => {
+      refreshRef.current()
+    }, refreshMinutes * 60_000)
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current)
+    }
+  }, [refreshMinutes, loggedIn, accountId])
+
+  // 窗口到点补拉：三窗口重置后立即刷新（共用 hook，含 rolling 支持）
+  useWindowResetRefresh({
+    active: refreshMinutes > 0 && loggedIn,
+    refreshMinutes,
+    usage,
+    lastFetchedAt,
+    refreshRef
+  })
+
+  // ── 动作 ──
+  const handleSaveApiKey = async () => {
+    if (!apiKeyDraft.trim()) return
+    try {
+      await window.moaAPI.monitorSetApiKey(accountId, apiKeyDraft.trim())
+      setApiKeyDraft('')
+      setShowApiKeyInput(false)
+      setStatus({ loggedIn: true, hasApiKey: true })
+      refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存 API Key 失败')
+    }
+  }
+
+  /** 清除凭据：客户端清快照 + 主进程删凭据（只动本账号） */
+  const handleClearCredentials = async () => {
+    clearCloudSnapshot(accountId)
+    try {
+      await window.moaAPI.monitorLogout(accountId)
+    } catch {
+      // 清除尽力而为：本地状态立即复位，失败无需打扰用户
+    }
+    setStatus({ loggedIn: false, hasApiKey: false })
+    setUsage(null)
+    setError(null)
+    setErrorCode(null)
+  }
+
+  // ── 渲染 ──
+  return (
+    <div className="flex flex-col gap-4">
+      {/* 顶部：源信息 + 操作 */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-base font-bold text-foreground flex items-center gap-2">
+            {source.name}
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${hasApiKey ? 'bg-green-500' : 'bg-muted'}`}
+              title={hasApiKey ? '已配置 API Key' : '未配置 API Key'}
+            />
+          </h2>
+          <a
+            href={source.studioUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => {
+              // Electron 内新开外链：直接交给系统浏览器（渲染进程本身无法开窗）
+              e.preventDefault()
+              window.open(source.studioUrl, '_blank', 'noopener')
+            }}
+            className="text-xs text-muted-foreground inline-flex items-center gap-1 hover:text-foreground mt-0.5"
+          >
+            {source.studioUrl} <ExternalLink className="w-3 h-3" />
+          </a>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {lastFetchedAt && (
+            <span className="text-xs text-muted-foreground">上次刷新 {fmtTime(lastFetchedAt)}</span>
+          )}
+          <AutoRefreshControl />
+          <button
+            onClick={refresh}
+            disabled={loading || !loggedIn}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border bg-card text-foreground hover:bg-accent disabled:opacity-50 transition-colors"
+          >
+            {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            刷新
+          </button>
+        </div>
+      </div>
+
+      {/* 错误提示 */}
+      {error && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive flex items-center justify-between gap-3">
+          <span>{error}</span>
+          {errorCode === 'session_expired' && (
+            <button onClick={() => setShowApiKeyInput(true)} className="underline whitespace-nowrap">
+              更新 API Key
+            </button>
+          )}
+          {errorCode === 'network' && (
+            <button onClick={refresh} className="underline whitespace-nowrap">
+              重试
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 凭据条：API Key 是唯一凭据路径（无登录窗） */}
+      <div className="rounded-lg border border-border bg-card px-4 py-2.5 flex flex-wrap items-center gap-2 text-sm">
+        <KeyRound className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+        <span className="text-xs text-muted-foreground flex-1 min-w-40">
+          {hasApiKey
+            ? '已配置 API Key，展示 5 小时滚动 / 周 / 月三个用量窗口。'
+            : '配置 OpenCode Go API Key 后显示用量（在 opencode.ai/auth 控制台创建并复制）。'}
+        </span>
+        {showApiKeyInput ? (
+          <span className="flex items-center gap-1.5 flex-wrap">
+            <input
+              value={apiKeyDraft}
+              onChange={(e) => setApiKeyDraft(e.target.value)}
+              placeholder="sk-..."
+              className="w-56 rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <button
+              onClick={handleSaveApiKey}
+              disabled={!apiKeyDraft.trim()}
+              className="px-2.5 py-1 text-xs rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              保存
+            </button>
+            <button
+              onClick={() => {
+                setShowApiKeyInput(false)
+                setApiKeyDraft('')
+              }}
+              className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              取消
+            </button>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5">
+            <button
+              onClick={() => setShowApiKeyInput(true)}
+              className="px-2.5 py-1 text-xs rounded-md border border-border hover:bg-accent transition-colors"
+            >
+              {hasApiKey ? '更新' : '配置'}
+            </button>
+            {hasApiKey && (
+              <button
+                onClick={handleClearCredentials}
+                className="px-2.5 py-1 text-xs rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/40 transition-colors"
+              >
+                清除凭据
+              </button>
+            )}
+          </span>
+        )}
+      </div>
+
+      {/* 额度三卡：5 小时滚动 / 周 / 月（百分比 + 重置倒计时 + 官方基准折算金额） */}
+      <section>
+        <h3 className="text-xs font-semibold text-muted-foreground mb-2">额度</h3>
+        {loggedIn && loading && !usage && (
+          <div className="flex items-center justify-center py-10 text-sm text-muted-foreground">
+            <Loader2 className="w-4 h-4 animate-spin mr-2" /> 正在拉取用量数据…
+          </div>
+        )}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <WindowCard
+            title="5 小时滚动"
+            info={usage?.windows?.rolling}
+            disabled={!hasApiKey}
+            fetchedAt={lastFetchedAt ?? undefined}
+            autoRefreshOn={refreshMinutes > 0}
+            amountText={ocAmountText(usage?.windows?.rolling, OC_GO_WINDOW_CAPS_USD.rolling, currency)}
+            hint={OC_GO_CAP_HINT}
+          />
+          <WindowCard
+            title="周窗口"
+            info={usage?.windows?.weekly}
+            disabled={!hasApiKey}
+            fetchedAt={lastFetchedAt ?? undefined}
+            autoRefreshOn={refreshMinutes > 0}
+            amountText={ocAmountText(usage?.windows?.weekly, OC_GO_WINDOW_CAPS_USD.weekly, currency)}
+            hint={OC_GO_CAP_HINT}
+          />
+          <WindowCard
+            title="月度窗口"
+            info={usage?.windows?.monthly}
+            disabled={!hasApiKey}
+            fetchedAt={lastFetchedAt ?? undefined}
+            autoRefreshOn={refreshMinutes > 0}
+            amountText={ocAmountText(usage?.windows?.monthly, OC_GO_WINDOW_CAPS_USD.monthly, currency)}
+            hint={OC_GO_CAP_HINT}
+          />
+        </div>
+      </section>
     </div>
   )
 }
@@ -2421,7 +2777,9 @@ export default function CloudMonitorView() {
 
             {/* key 带 accountId：切账号时面板整体重建，不复用上一账号的 state */}
             {acc &&
-              (src.type === 'mimo' ? (
+              (src.type === 'opencode' ? (
+                <OpenCodePanel key={`${src.id}:${acc.id}`} source={src} account={acc} />
+              ) : src.type === 'mimo' ? (
                 <MimoPanel key={`${src.id}:${acc.id}`} source={src} account={acc} />
               ) : src.type === 'deepseek' ? (
                 <DeepSeekPanel key={`${src.id}:${acc.id}`} source={src} account={acc} />

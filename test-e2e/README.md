@@ -4,7 +4,7 @@
 
 | 命令 | 脚本 | 作用 |
 | --- | --- | --- |
-| `npm run test:all` | （串行跑下表全部 22 个测试脚本） | 一键全量回归：任一失败即退出码 1（`test:monitor`、`test:login-window` 含在内） |
+| `npm run test:all` | （串行跑下表全部 23 个测试脚本） | 一键全量回归：任一失败即退出码 1（`test:monitor`、`test:login-window` 含在内） |
 | `npm run test:sse` | `sse-parser.cjs` | SSE 解析器：多行 data / event 透传 / 多工具调用增量 / 末帧 usage / finish_reason |
 | `npm run test:throttle` | `stream-throttle.cjs` | 节流推送器：窗口合并、终态 flush+dispose 语义 |
 | `npm run test:stream` | `stream-call.cjs` | 通用流式调用层 streamChat：三档超时 / 回退链 / 200 直回 JSON 抢救 / abort / extraBody 透传 / tool_calls 增量 |
@@ -17,6 +17,7 @@
 | `npm run test:monitor` | `monitor-behavior.cjs` | 云监控采集纯函数：游标分页 / 页大小探针 / 记录与 charts 解析 / 聚合 / 失败分层 / 月度额度窗口计算 |
 | `npm run test:login-window` | `monitor-login-window.cjs` | 云监控登录窗（stub Electron 驱动真实 login 函数）：分区残留旧凭证时**仍开窗** + 开窗前清理旧凭证 + 关窗捕获新凭证落库，覆盖 Command Code / MiMo / DeepSeek |
 | `npm run test:mimo-request` | `mimo-request.cjs` | MiMo 刷新请求形态回归（stub fetchProxy 驱动真实 refreshMimoUsage）：POST 端点必带 `?api-platform_ph=<cookie 去引号值>`（真实报障：缺失时恒 401 → 误报「登录已过期（Cookie 约 24h 有效）」）、GET 不带、凭证缺 ph 优雅退化、错误分层不回归 |
+| `npm run test:opencode-request` | `opencode-request.cjs` | OpenCode Go 刷新请求形态回归（stub fetchProxy / keyStore 驱动真实 refreshOpenCodeUsage，opencode.ts 不 import electron 故只需两个 stub）：GET /zen/go/v1/usage + Bearer 头、实测三窗口响应解析、resetsAt 多形态归一（ISO / epoch 秒 / 毫秒 / 缺失 / 非法）、percent 越界夹取、错误码分层（无 key / 401 / 403 / 500 / reject / 结构不识别）、部分窗口缺失仍为 ok |
 | `npm run test:cloud-cache` | `cloud-monitor-cache.cjs` | 云监控页面快照缓存：get/patch/clear 语义（局部更新不丢字段、登出清空）+ 挂载拉取判定（新鲜/过期/自动刷新关闭） |
 | `npm run test:snapshot-store` | `monitor-snapshot-store.cjs` | 云监控用量快照持久化：save/get 往返、同源覆盖与源间隔离、clear、损坏 JSON 与 DB 抛错降级 |
 | `npm run test:collector` | `collector-dispatch.cjs` | 后台采集调度（stub 定时器 + 假时钟驱动真实 collector）：页面刷新占位只抑制本账号、其余账号照采（核心回归：曾用「任一账号新鲜」做全局预跳过导致整轮被吞）、间隔内不重拉、新账号下一轮可采、关闭不采 |

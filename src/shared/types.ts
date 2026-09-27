@@ -294,9 +294,9 @@ export interface UsageRow { key: string; requests: number; success: number; prom
 export interface UsageSummary { range: UsageRange; groupBy: UsageGroupBy; totals: { requests: number; success: number; prompt: number; completion: number; cost: number }; rows: UsageRow[] }
 export interface UsageToday { prompt: number; completion: number; cost: number; running: boolean }
 
-// ─── Cloud Usage Monitoring (Command Code / Xiaomi MiMo / DeepSeek) ───
-/** 云端用量监控源类型（当前支持 Command Code / Xiaomi MiMo / DeepSeek，后续可扩展） */
-export type RemoteUsageSourceType = 'commandcode' | 'mimo' | 'deepseek'
+// ─── Cloud Usage Monitoring (Command Code / Xiaomi MiMo / DeepSeek / OpenCode Go) ───
+/** 云端用量监控源类型（当前支持 Command Code / Xiaomi MiMo / DeepSeek / OpenCode Go，后续可扩展） */
+export type RemoteUsageSourceType = 'commandcode' | 'mimo' | 'deepseek' | 'opencode'
 
 /** 一个云端用量监控源（如 Command Code Studio），下挂无限个账号 */
 export interface RemoteUsageSource {
@@ -434,6 +434,29 @@ export interface CommandCodeUsage {
     fromTs?: number
     /** 已聚合记录的最新时间（epoch 毫秒） */
     toTs?: number
+  }
+}
+
+// ─── OpenCode Go 用量 ───
+
+/** OpenCode Go 单个用量窗口（GET /zen/go/v1/usage 服务端原值） */
+export interface OpenCodeWindowInfo {
+  /** 服务端 status 原值（实测 'ok'；未知值原样保留，UI 不消费） */
+  status?: string
+  /** 已用百分比（服务端整数 0-100，越界夹取） */
+  usedPercent?: number
+  /** 重置时间（epoch 秒；由 ISO resetsAt 归一） */
+  resetAt?: number
+}
+
+/** OpenCode Go 用量归一化数据（单端点，全有或全无；失败走错误码，无区块级降级） */
+export interface OpenCodeUsage {
+  fetchedAt: number
+  windows: {
+    /** 5 小时滚动窗口 */
+    rolling?: OpenCodeWindowInfo
+    weekly?: OpenCodeWindowInfo
+    monthly?: OpenCodeWindowInfo
   }
 }
 
@@ -577,7 +600,7 @@ export interface MimoUsage {
 }
 
 /** 任意监控源的归一化用量（monitor:refresh 返回值，按 source.type 区分结构） */
-export type MonitorUsage = CommandCodeUsage | MimoUsage | DeepSeekUsage
+export type MonitorUsage = CommandCodeUsage | MimoUsage | DeepSeekUsage | OpenCodeUsage
 
 // ─── DeepSeek 用量 ───
 
