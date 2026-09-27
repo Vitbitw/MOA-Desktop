@@ -1,5 +1,5 @@
 import { getDatabase } from '../db/database'
-import type { AppSettings } from '../../shared/types'
+import type { AppSettings, MonitorAccount, RemoteUsageSource } from '../../shared/types'
 import { DEFAULT_SETTINGS } from '../../shared/defaults'
 
 /**
@@ -101,6 +101,43 @@ function dropDeprecatedGatewayFields(raw: Record<string, unknown>): Record<strin
 }
 
 /**
+ * 预置源补种（读后防御，幂等）：sources 里缺 opencode 类型源时追加 DEFAULT_MONITORING 里同 type 源。
+ * 背景：raw.monitoring.sources 存在时整体覆盖默认 → 已有用户（含旧版本升级）看不到新增源。
+ * 判定按 **type 存在性**（不是 enabled）：用户手动禁用的源不复活。
+ * 必须在 ensureMonitorAccounts **之前**调用：新源进列表后账号会自动补建
+ * （billing 判定 `deepseek ? 'usage' : 'plan'` 自然落到 'plan'）。
+ */
+function ensureMonitorSources(sources: RemoteUsageSource[]): RemoteUsageSource[] {
+  if (sources.some((s) => s && s.type === 'opencode')) return sources
+  const preset = DEFAULT_SETTINGS.monitoring.sources.find((s) => s.type === 'opencode')
+  return preset ? [...sources, preset] : sources
+}
+
+/**
+ * 每个监控源至少一个账号（读后防御，幂等）：
+ * 缺账号的源补建默认账号，**默认账号 id = 源 id** —— 历史凭据（usageCredentials 的裸 sourceId 键）
+ * 与三张表（cc_usage_records / cc_collector_state / monitor_snapshots 的 source_id）原样沿用，零迁移。
+ * 只给「一个账号都没有」的源补建：用户删掉的账号不会复活。
+ */
+function ensureMonitorAccounts(sources: RemoteUsageSource[], accounts: MonitorAccount[]): MonitorAccount[] {
+  const valid = accounts.filter(
+    (a): a is MonitorAccount => !!a && typeof a.id === 'string' && typeof a.sourceId === 'string'
+  )
+  const covered = new Set(valid.map((a) => a.sourceId))
+  const missing = sources
+    .filter((s): s is RemoteUsageSource => !!s && typeof s.id === 'string' && !covered.has(s.id))
+    .map<MonitorAccount>((s) => ({
+      id: s.id,
+      sourceId: s.id,
+      label: '',
+      // DeepSeek 纯按量；CC / MiMo 以订阅套餐为主（与 DEFAULT_MONITORING 同口径）
+      billing: s.type === 'deepseek' ? 'usage' : 'plan'
+    }))
+  if (missing.length === 0) return valid.length === accounts.length ? accounts : valid
+  return [...valid, ...missing]
+}
+
+/**
  * 合并默认值 + 字段类型规范化（本模块唯一的"读后防御"，消费方一律免检）：
  * - 已知嵌套对象逐字段合并默认值（防旧版本只写部分字段产生"缺字段对象"）；
  * - 数组 / 对象字段遇历史垃圾值统一回退默认。
@@ -116,6 +153,13 @@ function mergeSettings(raw: Record<string, unknown>): AppSettings {
   if (!Array.isArray(merged.monitoring.sources)) {
     merged.monitoring.sources = DEFAULT_SETTINGS.monitoring.sources
   }
+  // 预置源补种：已有用户的 sources 整体覆盖默认 → 新增源需读后补种（在账号补建之前，见函数注释）
+  merged.monitoring.sources = ensureMonitorSources(merged.monitoring.sources)
+  // v5 账号层：每源至少一个账号（默认账号 id = 源 id，零迁移）
+  merged.monitoring.accounts = ensureMonitorAccounts(
+    merged.monitoring.sources,
+    Array.isArray(merged.monitoring.accounts) ? merged.monitoring.accounts : []
+  )
   if (!Array.isArray(merged.pricingProbe.sources)) {
     merged.pricingProbe.sources = DEFAULT_SETTINGS.pricingProbe.sources
   }

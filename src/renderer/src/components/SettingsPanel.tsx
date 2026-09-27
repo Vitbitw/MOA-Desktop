@@ -4,8 +4,8 @@ import { useConfigStore } from '../store/configStore'
 import { useProbeStore, probeResultsToMessages, type PricingSortKey } from '../store/probeStore'
 import { useNotificationStore } from '../store/notificationStore'
 import { formatCost } from '../lib/usageFormat'
-import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap } from 'lucide-react'
-import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, PricingProbeSource, PricingWindow, Provider, MoaArchitecture } from '../../../shared/types'
+import { Plus, Trash2, RefreshCw, Eye, EyeOff, Save, Sparkles, X, Mountain, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, Zap, Pencil } from 'lucide-react'
+import type { PricingConfig, SubModelConfig, AggregatorConfig, TitleSettings, ProbedPricingEntry, ProbedUsageLimits, PricingProbeSource, PricingWindow, Provider, ProviderAccount, MoaArchitecture } from '../../../shared/types'
 import { BUILT_IN_PROVIDER_TEMPLATES, defaultPricingProbeUrlByName } from '../../../shared/defaults'
 import { splitModelKey } from '../../../shared/modelKey'
 import { hasProviderAccess, isLocalBaseUrl } from '../../../shared/providerAccess'
@@ -229,10 +229,10 @@ function MoASection() {
     }
   }, [providers.length])
 
-  // All usable models flattened from all providers
+  // All usable models flattened from all providers（label 带计费通道徽标：按量 / Plan）
   const allModelOptions = providers.flatMap((p) =>
     (p.models || []).map((m) => ({
-      label: `${p.name} · ${m.id}`,
+      label: `${p.name} · ${m.id}（${p.billing === 'plan' ? 'Plan' : '按量'}）`,
       value: `${p.id}:${m.id}`,
       providerId: p.id,
       modelId: m.id
@@ -291,7 +291,7 @@ function MoASection() {
         : null
 
       // F1：不再写 mode —— 聊天模式仅由输入框按钮控制（不持久化）；
-      // 网关固定聚合模式（模式不可配置），协作架构见下方「MoA 网关」区。
+      // 网关出口模式（缺省聚合 / 可切单模型直通）与协作架构见下方「MoA 网关」区。
       // F5：aggregationPromptVariant / customAggregationPrompt 原值回传，避免静默重置。
       const res: any = await window.moaAPI.setMoaConfig({
         subModels,
@@ -513,13 +513,17 @@ function GatewaySection({ architecture }: {
   architecture: MoaArchitecture
 }) {
   const { settings, updateSetting, notifySaveResult } = useSettingsStore()
+  const providers = useConfigStore((s) => s.providers)
   // 网关独立协作架构（undefined = 跟随全局）：与聊天侧解耦，仅影响网关出口
   const [gatewayArch, setGatewayArch] = useState<MoaArchitecture | undefined>(undefined)
+  // 网关出口模式：单模型直通模型（'providerId:modelId'；undefined = 聚合，席位全体参与）
+  const [gatewayDirect, setGatewayDirect] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     window.moaAPI.getMoaConfig().then((res: any) => {
       const config = unwrapMoaConfig(res)
       setGatewayArch(config?.gatewayArchitecture || undefined)
+      setGatewayDirect(config?.gatewayDirectModel || undefined)
     })
   }, [])
 
@@ -535,13 +539,32 @@ function GatewaySection({ architecture }: {
     }
   }
 
+  // 出口模式即改即存；选「聚合」传 undefined（JSON 序列化自动省略键，读回即聚合态）
+  const saveGatewayDirectModel = async (key: string | undefined) => {
+    setGatewayDirect(key)
+    try {
+      const res: any = await window.moaAPI.setMoaConfig({ gatewayDirectModel: key })
+      if (res?.success === false) throw new Error(res?.error || '保存失败')
+      notifySaveResult(true)
+    } catch (err) {
+      notifySaveResult(false, String(err))
+    }
+  }
+
+  // 直通模型候选：网关只路由「启用且可用」的厂商（与主进程 usableProviders 同口径）；
+  // 当前值已不在候选（厂商/模型被删）时下拉补占位项，避免受控 select 显示错位
+  const directModelOptions = providers
+    .filter((p) => p.enabled && hasProviderAccess(p))
+    .flatMap((p) => (p.models || []).map((m) => ({ label: `${p.name} · ${m.id}`, value: `${p.id}:${m.id}` })))
+  const directInPool = gatewayDirect === undefined || directModelOptions.some((o) => o.value === gatewayDirect)
+
   return (
     <div className="border-t border-border pt-5 space-y-4">
       <div>
         <label className="text-sm font-medium text-foreground block">MoA 网关（对外暴露）</label>
         <p className="text-xs text-muted-foreground mt-1">
           把 MoA 能力以 OpenAI 兼容接口开放给第三方软件（Cline / Cursor / Cherry Studio 等）；
-          网关固定聚合模式（始终输出一份融合后的最终答案），缺省模型遵循上方 MoA 配置的首个子模型。
+          出口默认聚合（输出一份融合后的最终答案），可切换为单模型直通；缺省模型遵循上方 MoA 配置的首个子模型。
         </p>
       </div>
 
@@ -554,6 +577,47 @@ function GatewaySection({ architecture }: {
 
       {settings.gateway.enabled && (
         <>
+          <SettingRow
+            label="出口模式"
+            hint={gatewayDirect !== undefined
+              ? '单模型直通：第三方请求一律由所选模型直接作答（不发起席位与聚合）；仅影响网关出口'
+              : '聚合（默认）：席位全体参与，输出一份融合后的最终答案；仅影响网关出口'}
+          >
+            <select
+              value={gatewayDirect !== undefined ? 'direct' : 'aggregate'}
+              onChange={(e) => {
+                if (e.target.value === 'aggregate') {
+                  saveGatewayDirectModel(undefined)
+                  return
+                }
+                // 首次切直通默认落到首个可用模型；无可用模型时不切换（避免存出无法路由的配置）
+                const first = gatewayDirect ?? directModelOptions[0]?.value
+                if (first) saveGatewayDirectModel(first)
+              }}
+              className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+            >
+              <option value="aggregate">聚合（全部席位参与）</option>
+              <option value="direct" disabled={directModelOptions.length === 0 && gatewayDirect === undefined}>单模型直通</option>
+            </select>
+          </SettingRow>
+
+          {gatewayDirect !== undefined && (
+            <SettingRow label="直通模型" hint="网关出口固定使用的模型；桌面端聊天不受影响">
+              <select
+                value={gatewayDirect}
+                onChange={(e) => { if (e.target.value) saveGatewayDirectModel(e.target.value) }}
+                className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground"
+              >
+                {!directInPool && (
+                  <option value={gatewayDirect}>{gatewayDirect}（已不在可用模型列表，请重选）</option>
+                )}
+                {directModelOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </SettingRow>
+          )}
+
           <SettingRow
             label="协作架构"
             hint={gatewayArch === undefined
@@ -657,6 +721,8 @@ function ProvidersSection() {
   const [loading, setLoading] = useState<string | null>(null)
   const [showKey, setShowKey] = useState<Record<string, boolean>>({})
   const [showAdd, setShowAdd] = useState(false)
+  // 编辑模式：非空 = 正在编辑该厂商（AddProviderDialog 走 updateProvider / updateProviderKey）
+  const [editing, setEditing] = useState<Provider | null>(null)
 
   const refresh = async () => {
     const res = await window.moaAPI.getProviders()
@@ -702,7 +768,18 @@ function ProvidersSection() {
         {availableProviders.map((p) => (
           <div key={p.id} className="rounded-lg border border-border p-3 text-sm space-y-1.5">
             <div className="flex items-center justify-between">
-              <span className="font-medium text-foreground">{p.name}</span>
+              <span className="font-medium text-foreground">
+                {p.name}
+                {/* 通道徽标：按量=中性灰、Plan=主题色（记录属性，与是否分组无关）——取自当前账号 */}
+                <span className={`ml-1.5 text-[10px] font-normal ${p.billing === 'plan' ? 'text-primary' : 'text-muted-foreground'}`}>
+                  （{p.billing === 'plan' ? 'Plan' : '按量'}）
+                </span>
+                {p.accounts.length > 1 && (
+                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">
+                    {p.accounts.length} 个账号
+                  </span>
+                )}
+              </span>
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => fetchModels(p.id)}
@@ -711,6 +788,13 @@ function ProvidersSection() {
                   title="获取模型列表"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${loading === p.id ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  onClick={() => setEditing(p)}
+                  className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent/50 transition-colors"
+                  title="编辑厂商（多账号 / 通道 / 订阅费 / 密钥）"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={() => handleDelete(p.id)}
@@ -722,6 +806,13 @@ function ProvidersSection() {
               </div>
             </div>
             <div className="text-muted-foreground truncate text-xs">{p.baseUrl}</div>
+            {p.billing === 'plan' && (
+              <div className="text-xs text-muted-foreground">
+                {p.plan
+                  ? `订阅费 ${p.plan.currency === 'CNY' ? '¥' : '$'}${p.plan.amount}/月`
+                  : '未配置订阅费，按单价估算'}
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <span className="text-green-500">●</span>
@@ -751,49 +842,259 @@ function ProvidersSection() {
           onDone={() => { setShowAdd(false); refresh() }}
         />
       )}
+
+      {editing && (
+        <AddProviderDialog
+          editingProvider={editing}
+          onClose={() => setEditing(null)}
+          onDone={() => { setEditing(null); refresh() }}
+        />
+      )}
     </div>
   )
 }
 
-function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [name, setName] = useState('')
-  const [baseUrl, setBaseUrl] = useState('')
-  const [apiKey, setApiKey] = useState('')
+/** 周期起始日（date input 值 'YYYY-MM-DD'）→ epoch ms；空/非法 → undefined（缺省当月 1 号） */
+const parsePlanAnchor = (dateStr: string): number | undefined => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim())
+  if (!m) return undefined
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
+}
+
+/** epoch ms → date input 值 'YYYY-MM-DD'（本地时区）；无值 → '' */
+const formatPlanAnchor = (ts?: number): string => {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/** 账号草稿：编辑厂商时先改本地、点「保存」统一提交；id=null 表示尚未落库的待建账号 */
+interface AccountDraft {
+  id: string | null
+  label: string
+  billing: 'usage' | 'plan'
+  planAmount: string
+  planCurrency: 'CNY' | 'USD'
+  planDate: string
+  apiKey: string
+}
+
+const emptyAccountDraft = (): AccountDraft => ({
+  id: null,
+  label: '',
+  billing: 'usage',
+  planAmount: '',
+  planCurrency: 'CNY',
+  planDate: '',
+  apiKey: ''
+})
+
+const toAccountDraft = (a: ProviderAccount): AccountDraft => ({
+  id: a.id,
+  label: a.label,
+  billing: a.billing,
+  planAmount: a.plan ? String(a.plan.amount) : '',
+  planCurrency: a.plan?.currency ?? 'CNY',
+  planDate: formatPlanAnchor(a.plan?.anchorTs),
+  apiKey: a.apiKey
+})
+
+/** 草稿账号的展示名：有备注名用备注名，否则用通道名 */
+const accountDraftName = (d: AccountDraft): string => d.label.trim() || (d.billing === 'plan' ? 'Plan' : '按量')
+
+function AddProviderDialog({ onClose, onDone, editingProvider }: { onClose: () => void; onDone: () => void; editingProvider?: Provider }) {
+  const editing = !!editingProvider
+  const [name, setName] = useState(editingProvider?.name ?? '')
+  const [baseUrl, setBaseUrl] = useState(editingProvider?.baseUrl ?? '')
+  // 新建模式：单账号，字段与旧版一致（账号落库由 addProvider 一并完成）
+  const [apiKey, setApiKey] = useState(editingProvider?.apiKey ?? '')
+  // 计费通道：'usage' = 按量（默认）| 'plan' = 订阅/Token 包
+  const [billing, setBilling] = useState<'usage' | 'plan'>(editingProvider?.billing ?? 'usage')
+  // Plan 三件套：每期消费金额（留空 = 未配置）/ 币种 / 周期起始日
+  const [planAmount, setPlanAmount] = useState(editingProvider?.plan ? String(editingProvider.plan.amount) : '')
+  const [planCurrency, setPlanCurrency] = useState<'CNY' | 'USD'>(editingProvider?.plan?.currency ?? 'CNY')
+  const [planDate, setPlanDate] = useState(formatPlanAnchor(editingProvider?.plan?.anchorTs))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // ── 编辑模式：账号层（同来源可挂多个账号，通道/订阅费/Key 各归各的账号）──
+  const [drafts, setDrafts] = useState<AccountDraft[]>(() => (editingProvider?.accounts ?? []).map(toAccountDraft))
+  const [sel, setSel] = useState(() => {
+    if (!editingProvider) return 0
+    const i = editingProvider.accounts.findIndex((a) => a.id === editingProvider.activeAccountId)
+    return i >= 0 ? i : 0
+  })
+  /** 待删除账号 id（保存时逐个 removeProviderAccount） */
+  const [removedIds, setRemovedIds] = useState<string[]>([])
+  /** 期望的当前账号在 drafts 中的下标（允许指向待建账号；保存时解析成真实 id） */
+  const [activeSel, setActiveSel] = useState(() => {
+    if (!editingProvider) return 0
+    const i = editingProvider.accounts.findIndex((a) => a.id === editingProvider.activeAccountId)
+    return i >= 0 ? i : 0
+  })
+
+  /** 落库中的账号（排除待删 / 待建）数量：至少保留一个 */
+  const liveCount = drafts.filter((d) => d.id !== null && !removedIds.includes(d.id)).length +
+    drafts.filter((d) => d.id === null).length
+
+  const cur = drafts[sel]
+
+  const patchDraft = (i: number, patch: Partial<AccountDraft>) =>
+    setDrafts((list) => list.map((d, idx) => (idx === i ? { ...d, ...patch } : d)))
+
+  const addDraft = () => {
+    setDrafts((list) => [
+      ...list,
+      { id: null, label: '', billing: 'usage', planAmount: '', planCurrency: 'CNY', planDate: '', apiKey: '' }
+    ])
+    setSel(drafts.length)
+  }
+
+  const removeDraft = (i: number) => {
+    const target = drafts[i]
+    if (!target) return
+    const next = drafts.filter((_, idx) => idx !== i)
+    const nextRemoved = target.id ? [...removedIds, target.id] : removedIds
+    setDrafts(next)
+    setRemovedIds(nextRemoved)
+    // 下标跟随删除位移；删的恰好是当前账号 → 当前账号回退到第一个
+    const fix = (x: number) => (x > i ? x - 1 : x === i ? 0 : x)
+    setSel((s) => Math.min(fix(s), next.length - 1))
+    setActiveSel((a) => (nextRemoved.includes(drafts[a]?.id ?? '') ? 0 : fix(a)))
+  }
+
+  /** 草稿 → 提交用 Plan 对象：非 plan 通道 / 金额非正数 / 留空 → null（清空订阅费，回退单价链） */
+  const buildPlan = (d: AccountDraft): { amount: number; currency: 'CNY' | 'USD'; anchorTs?: number } | null => {
+    if (d.billing !== 'plan' || d.planAmount.trim() === '') return null
+    const amount = Number(d.planAmount)
+    if (!Number.isFinite(amount) || amount < 0) throw new Error('每期消费金额需为不小于 0 的数字')
+    const anchorTs = parsePlanAnchor(d.planDate)
+    return { amount, currency: d.planCurrency, ...(anchorTs !== undefined ? { anchorTs } : {}) }
+  }
+
+  const accountPayload = (d: AccountDraft, plan: { amount: number; currency: 'CNY' | 'USD'; anchorTs?: number } | null) => ({
+    label: d.label.trim(),
+    billing: d.billing,
+    ...(plan ? { plan } : {}),
+    apiKey: d.apiKey.trim()
+  })
 
   const handleSave = async () => {
     if (!name.trim()) {
       setError('名称为必填')
       return
     }
+    // baseUrl 为空且选中了内置模板 → 用模板 URL；否则要求用户填 URL（不能拿 name 当 URL）
+    const selectedTemplate = BUILT_IN_PROVIDER_TEMPLATES.find((t) => t.name === name.trim())
+    const finalBaseUrl = baseUrl.trim() || selectedTemplate?.baseUrl || ''
+    if (!finalBaseUrl) {
+      setError('请填写 API 地址（或从上方快速选择内置厂商）')
+      return
+    }
+    // 本地回环地址免 Key（本地推理服务不校验 Authorization）；云端厂商必须填 Key
+    if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl) && !editing) {
+      setError('云端厂商需填写 API Key（回环地址可留空）')
+      return
+    }
+    if (editing && liveCount === 0) {
+      setError('至少保留一个账号')
+      return
+    }
+    // 账号草稿统一先行校验：金额非法在提交前拦下，避免改到一半才发现（部分账号已提交）
+    let draftPlans: Array<{ amount: number; currency: 'CNY' | 'USD'; anchorTs?: number } | null>
+    let newPlan: { amount: number; currency: 'CNY' | 'USD'; anchorTs?: number } | null
+    try {
+      draftPlans = drafts.map((d) => buildPlan(d))
+      newPlan = buildPlan({ ...emptyAccountDraft(), billing, planAmount, planCurrency, planDate })
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err))
+      return
+    }
     setSaving(true)
     setError(null)
     try {
-      // baseUrl 为空且选中了内置模板 → 用模板 URL；否则要求用户填 URL（不能拿 name 当 URL）
-      const selectedTemplate = BUILT_IN_PROVIDER_TEMPLATES.find((t) => t.name === name.trim())
-      const finalBaseUrl = baseUrl.trim() || selectedTemplate?.baseUrl || ''
-      if (!finalBaseUrl) {
-        setError('请填写 API 地址（或从上方快速选择内置厂商）')
-        setSaving(false)
+      if (!editingProvider) {
+        const res = await window.moaAPI.addProvider({
+          name: name.trim(),
+          baseUrl: finalBaseUrl,
+          apiKey: apiKey.trim(),
+          billing,
+          ...(newPlan ? { plan: newPlan } : {})
+        })
+        if (res.success) {
+          onDone()
+        } else {
+          setError(String(res.error || '保存失败'))
+        }
         return
       }
-      // 本地回环地址免 Key（本地推理服务不校验 Authorization）；云端厂商必须填 Key
-      if (!apiKey.trim() && !isLocalBaseUrl(finalBaseUrl)) {
-        setError('云端厂商需填写 API Key（回环地址可留空）')
-        setSaving(false)
-        return
-      }
-      const res = await window.moaAPI.addProvider({
+
+      // ── 编辑：来源级字段 → 新增/更新账号 → 删除账号 → 切当前账号 ──
+      // **先建后删**：用户「删掉唯一账号 + 同次保存新建一个」时，先建后删才不会撞上
+      // 「至少保留一个账号」；且新建失败只多出账号（可再删），不会丢数据。
+      const srcRes = await window.moaAPI.updateProvider(editingProvider.id, {
         name: name.trim(),
-        baseUrl: finalBaseUrl,
-        apiKey: apiKey.trim()
+        baseUrl: finalBaseUrl
       })
-      if (res.success) {
-        onDone()
-      } else {
-        setError(String(res.error || '保存失败'))
+      if (!srcRes.success) {
+        setError(String(srcRes.error || '保存失败'))
+        return
       }
+      const createdIds = new Map<number, string>()
+      for (let i = 0; i < drafts.length; i++) {
+        const d = drafts[i]
+        if (d.id === null) {
+          const r = await window.moaAPI.addProviderAccount(editingProvider.id, accountPayload(d, draftPlans[i] ?? null))
+          if (!r.success) {
+            setError(String(r.error || '添加账号失败'))
+            return
+          }
+          createdIds.set(i, (r.data as { id: string }).id)
+          continue
+        }
+        const orig = editingProvider.accounts.find((a) => a.id === d.id)
+        if (!orig) continue
+        const plan = draftPlans[i] ?? null
+        const planChanged = JSON.stringify(plan ?? null) !== JSON.stringify(orig.plan ?? null)
+        if (d.label.trim() !== orig.label || d.billing !== orig.billing || planChanged) {
+          const r = await window.moaAPI.updateProviderAccount(d.id, {
+            label: d.label.trim(),
+            billing: d.billing,
+            plan
+          })
+          if (!r.success) {
+            setError(String(r.error || '保存账号失败'))
+            return
+          }
+        }
+        if (d.apiKey !== orig.apiKey) {
+          const kr = await window.moaAPI.updateProviderKey(d.id, d.apiKey)
+          if (!kr.success) {
+            setError(String(kr.error || '密钥保存失败'))
+            return
+          }
+        }
+      }
+      // 新账号都已落库，再删（顺序保证不会出现「先删到只剩 0 个」的中间态）
+      for (const rid of removedIds) {
+        const rm = await window.moaAPI.removeProviderAccount(rid)
+        if (!rm.success) {
+          setError(String(rm.error || '删除账号失败'))
+          return
+        }
+      }
+      // 切换当前账号：指向待建账号时用它落库后的 id
+      const nextActive = drafts[activeSel]?.id ?? createdIds.get(activeSel)
+      if (nextActive && nextActive !== editingProvider.activeAccountId) {
+        const ar = await window.moaAPI.setActiveProviderAccount(editingProvider.id, nextActive)
+        if (!ar.success) {
+          setError(String(ar.error || '切换账号失败'))
+          return
+        }
+      }
+      onDone()
+      return
     } catch (err) {
       setError(String(err))
     } finally {
@@ -804,8 +1105,9 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-card border border-border rounded-xl p-5 w-96 shadow-2xl max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-sm font-semibold text-foreground mb-4">添加厂商</h3>
+        <h3 className="text-sm font-semibold text-foreground mb-4">{editing ? '编辑厂商' : '添加厂商'}</h3>
 
+        {!editing && (
         <div className="mb-3">
           <p className="text-xs text-muted-foreground mb-1.5">快速选择：</p>
           <div className="flex flex-wrap gap-1.5">
@@ -824,6 +1126,7 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             ))}
           </div>
         </div>
+        )}
 
         <div className="space-y-3">
           <div>
@@ -844,6 +1147,9 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
               placeholder="例如：https://api.openai.com/v1"
             />
           </div>
+          {/* ── 新建：单账号（Key / 通道 / 订阅费与旧版一致）；编辑时这些字段下沉到下方「账号」区 ── */}
+          {!editing && (
+          <>
           <div>
             <label className="text-xs text-muted-foreground block mb-1">API Key（回环地址可留空）</label>
             <input
@@ -854,6 +1160,211 @@ function AddProviderDialog({ onClose, onDone }: { onClose: () => void; onDone: (
               placeholder="sk-...（本地回环地址可留空）"
             />
           </div>
+
+          {/* 计费通道：按量（默认）/ Plan（订阅·Token 包） */}
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">计费通道</label>
+            <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5 w-fit">
+              {(['usage', 'plan'] as const).map((b) => (
+                <button
+                  key={b}
+                  type="button"
+                  onClick={() => setBilling(b)}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                    billing === b
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {b === 'usage' ? '按量' : 'Plan（订阅）'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Plan 三件套：每期消费金额 / 币种 / 周期起始日（读时按月分桶摊销） */}
+          {billing === 'plan' && (
+            <div className="space-y-2 rounded-md border border-border bg-muted/30 p-2">
+              <div className="flex items-end gap-2">
+                <div className="flex-1 min-w-0">
+                  <label className="text-xs text-muted-foreground block mb-1">每期消费金额（月）</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={planAmount}
+                    onChange={(e) => setPlanAmount(e.target.value)}
+                    placeholder="如：68（留空 = 未配置，按单价估算）"
+                    className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-1">币种</label>
+                  <select
+                    value={planCurrency}
+                    onChange={(e) => setPlanCurrency(e.target.value as 'CNY' | 'USD')}
+                    className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <option value="CNY">CNY（¥）</option>
+                    <option value="USD">USD（$）</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">周期起始日</label>
+                <input
+                  type="date"
+                  value={planDate}
+                  onChange={(e) => setPlanDate(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                <p className="text-[10px] text-muted-foreground mt-1">摊销按月分桶，缺省当月 1 号；年费÷12 填入</p>
+              </div>
+            </div>
+          )}
+          </>
+          )}
+
+          {/* ── 编辑：账号管理（同一来源可挂多个账号，Plan 账号与按量账号各配各的 Key）── */}
+          {editing && cur && (
+          <div className="rounded-md border border-border bg-muted/30 p-2 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">账号（{liveCount}）</span>
+              <button
+                type="button"
+                onClick={addDraft}
+                className="flex items-center gap-1 text-xs text-primary hover:text-primary/80"
+              >
+                <Plus className="w-3 h-3" /> 添加账号
+              </button>
+            </div>
+
+            {/* 账号切换：点选后下方表单编辑该账号 */}
+            <div className="flex flex-wrap gap-1">
+              {drafts.map((d, i) => (
+                <button
+                  key={d.id ?? `new-${i}`}
+                  type="button"
+                  onClick={() => setSel(i)}
+                  className={`px-2 py-1 text-xs rounded-md border transition-colors ${
+                    i === sel
+                      ? 'border-primary bg-primary/10 text-foreground'
+                      : 'border-border text-muted-foreground hover:border-primary/50'
+                  }`}
+                  title={d.label || undefined}
+                >
+                  {accountDraftName(d)}
+                  {d.id !== null && activeSel === i && (
+                    <span className="ml-1 text-[10px] text-primary">当前</span>
+                  )}
+                  {d.id === null && <span className="ml-1 text-[10px] text-muted-foreground">新</span>}
+                </button>
+              ))}
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">账号备注（可空）</label>
+              <input
+                value={cur.label}
+                onChange={(e) => patchDraft(sel, { label: e.target.value })}
+                className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder="例如：工作号 / 家庭号"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">该账号的计费通道</label>
+              <div className="flex items-center gap-1 bg-muted rounded-lg p-0.5 w-fit">
+                {(['usage', 'plan'] as const).map((b) => (
+                  <button
+                    key={b}
+                    type="button"
+                    onClick={() => patchDraft(sel, { billing: b })}
+                    className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                      cur.billing === b
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {b === 'usage' ? '按量' : 'Plan（订阅）'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {cur.billing === 'plan' && (
+              <div className="space-y-2 rounded-md border border-border bg-muted/40 p-2">
+                <div className="flex items-end gap-2">
+                  <div className="flex-1 min-w-0">
+                    <label className="text-xs text-muted-foreground block mb-1">每期消费金额（月）</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={cur.planAmount}
+                      onChange={(e) => patchDraft(sel, { planAmount: e.target.value })}
+                      placeholder="如：68（留空 = 未配置，按单价估算）"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground block mb-1">币种</label>
+                    <select
+                      value={cur.planCurrency}
+                      onChange={(e) => patchDraft(sel, { planCurrency: e.target.value as 'CNY' | 'USD' })}
+                      className="rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    >
+                      <option value="CNY">CNY（¥）</option>
+                      <option value="USD">USD（$）</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-1">周期起始日</label>
+                  <input
+                    type="date"
+                    value={cur.planDate}
+                    onChange={(e) => patchDraft(sel, { planDate: e.target.value })}
+                    className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <p className="text-[10px] text-muted-foreground mt-1">摊销按月分桶，缺省当月 1 号；年费÷12 填入</p>
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">该账号的 API Key（回环地址可留空）</label>
+              <input
+                type="password"
+                value={cur.apiKey}
+                onChange={(e) => patchDraft(sel, { apiKey: e.target.value })}
+                className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder="sk-...（每个账号各自独立，互不共享）"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-2 pt-0.5">
+              <button
+                type="button"
+                onClick={() => setActiveSel(sel)}
+                disabled={activeSel === sel}
+                className="px-2 py-1 text-xs rounded-md border border-border text-muted-foreground hover:text-foreground disabled:opacity-40"
+                title="调用与成本记账改用该账号"
+              >
+                {activeSel === sel ? '当前使用中' : '设为当前账号'}
+              </button>
+              <button
+                type="button"
+                onClick={() => removeDraft(sel)}
+                disabled={liveCount <= 1}
+                className="px-2 py-1 text-xs rounded-md border border-border text-muted-foreground hover:text-destructive disabled:opacity-40"
+                title={liveCount <= 1 ? '至少保留一个账号' : '删除该账号（凭据与用量一并移除）'}
+              >
+                删除账号
+              </button>
+            </div>
+          </div>
+          )}
         </div>
 
         {error && <p className="text-xs text-destructive mt-2">{error}</p>}
@@ -890,7 +1401,7 @@ function TitleSettingsSection() {
     .filter((p) => hasProviderAccess(p))
     .flatMap((p) =>
     (p.models || []).map((m) => ({
-      label: `${p.name} · ${m.id}`,
+      label: `${p.name} · ${m.id}（${p.billing === 'plan' ? 'Plan' : '按量'}）`,
       value: `${p.id}:${m.id}`,
       providerId: p.id,
       modelId: m.id
@@ -1056,7 +1567,12 @@ function PricingRow({
   onRemove,
   unitLabel = '$/M',
   probedWindows,
-  probedTimezone
+  probedTimezone,
+  probedMonthlyCredits,
+  probedUsageLimits,
+  showMonthlyCredits,
+  showUsageLimits,
+  currency = 'USD'
 }: {
   modelId: string
   config: PricingConfig
@@ -1066,6 +1582,15 @@ function PricingRow({
   /** 探查到的官方峰谷窗口（只读展示） */
   probedWindows?: PricingWindow[]
   probedTimezone?: string
+  /** 探查到的月度额度（Monthly credits，只读展示） */
+  probedMonthlyCredits?: number
+  /** 探查到的用量限额（官方估算请求数，只读展示） */
+  probedUsageLimits?: ProbedUsageLimits
+  /** 是否显示「月额度」/「Usage limits」列（源级条件，须与表头一致） */
+  showMonthlyCredits?: boolean
+  showUsageLimits?: boolean
+  /** 货币（月额度格式化用；与 formatCost 的口径一致） */
+  currency?: 'CNY' | 'USD'
 }) {
   const [editingKey, setEditingKey] = useState(false)
   const [keyDraft, setKeyDraft] = useState(modelId)
@@ -1097,6 +1622,14 @@ function PricingRow({
 
   const numInputCls =
     'min-w-0 flex-1 text-right rounded border border-input bg-background px-1.5 py-1 text-xs text-foreground placeholder:text-muted-foreground/60'
+
+  // 只读额度列文本：月额度（原币格式化）与 Usage limits（5 小时 / 每周 / 每月 请求数）
+  const mcText = probedMonthlyCredits !== undefined ? formatCost(probedMonthlyCredits, currency) : '—'
+  const ul = probedUsageLimits
+  const hasUl = !!ul && (ul.fiveHour !== undefined || ul.weekly !== undefined || ul.monthly !== undefined)
+  const cellNum = (v: number | undefined) => (v !== undefined ? v.toLocaleString() : '—')
+  const ulText = hasUl ? `${cellNum(ul!.fiveHour)} / ${cellNum(ul!.weekly)} / ${cellNum(ul!.monthly)}` : '—'
+  const extraCols = (showMonthlyCredits ? 1 : 0) + (showUsageLimits ? 1 : 0)
 
   return (
     <>
@@ -1226,10 +1759,30 @@ function PricingRow({
             </button>
           </div>
         </td>
+        {showMonthlyCredits && (
+          <td
+            className="py-1.5 px-1 text-right text-xs tabular-nums text-muted-foreground"
+            title="该模型月度额度（订阅计划页 Monthly credits，只读）"
+          >
+            {mcText}
+          </td>
+        )}
+        {showUsageLimits && (
+          <td
+            className="py-1.5 px-1 text-right text-[10px] tabular-nums text-muted-foreground whitespace-nowrap"
+            title={
+              hasUl
+                ? '官方估算请求数：5 小时 / 每周 / 每月（只读）'
+                : '暂无用量限额数据（计划页 Usage limits 区块抓取后显示）'
+            }
+          >
+            {ulText}
+          </td>
+        )}
       </tr>
       {showWindows && (
         <tr className="border-b border-border/50 bg-accent/10">
-          <td colSpan={6} className="py-2 px-3">
+          <td colSpan={6 + extraCols} className="py-2 px-3">
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-foreground">峰谷定价（多时段）</span>
@@ -1368,6 +1921,30 @@ function PricingRow({
 
 // ── Pricing Probe Section（官方定价探查）──
 
+/** 宽松归一化键：小写 + 分隔符/括号 → 空格（与主进程 probe.ts 的匹配口径一致；用于历史旧形态条目兜底） */
+function looseModelKey(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[-‐‑‒–—―_./,()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * 探查 pattern 与模型 ID 是否视为同一模型。
+ * 新探条目 pattern 已规范化到 /models ID（精确/前缀即命中）；此处的归一化兜底覆盖两类历史数据：
+ * 旧形态显示名（"Kimi K3" ↔ "moonshotai/Kimi-K3"）与带厂商前缀的条目（"Qwen/Qwen3.8-Max" ↔ "Qwen/Qwen3.8-Max"）。
+ */
+function probedPatternMatches(pattern: string, modelId: string): boolean {
+  if (!pattern) return false
+  if (pattern === modelId || modelId.startsWith(pattern)) return true
+  const p = looseModelKey(pattern)
+  const m = looseModelKey(modelId)
+  if (!p || !m) return false
+  return m === p || m.endsWith(` ${p}`) || m.includes(` ${p} `) || p.endsWith(` ${m}`) || p.includes(` ${m} `)
+}
+
 function ProbeSection() {
   const { settings, loadSettings, updateSetting } = useSettingsStore()
   const providers = useConfigStore((s) => s.providers)
@@ -1377,8 +1954,6 @@ function ProbeSection() {
   // 探查运行状态放全局 store：切换页面组件卸载后仍能保留"探查中"状态
   const { busy, runningIds, messages, progress, setBusy, setRunningIds, setMessages, setProgress, collapsed, toggleCollapsed, sorts, setSort } =
     useProbeStore()
-  // 模型月额度区块展开状态（按源 ID 集合；map 回调内不能用 hooks，状态放组件顶层）
-  const [mcOpen, setMcOpen] = useState<Set<string>>(new Set())
 
   // 探查运行状态与进度由全局订阅（probeStore.initProbeStateSubscription，App 挂载时建立）
   // 统一维护：后台自动刷新期间打开本页同样能看到「正在刷新」与进度
@@ -1488,11 +2063,9 @@ function ProbeSection() {
   }
 
   // ── 手动定价覆盖（每个源内）──
-  /** 该源探查到的条目（前缀匹配模型 ID），用于默认填入与峰谷展示 */
+  /** 该源探查到的条目（精确/前缀/归一化宽松匹配模型 ID），用于默认填入与峰谷展示 */
   const probedEntryFor = (sourceId: string, modelId: string): ProbedPricingEntry | undefined =>
-    probed.find(
-      (e) => e.sourceId === sourceId && (e.pattern === modelId || modelId.startsWith(e.pattern))
-    )
+    probed.find((e) => e.sourceId === sourceId && probedPatternMatches(e.pattern, modelId))
 
   /** 该源探查到的价格（前缀匹配模型 ID），用于定价框默认填入 */
   const probedPriceFor = (sourceId: string, modelId: string): PricingConfig | null => {
@@ -1724,12 +2297,28 @@ function ProbeSection() {
       <div className="space-y-4">
         {visibleSources.map((s) => {
           const meta = sourceMeta(s.id)
+          // 额度列显示条件（源级）：≥1 条目含该值才加列（无数据源表结构不变，列宽不受影响）
+          const hasMcCol = meta.entries.some((e) => e.monthlyCredits !== undefined)
+          const hasUlCol = meta.entries.some(
+            (e) =>
+              !!e.usageLimits &&
+              (e.usageLimits.fiveHour !== undefined ||
+                e.usageLimits.weekly !== undefined ||
+                e.usageLimits.monthly !== undefined)
+          )
+          // 源绑定的厂商（通道徽标由此推导；未绑定不标）
+          const boundProvider = providerForSource(s)
           return (
             <div key={s.id} className="rounded-lg border border-border p-4 space-y-3">
               {/* 顶部：厂商名标题 + 结果提示 + 探查按钮 + 开关 + 删除 */}
               <div className="flex items-center gap-3">
                 <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" title={s.name}>
                   {s.name}
+                  {boundProvider && (
+                    <span className={`ml-1 text-[10px] font-normal ${boundProvider.billing === 'plan' ? 'text-primary' : 'text-muted-foreground'}`}>
+                      （{boundProvider.billing === 'plan' ? 'Plan' : '按量'}）
+                    </span>
+                  )}
                 </h3>
                 {messages[s.id] && (
                   <span
@@ -1818,6 +2407,20 @@ function ProbeSection() {
                     </span>
                   </label>
 
+                  {/* 套餐外模型定价补全（仅 Command Code）：计划页未列出的模型（如 premium）用全站 models 页补价 */}
+                  {providerForSource(s)?.baseUrl?.includes('api.commandcode.ai') && (
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>补全套餐外模型定价</span>
+                      <ToggleSwitch
+                        checked={s.fetchAllModelsPricing !== false}
+                        onChange={(v) => updateSource(s.id, { fetchAllModelsPricing: v })}
+                      />
+                      <span className="text-muted-foreground/70">
+                        额外抓全站模型页（commandcode.ai/models），为套餐计划页未列出的模型（Claude/GPT 等 premium）补充定价
+                      </span>
+                    </label>
+                  )}
+
                   <label className="block">
                     <span className="text-xs text-muted-foreground">官方定价页 URL</span>
                     <input
@@ -1878,25 +2481,52 @@ function ProbeSection() {
                               </th>
                             )
                           })}
+                          {hasMcCol && (
+                            <th
+                              className="py-1 px-1 w-[64px] text-right text-muted-foreground font-medium"
+                              title="订阅计划页 Monthly credits：该模型的月度额度（只读）"
+                            >
+                              月额度
+                            </th>
+                          )}
+                          {hasUlCol && (
+                            <th
+                              className="py-1 px-1 w-[130px] text-right text-muted-foreground font-medium"
+                              title="官方估算请求数：5 小时 / 每周 / 每月（只读）"
+                            >
+                              Usage limits
+                            </th>
+                          )}
                           <th className="py-1 px-1 w-6"></th>
                         </tr>
                       </thead>
                       <tbody>
-                        {sortModelIds(s.id, manualModelIds(s)).map((modelId) => (
-                          <PricingRow
-                            key={modelId}
-                            modelId={modelId}
-                            config={manualPrice(s.id, modelId)}
-                            onChange={(cfg) => setManualPrice(modelId, cfg)}
-                            onRemove={() => removeManualModel(modelId)}
-                            unitLabel={priceUnitLabel(s.id, modelId)}
-                            probedWindows={probedEntryFor(s.id, modelId)?.windows}
-                            probedTimezone={probedEntryFor(s.id, modelId)?.timezone}
-                          />
-                        ))}
+                        {sortModelIds(s.id, manualModelIds(s)).map((modelId) => {
+                          const pe = probedEntryFor(s.id, modelId)
+                          return (
+                            <PricingRow
+                              key={modelId}
+                              modelId={modelId}
+                              config={manualPrice(s.id, modelId)}
+                              onChange={(cfg) => setManualPrice(modelId, cfg)}
+                              onRemove={() => removeManualModel(modelId)}
+                              unitLabel={priceUnitLabel(s.id, modelId)}
+                              probedWindows={pe?.windows}
+                              probedTimezone={pe?.timezone}
+                              probedMonthlyCredits={pe?.monthlyCredits}
+                              probedUsageLimits={pe?.usageLimits}
+                              showMonthlyCredits={hasMcCol}
+                              showUsageLimits={hasUlCol}
+                              currency={settings.currency}
+                            />
+                          )
+                        })}
                         {manualModelIds(s).length === 0 && (
                           <tr>
-                            <td colSpan={6} className="text-center py-3 text-muted-foreground text-xs">
+                            <td
+                              colSpan={6 + (hasMcCol ? 1 : 0) + (hasUlCol ? 1 : 0)}
+                              className="text-center py-3 text-muted-foreground text-xs"
+                            >
                               暂无模型。点击「更新模型」从该厂商拉取模型列表后设置手动价格。
                             </td>
                           </tr>
@@ -1906,67 +2536,6 @@ function ProbeSection() {
                     )}
                   </div>
 
-                  {/* 模型月额度：订阅计划页 Monthly credits 列探查结果（仅 ≥1 条目含该值时显示） */}
-                  {(() => {
-                    const mcEntries = meta.entries
-                      .filter((e): e is ProbedPricingEntry & { monthlyCredits: number } => e.monthlyCredits !== undefined)
-                      .sort((a, b) => b.monthlyCredits - a.monthlyCredits || a.pattern.localeCompare(b.pattern))
-                    if (mcEntries.length === 0) return null
-                    const open = mcOpen.has(s.id)
-                    return (
-                      <div className="border-t border-border pt-3">
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() =>
-                              setMcOpen((prev) => {
-                                const next = new Set(prev)
-                                if (next.has(s.id)) next.delete(s.id)
-                                else next.add(s.id)
-                                return next
-                              })
-                            }
-                            className="flex items-center gap-1 text-xs font-semibold text-muted-foreground hover:text-foreground"
-                          >
-                            <ChevronDown
-                              className={`w-3.5 h-3.5 transition-transform ${open ? '' : '-rotate-90'}`}
-                            />
-                            模型月额度（{mcEntries.length} 条）
-                          </button>
-                          <a
-                            href={mcEntries[0].sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-xs text-muted-foreground/70 hover:text-primary underline underline-offset-2"
-                            title={`来源（实际抓取的定价页）：${mcEntries[0].sourceUrl}`}
-                          >
-                            来源
-                          </a>
-                        </div>
-                        {open && (
-                          <table className="w-full text-xs table-fixed mt-1.5">
-                            <thead>
-                              <tr className="border-b border-border text-muted-foreground">
-                                <th className="text-left px-2 py-1 font-medium">模型</th>
-                                <th className="text-right px-2 py-1 font-medium w-[96px]">月额度</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {mcEntries.map((e) => (
-                                <tr key={e.pattern} className="border-b border-border/50 last:border-0">
-                                  <td className="px-2 py-1 font-mono truncate" title={e.pattern}>
-                                    {e.pattern}
-                                  </td>
-                                  <td className="px-2 py-1 text-right tabular-nums">
-                                    {formatCost(e.monthlyCredits, settings.currency)}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        )}
-                      </div>
-                    )
-                  })()}
                 </>
               )}
             </div>

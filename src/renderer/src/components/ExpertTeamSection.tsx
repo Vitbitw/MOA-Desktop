@@ -53,9 +53,9 @@ export default function ExpertTeamSection({ subModels, setSubModels, notifySaveR
   // pending 作答草稿（与 pending.questions 等长；项可为空串）
   const [answers, setAnswers] = useState<string[]>([])
 
-  // 全量模型选项（与 MoASection 同构：不按 apiKey 过滤）
+  // 全量模型选项（与 MoASection 同构：不按 apiKey 过滤；label 带计费通道徽标）
   const allModelOptions = useMemo<ModelOption[]>(
-    () => providers.flatMap((p) => (p.models || []).map((m) => ({ label: `${p.name} · ${m.id}`, value: `${p.id}:${m.id}` }))),
+    () => providers.flatMap((p) => (p.models || []).map((m) => ({ label: `${p.name} · ${m.id}（${p.billing === 'plan' ? 'Plan' : '按量'}）`, value: `${p.id}:${m.id}` }))),
     [providers]
   )
 

@@ -12,14 +12,68 @@ export type SubModelRole =
   | ''
 
 // ─── Providers ───
+/**
+ * 厂商账号：一个来源（厂商）下可挂无限个账号，每个账号自带 API Key / 计费通道 / Plan 配置。
+ * 通道与订阅费属于账号而非来源——同一来源的 Plan 账号与按量账号互不共享，读写各走各的账号 id。
+ */
+export interface ProviderAccount {
+  id: string
+  providerId: string
+  /** 账号备注名（如「工作号」）；空串时 UI 按计费通道显示 */
+  label: string
+  /** 该账号的计费通道：'usage' = 按量 | 'plan' = 订阅/Token 包（成本按期内消费比值摊销） */
+  billing: 'usage' | 'plan'
+  /** Plan 通道每期（月）实际消费（手填）；未配置时省略 → 消费端回退单价链估算 */
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
+  /** 是否为该来源当前用于调用与记账的账号（每来源至多一个） */
+  active: boolean
+  /** 该账号的 API Key（设置页编辑账号时展示用；调用侧仍走 Provider.apiKey 投影） */
+  apiKey: string
+}
+
 export interface Provider {
   id: string
   name: string
   baseUrl: string
-  apiKey: string
   models: ModelInfo[]
   enabled: boolean
   builtIn?: boolean
+  /** 该来源下全部账号（≥1），按创建顺序 */
+  accounts: ProviderAccount[]
+  /** 当前账号 id（accounts 中 active=true 的那条；数据异常时为第一条） */
+  activeAccountId: string
+  /**
+   * 以下三项均为**当前账号的投影**（调用链 / 成本记账只认这三项，不关心账号层数）：
+   * 计费通道：'usage' = 按量 | 'plan' = 订阅/Token 包
+   */
+  billing: 'usage' | 'plan'
+  /** 当前账号的 Plan 每期消费；未配置时省略 → 消费端回退单价链估算 */
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
+  /** 当前账号的 API Key */
+  apiKey: string
+}
+
+/** providers 编辑入参（updateProvider patch）：仅传入的字段更新，未传入的保持原值。账号级字段走 ProviderAccountPatch */
+export interface ProviderUpdatePatch {
+  name?: string
+  baseUrl?: string
+}
+
+/** 账号编辑入参（updateProviderAccount patch）：仅传入的字段更新 */
+export interface ProviderAccountPatch {
+  label?: string
+  billing?: 'usage' | 'plan'
+  /** 传 null 清空订阅费配置（amount / currency / anchor 三列一并重置） */
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number } | null
+}
+
+/** 新增账号入参（addProviderAccount） */
+export interface ProviderAccountInput {
+  label?: string
+  billing?: 'usage' | 'plan'
+  plan?: { amount: number; currency: 'USD' | 'CNY'; anchorTs?: number }
+  /** 账号 API Key（省略 / 空串 = 暂不配置，保存后可单独填写） */
+  apiKey?: string
 }
 
 export interface ModelInfo {
@@ -139,6 +193,8 @@ export interface AppSettings {
   pricingProbe: PricingProbeSettings
   /** 定价探查页面级缓存（页面哈希 + 定价区块锚句；独立持久化，不入 pricingProbe） */
   pricingProbeCache?: Record<string, PricingPageCache>
+  /** 计费通道一次性 backfill 已执行（v4：置位后重启不再补写，避免覆盖用户手动改回的 billing） */
+  billingBackfillDone?: boolean
 }
 
 export interface PricingConfig {
@@ -238,11 +294,11 @@ export interface UsageRow { key: string; requests: number; success: number; prom
 export interface UsageSummary { range: UsageRange; groupBy: UsageGroupBy; totals: { requests: number; success: number; prompt: number; completion: number; cost: number }; rows: UsageRow[] }
 export interface UsageToday { prompt: number; completion: number; cost: number; running: boolean }
 
-// ─── Cloud Usage Monitoring (Command Code / Xiaomi MiMo / DeepSeek) ───
-/** 云端用量监控源类型（当前支持 Command Code / Xiaomi MiMo / DeepSeek，后续可扩展） */
-export type RemoteUsageSourceType = 'commandcode' | 'mimo' | 'deepseek'
+// ─── Cloud Usage Monitoring (Command Code / Xiaomi MiMo / DeepSeek / OpenCode Go) ───
+/** 云端用量监控源类型（当前支持 Command Code / Xiaomi MiMo / DeepSeek / OpenCode Go，后续可扩展） */
+export type RemoteUsageSourceType = 'commandcode' | 'mimo' | 'deepseek' | 'opencode'
 
-/** 一个云端用量监控源（如 Command Code Studio 账号） */
+/** 一个云端用量监控源（如 Command Code Studio），下挂无限个账号 */
 export interface RemoteUsageSource {
   id: string
   type: RemoteUsageSourceType
@@ -251,9 +307,25 @@ export interface RemoteUsageSource {
   enabled: boolean
 }
 
+/**
+ * 一个云监控账号：凭据、用量快照、本地累计全部按本 id 隔离（换账号/删账号互不串号）。
+ * 每源至少一个账号；默认账号的 id = 所属源 id（历史凭据与三张表的 source_id 原样沿用，零迁移）。
+ */
+export interface MonitorAccount {
+  id: string
+  /** 所属监控源 id（RemoteUsageSource.id） */
+  sourceId: string
+  /** 账号备注名（如「工作号」）；空串时 UI 按计费通道显示 */
+  label: string
+  /** 账号用途标记：'plan' = 订阅套餐账号 | 'usage' = 按量计费账号 */
+  billing: 'plan' | 'usage'
+}
+
 export interface MonitoringSettings {
   /** 已启用的云端用量监控源列表 */
   sources: RemoteUsageSource[]
+  /** 各源下的账号列表（读设置时自动为缺失的源补默认账号，见 config/appSettings.ts） */
+  accounts: MonitorAccount[]
   /**
    * 统一自动刷新间隔（分钟），0 表示关闭。
    * 页面数据刷新（本页打开期间）与 Command Code 后台明细采集共用此值；
@@ -365,6 +437,59 @@ export interface CommandCodeUsage {
   }
 }
 
+// ─── OpenCode Go 用量 ───
+
+/** OpenCode Go 单个用量窗口（GET /zen/go/v1/usage 服务端原值） */
+export interface OpenCodeWindowInfo {
+  /** 服务端 status 原值（实测 'ok'；未知值原样保留，UI 不消费） */
+  status?: string
+  /** 已用百分比（服务端整数 0-100，越界夹取） */
+  usedPercent?: number
+  /** 重置时间（epoch 秒；由 ISO resetsAt 归一） */
+  resetAt?: number
+}
+
+/** OpenCode Go 用量归一化数据（v2：区块级降级——windows 失败走错误码，detail 失败仅明细区块降级） */
+export interface OpenCodeUsage {
+  fetchedAt: number
+  sourcesAvailable: {
+    /** /zen/go/v1/usage 三窗口 */
+    windows: boolean
+    /** /console/api/v2/usage/export 明细（失败时区块级降级） */
+    detail: boolean
+  }
+  windows: {
+    /** 5 小时滚动窗口 */
+    rolling?: OpenCodeWindowInfo
+    weekly?: OpenCodeWindowInfo
+    monthly?: OpenCodeWindowInfo
+  }
+  /** 服务端聚合口径：最近 30 个 UTC 日，按「天 × 模型」行聚合为按模型汇总 */
+  models?: Array<{
+    model: string
+    requests: number
+    /** 等价成本（USD；cost_micro_cents / 1e8，按量价格折算，非 Go 订阅实际扣费） */
+    cost: number
+    tokensIn: number
+    tokensOut: number
+    cacheReadTokens: number
+    /** 总 Tokens 口径 = 输入 + 输出 + 缓存读取 + 缓存写入（5 分钟 + 1 小时） */
+    tokensTotal: number
+  }>
+  /** 明细覆盖情况（口径标注用） */
+  modelsCoverage?: {
+    /** 请求的 range（天）：30 */
+    rangeDays: number
+    /** 实际有数据的天数 */
+    days: number
+    /** 聚合行数（天 × 模型） */
+    rows: number
+    /** 最早/最新数据日（epoch 毫秒，UTC 零点） */
+    fromTs?: number
+    toTs?: number
+  }
+}
+
 /** 监控源当前认证状态 */
 export interface MonitorStatus {
   loggedIn: boolean
@@ -442,16 +567,70 @@ export interface MimoTokenPlan {
   items: MimoTokenPlanItem[]
 }
 
+/** MiMo 订阅套餐信息（/tokenPlan/detail 归一化；字段缺失时省略）。
+ *  权威状态字段是 expired 布尔（实测 detail 无字符串 status），status 为兼容保留。 */
+export interface MimoSubscription {
+  /** 套餐代码（如 standard:year / pro，未知原样保留） */
+  planId?: string
+  /** 展示名（服务端名称字段优先；缺失时 UI 按 planId 映射） */
+  planName?: string
+  /** 订阅状态字符串（实测 detail 不提供；兼容保留，缺失时 UI 用 expired 派生） */
+  status?: string
+  /** 有效期截止 / 下次续费时间（epoch 秒，来自 currentPeriodEnd） */
+  expireAtTs?: number
+  /** 自动续费是否开启（detail.enableAutoRenew） */
+  autoRenew?: boolean
+  /** 是否已过期（detail.expired；订阅状态的权威口径） */
+  expired?: boolean
+}
+
 /** MiMo 用量归一化数据。区块可选：对应端点失败时 absent（见 sourcesAvailable） */
 export interface MimoUsage {
   fetchedAt: number
-  sourcesAvailable: { balance: boolean; tokenPlan: boolean }
+  sourcesAvailable: {
+    balance: boolean
+    tokenPlan: boolean
+    /** 订阅套餐（/tokenPlan/detail） */
+    subscription: boolean
+    /** 月度额度窗口（Token Plan 周期；MiMo 无 5h/7d 滚动窗口） */
+    windows: boolean
+    /** 汇总（当月明细行聚合） */
+    summary: boolean
+    /** 服务端聚合明细（/usage/detail/list 按量 + /usage/token-plan/list 套餐） */
+    detailList: boolean
+  }
   balance?: MimoBalance
   tokenPlan?: MimoTokenPlan
+  /** 订阅套餐（含有效期）；无订阅时 absent（sourcesAvailable.subscription 仍为 true） */
+  subscription?: MimoSubscription
+  /** 额度窗口：monthly = Token Plan 周期额度（MiMo 无 5h/7d 滚动窗口） */
+  windows?: { monthly?: UsageWindowInfo }
+  summary?: {
+    totalCount: number
+    /** 总成本（USD 归一）= 按量计费金额；区间内无按量行（纯套餐）时省略（UI 显示 —） */
+    totalCost?: number
+    totalTokens: number
+    /** 统计区间（如 'current-month' = 当前自然月，与模型明细同源同区间） */
+    periodBasis?: string
+  }
+  /** 服务端聚合口径的模型明细（按量与套餐明细按「日期 × 模型」合并后按 model 聚合） */
+  monthlyModels?: {
+    rows: Array<{
+      model: string
+      requests: number
+      /** 成本（USD 归一）；仅含按量计费金额，该模型无按量行时省略（UI 显示 —） */
+      cost?: number
+      tokensIn: number
+      tokensOut: number
+      tokensTotal: number
+    }>
+    /** 覆盖区间（当月行的最早/最晚日期，epoch 毫秒） */
+    window?: { fromTs?: number; toTs?: number }
+  }
 }
 
 /** 任意监控源的归一化用量（monitor:refresh 返回值，按 source.type 区分结构） */
-export type MonitorUsage = CommandCodeUsage | MimoUsage | DeepSeekUsage
+export type MonitorUsage = CommandCodeUsage | MimoUsage | DeepSeekUsage | OpenCodeUsage
 
 // ─── DeepSeek 用量 ───
 
@@ -518,6 +697,16 @@ export interface PricingWindow {
   days?: number[]
 }
 
+/** 用量限额（订阅计划页 Usage limits 区块）：官方估算的「请求数/窗口」（按套餐额度与模型单价折算） */
+export interface ProbedUsageLimits {
+  /** 5 小时滚动窗口可发请求数（官方估算） */
+  fiveHour?: number
+  /** 每周滚动窗口可发请求数（官方估算） */
+  weekly?: number
+  /** 每计费月可发请求数（官方估算） */
+  monthly?: number
+}
+
 /** 一条探查到的官方定价（统一存储为 USD / 1M tokens） */
 export interface ProbedPricingEntry {
   /** 模型 ID 前缀（最长前缀匹配，与 DEFAULT_PRICING 语义一致） */
@@ -530,12 +719,18 @@ export interface ProbedPricingEntry {
   windows?: PricingWindow[]
   /** 模型月度额度（订阅计划页 Monthly credits 列，USD）；仅 Command Code 等有该概念的源有值 */
   monthlyCredits?: number
+  /** 用量限额（订阅计划页 Usage limits 区块，官方估算的「请求数/窗口」）；仅 Command Code 等有该概念的源有值 */
+  usageLimits?: ProbedUsageLimits
   /** 窗口时区（IANA），探查时从源写入，默认 Asia/Shanghai */
   timezone?: string
   /** 官方页原始币种（存储价格统一折算为 USD） */
   currency?: 'USD' | 'CNY'
   /** 官方页计费单位描述（如 "per 1M tokens" / "per 1K tokens" / "per request"）；空则按 1M tokens */
   unit?: string
+  /** 绑定的厂商记录 ID（探查源绑定 provider 时写入，设计 §5）：命中时仅对该厂商的调用生效；缺省 = 通用条目（旧数据天然兼容），对所有通道命中 */
+  providerId?: string
+  /** 绑定厂商的计费通道（探查写入时快照，用于 UI 通道徽标）：'usage' = 按量 | 'plan' = Plan */
+  billing?: 'usage' | 'plan'
   /** 来源与时间元数据（UI 展示 + 自动刷新判断） */
   sourceId: string
   sourceUrl: string
@@ -555,6 +750,12 @@ export interface PricingProbeSource {
   enabled: boolean
   /** 探查前是否先执行 /models 获取/更新该厂商的模型 ID 作为提取关键词（缺省 = true） */
   fetchModelsBeforeProbe?: boolean
+  /**
+   * 是否补全「套餐计划页未覆盖的模型」定价（缺省 = true；仅 Command Code 源生效）。
+   * 开启后额外抓全站模型页（commandcode.ai/models），为套餐外模型（如 premium / 未在计划页列出的）
+   * 定向补充定价；关闭则只保留套餐计划页覆盖的模型。
+   */
+  fetchAllModelsPricing?: boolean
 }
 
 /** 单个源的页面级探查缓存（独立于 sources 持久化，UI 编辑源时不会误覆盖） */

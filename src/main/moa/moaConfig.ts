@@ -6,7 +6,7 @@ import { getDatabase } from '../db/database'
 const CONFIG_KEY = 'moa_runtime_config'
 
 export interface MoaRuntimeConfig {
-  /** 已废弃：网关固定聚合模式、聊天模式由输入框按钮控制，此字段不再影响行为（保留仅为旧配置兼容） */
+  /** 已废弃：网关出口模式见 gatewayDirectModel（缺省聚合）；聊天模式由输入框按钮控制，此字段不再影响行为（保留仅为旧配置兼容） */
   mode: MoAMode
   subModels: SubModelConfig[]
   aggregator: AggregatorConfig | null
@@ -16,6 +16,9 @@ export interface MoaRuntimeConfig {
   architecture: MoaArchitecture
   /** 网关独立协作架构：缺省（undefined）= 跟随全局 architecture；仅影响网关出口（聊天侧恒用全局） */
   gatewayArchitecture?: MoaArchitecture
+  /** 网关出口模式：单模型直通模型（'providerId:modelId'，splitModelKey 解析）；缺省（undefined）= 聚合（席位全体参与）。
+   *  仅影响网关出口（聊天侧不受影响）；配置失效（厂商被删/停用/不可用、模型不在其列表）时网关回落常规链路 */
+  gatewayDirectModel?: string
 }
 
 interface DbConfigRow {
@@ -78,7 +81,12 @@ export function loadMoaConfigFromDb(): void {
         aggregationPromptVariant: parsed.aggregationPromptVariant || 'standard-zh',
         customAggregationPrompt: parsed.customAggregationPrompt,
         architecture: parsed.architecture || 'election',
-        gatewayArchitecture: parsed.gatewayArchitecture || undefined
+        gatewayArchitecture: parsed.gatewayArchitecture || undefined,
+        // 防御：非字符串垃圾值（手工改库）会让 splitModelKey 抛错——加载期收敛为 undefined
+        gatewayDirectModel:
+          typeof parsed.gatewayDirectModel === 'string' && parsed.gatewayDirectModel !== ''
+            ? parsed.gatewayDirectModel
+            : undefined
       }
       if (migrated) {
         // 回写失败仅记日志、不阻断加载（内存态已带新 id，本次会话可用；下次启动重试落库）
@@ -94,7 +102,7 @@ export function loadMoaConfigFromDb(): void {
       }
       // 摘要一行：完整 dump 会把每个子模型的 systemPrompt 原文（数 KB）刷进日志，既刷屏又无人看
       console.log(
-        `[MoA Config] Loaded from DB: 架构=${currentConfig.architecture}, 网关架构=${currentConfig.gatewayArchitecture ?? '跟随'}, 子模型=${currentConfig.subModels.length}, 聚合=${currentConfig.aggregator?.primaryModelId ?? '无'}`
+        `[MoA Config] Loaded from DB: 架构=${currentConfig.architecture}, 网关架构=${currentConfig.gatewayArchitecture ?? '跟随'}, 网关出口=${currentConfig.gatewayDirectModel ? `直通(${currentConfig.gatewayDirectModel})` : '聚合'}, 子模型=${currentConfig.subModels.length}, 聚合=${currentConfig.aggregator?.primaryModelId ?? '无'}`
       )
     }
   } catch (err) {
@@ -110,7 +118,8 @@ export function getMoaConfig(): MoaRuntimeConfig {
     aggregator: currentConfig.aggregator ? { ...currentConfig.aggregator } : null,
     customAggregationPrompt: currentConfig.customAggregationPrompt,
     architecture: currentConfig.architecture,
-    gatewayArchitecture: currentConfig.gatewayArchitecture
+    gatewayArchitecture: currentConfig.gatewayArchitecture,
+    gatewayDirectModel: currentConfig.gatewayDirectModel
   }
 }
 

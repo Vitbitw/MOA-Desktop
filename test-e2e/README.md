@@ -4,7 +4,7 @@
 
 | 命令 | 脚本 | 作用 |
 | --- | --- | --- |
-| `npm run test:all` | （串行跑下表全部 13 个测试脚本） | 一键全量回归：任一失败即退出码 1（`test:monitor` 含在内） |
+| `npm run test:all` | （串行跑下表全部 24 个测试脚本） | 一键全量回归：任一失败即退出码 1（`test:monitor`、`test:login-window` 含在内） |
 | `npm run test:sse` | `sse-parser.cjs` | SSE 解析器：多行 data / event 透传 / 多工具调用增量 / 末帧 usage / finish_reason |
 | `npm run test:throttle` | `stream-throttle.cjs` | 节流推送器：窗口合并、终态 flush+dispose 语义 |
 | `npm run test:stream` | `stream-call.cjs` | 通用流式调用层 streamChat：三档超时 / 回退链 / 200 直回 JSON 抢救 / abort / extraBody 透传 / tool_calls 增量 |
@@ -15,8 +15,20 @@
 | `npm run test:anthropic-env` | `anthropic-endpoint.cjs` | POST /v1/messages 端到端（真实网关 + mock 上游）：流式/非流式、tools、tool_use 块、abort、direct、compare、截断映射 |
 | `npm run test:usage-window` | `usage-window.cjs` | 云端额度窗口纯函数：倒计时文案 / 重置后旧快照判定 / 待补拉筛选与闭环（5h/7d 到点自动刷新） |
 | `npm run test:monitor` | `monitor-behavior.cjs` | 云监控采集纯函数：游标分页 / 页大小探针 / 记录与 charts 解析 / 聚合 / 失败分层 / 月度额度窗口计算 |
+| `npm run test:login-window` | `monitor-login-window.cjs` | 云监控登录窗（stub Electron 驱动真实 login 函数）：分区残留旧凭证时**仍开窗** + 开窗前清理旧凭证 + 关窗捕获新凭证落库，覆盖 Command Code / MiMo / DeepSeek |
+| `npm run test:mimo-request` | `mimo-request.cjs` | MiMo 刷新请求形态回归（stub fetchProxy 驱动真实 refreshMimoUsage）：POST 端点必带 `?api-platform_ph=<cookie 去引号值>`（真实报障：缺失时恒 401 → 误报「登录已过期（Cookie 约 24h 有效）」）、GET 不带、凭证缺 ph 优雅退化、错误分层不回归 |
+| `npm run test:opencode-request` | `opencode-request.cjs` | OpenCode Go 刷新请求形态回归（stub fetchProxy / keyStore / usageAccumulator 驱动真实 refreshOpenCodeUsage / parseUsageExportCsv / aggregateExportRows）：双端点（/zen/go/v1/usage 三窗口 + /console/api/v2/usage/export CSV 明细）+ Bearer / Accept 头、实测三窗口响应解析、resetsAt 多形态归一（ISO / epoch 秒 / 毫秒 / 缺失 / 非法）、percent 越界夹取、CSV 解析矩阵（14 列表头逐字防回归锚 / 列数不足跳过 / 表头不符 null / 数值缺省 0 / day 解析）、按模型聚合（SUM + 成本降序）、落库参数（id=day\|model、cost=1e8 换算、requests 列值）、双端点降级矩阵（detail 403 / 网络失败 / CSV 不识别 / 非 200 → ok+detail=false；windows 失败 → 错误码照旧且不发 detail）、部分窗口缺失仍为 ok |
+| `npm run test:opencode-integration` | `opencode-integration.cjs` | OpenCode Go 接入回归（封堵评审 7992443 变异 c/c2/g 存活缺口）：① 源补种——stub db 驱动真实 `readAppSettings`，断言已有用户升级后 opencode 源+账号补建（顺序语义：补种先于账号补建）、幂等、禁用不复活、读侧不落库；② index.ts 监控 IPC 分派结构断言——LOGIN opencode 拒绝分支、REFRESH 挂接 refreshOpenCodeUsage、markUsageCollected 占位含 opencode（v2 设计变更：有明细可累计；与上一版断言相反） |
 | `npm run test:cloud-cache` | `cloud-monitor-cache.cjs` | 云监控页面快照缓存：get/patch/clear 语义（局部更新不丢字段、登出清空）+ 挂载拉取判定（新鲜/过期/自动刷新关闭） |
+| `npm run test:collapse` | `source-collapse.cjs` | 云监控来源折叠：lib 读写语义（默认展开 / 折叠落 localStorage / 展开移除 / 多源隔离 / 跨实例恢复 / 损坏 JSON 与非数组 / 无 localStorage 与写入失败降级）+ CloudMonitorView 四个面板折叠接线结构断言（hook 调用 / 内容包裹 / chevron 按钮，漏改任一面板即红） |
 | `npm run test:snapshot-store` | `monitor-snapshot-store.cjs` | 云监控用量快照持久化：save/get 往返、同源覆盖与源间隔离、clear、损坏 JSON 与 DB 抛错降级 |
+| `npm run test:collector` | `collector-dispatch.cjs` | 后台采集调度（stub 定时器 + 假时钟驱动真实 collector）：页面刷新占位只抑制本账号、其余账号照采（核心回归：曾用「任一账号新鲜」做全局预跳过导致整轮被吞）、间隔内不重拉、新账号下一轮可采、关闭不采、OpenCode 账号参与采集（占位抑制 + 过期恢复） |
+| `npm run test:accumulator` | `usage-accumulator.cjs` | 用量本地累计（真实 sql.js + SCHEMA）：CC 逐条 / MiMo 聚合行双口径、ON CONFLICT upsert 语义、requests 列口径、clear 与源隔离 |
+| `npm run test:probe-state` | `pricing-probe-state.cjs` | 定价探查运行状态同步（渲染端 probeStore）：结果文案映射（ok/skipped/失败）、auto 事件 → busy/runningIds 同步、manual 完成仅复位 |
+| `npm run test:probe-cc` | `pricing-probe-cc.cjs` | 定价探查 CC 增强：monthlyCredits 严格解析 / 套餐→探查目标（URL+额度列）/ prompt 指列 / 显示名→/models ID 规范化（防回归：vision-exp、27B）/ Usage limits 请求数与月额度合并 / 边界去重 |
+| `npm run test:vendor-billing` | `vendor-billing.cjs` | providerManager v5「来源 + 账号」：三件套/账号级更新/Key 写入回滚（MF-1）/backfill 一次性标记 |
+| `npm run test:provider-access` | `provider-access.cjs` | 回环免 Key 判定（localhost / 127.0.0.0/8 / ::1）与 hasProviderAccess 组合矩阵 |
+| `npm run test:account-migration` | `provider-account-migration.cjs` | v5「来源 + 账号」真实数据库迁移（真 sql.js 建老库再走 `Database.init()`）：通道/订阅费下沉到默认账号 + 删来源级列、幂等、已有账号不覆盖、active 不变量兜底、迁移后读链回归 |
 | `npm run test:expert-team` | `expert-team.cjs` | 主席团专家团：LLM 输出宽容解析 / 生成模型解析与错误路径 / 席位映射与自动扩充缩减 |
 | `npm run test:arch-persist` | `architecture-persist.cjs` | MoA 协作架构持久化（**唯一启动完整应用的测试**：需图形会话，不纳入 `test:all`）：切换即改即存 / 重启保持 + UI 同步 / 生成专家团写入不清架构 |
 | `npm run db:inspect` | `db-inspect.cjs` | 只读诊断本地 SQLite：`cc_usage_records` 采集批次、按模型汇总、监控设置 |

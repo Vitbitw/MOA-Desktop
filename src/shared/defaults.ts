@@ -20,7 +20,7 @@ export const DEFAULT_TITLE_SETTINGS = {
   language: 'auto' as const
 }
 
-/** 云端用量监控默认配置：预置启用的 Command Code / Xiaomi MiMo / DeepSeek 源 */
+/** 云端用量监控默认配置：预置启用的 Command Code / Xiaomi MiMo / DeepSeek / OpenCode Go 源 */
 export const DEFAULT_MONITORING: MonitoringSettings = {
   sources: [
     {
@@ -43,7 +43,21 @@ export const DEFAULT_MONITORING: MonitoringSettings = {
       name: 'DeepSeek 开放平台',
       studioUrl: 'https://platform.deepseek.com/usage',
       enabled: true
+    },
+    {
+      id: 'opencode',
+      type: 'opencode',
+      name: 'OpenCode Go',
+      studioUrl: 'https://opencode.ai/auth',
+      enabled: true
     }
+  ],
+  // 每源一个默认账号：**id = 源 id**（历史凭据与三张表的 source_id 直接沿用，零迁移）
+  accounts: [
+    { id: 'commandcode', sourceId: 'commandcode', label: '', billing: 'plan' },
+    { id: 'mimo', sourceId: 'mimo', label: '', billing: 'plan' },
+    { id: 'deepseek', sourceId: 'deepseek', label: '', billing: 'usage' },
+    { id: 'opencode', sourceId: 'opencode', label: '', billing: 'plan' }
   ],
   // 统一自动刷新间隔（分钟）：云监控页面数据刷新 + Command Code 后台明细采集共用；0 = 关闭
   autoRefreshMinutes: 10
@@ -235,4 +249,22 @@ export const BUILT_IN_PROVIDER_TEMPLATES = [
   { name: 'AIGoCode', baseUrl: 'https://api.aigocode.com' },
   { name: 'APIKEY.FUN', baseUrl: 'https://api.apikey.fun' },
   { name: 'SubRouter', baseUrl: 'https://subrouter.ai' }
+]
+
+// ── migrate-only 清单（T1）：仅用于 seed 预设与旧数据 backfill，新代码不得引用 ──
+// 名称必须与上方 BUILT_IN_PROVIDER_TEMPLATES 的 name 逐字一致（增删模板须同步改清单）。
+
+/** billing='plan' 名称清单（11 条，设计文档 §1：订阅制整组 7 条 + 阿里云 Token Plan 2 条 + StepFun 2 条） */
+export const PLAN_BILLING_NAMES: string[] = [
+  'Command Code',
+  'OpenCode Zen',
+  'OpenCode Go',
+  'Kilo Code',
+  'Kimi Coding Plan',
+  '阿里云 Coding Plan',
+  '阿里云 Coding Plan (国际)',
+  '阿里云 Token Plan',
+  '阿里云 Token Plan (国际)',
+  'StepFun',
+  'StepFun (国际)'
 ]
