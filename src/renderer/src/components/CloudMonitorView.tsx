@@ -5,7 +5,8 @@ import { formatCost } from '../lib/usageFormat'
 import { expiredWindows, fmtRemaining, isStaleAfterReset } from '../lib/usageWindow'
 import { clearCloudSnapshot, getCloudSnapshot, patchCloudSnapshot, shouldFetchOnMount } from '../lib/cloudMonitorCache'
 import type { CollectorStatusInfo } from '../lib/cloudMonitorCache'
-import { ExternalLink, KeyRound, Loader2, LogOut, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { isSourceCollapsed, setSourceCollapsed } from '../lib/sourceCollapse'
+import { ChevronDown, ExternalLink, KeyRound, Loader2, LogOut, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type {
   CommandCodeSubscription,
   CommandCodeUsage,
@@ -438,6 +439,23 @@ function useWindowResetRefresh(opts: {
   }, [active, usage, lastFetchedAt, refreshRef, refreshMinutes])
 }
 
+// ─── 监控源折叠（各来源面板可收起为标题行；状态键控与持久化见 lib/sourceCollapse） ───
+
+function useSourceCollapsed(sourceId: string): { collapsed: boolean; toggleCollapsed: () => void } {
+  const [collapsed, setCollapsed] = useState(() => isSourceCollapsed(sourceId))
+  // ref 跟随最新值：toggle 不依赖渲染闭包里的旧 state（同一 tick 连点也不丢）
+  const collapsedRef = useRef(collapsed)
+  return {
+    collapsed,
+    toggleCollapsed: () => {
+      const next = !collapsedRef.current
+      collapsedRef.current = next
+      setCollapsed(next)
+      setSourceCollapsed(sourceId, next)
+    }
+  }
+}
+
 // ─── 面板：Command Code 云端用量 ───
 
 function CommandCodePanel({ source, account }: { source: RemoteUsageSource; account: MonitorAccount }) {
@@ -445,6 +463,9 @@ function CommandCodePanel({ source, account }: { source: RemoteUsageSource; acco
   const currency = settings.currency
   // 凭据 / 快照 / 本地累计 / IPC 一律按**账号**键控（默认账号 id = 源 id，历史数据零迁移）
   const accountId = account.id
+
+  // 该来源面板的折叠状态（按源 id 键控；跨视图切换与应用重启保持）
+  const { collapsed, toggleCollapsed } = useSourceCollapsed(source.id)
 
   const [status, setStatus] = useState<MonitorStatus | null>(
     () => getCloudSnapshot(accountId)?.status ?? null
@@ -726,6 +747,14 @@ function CommandCodePanel({ source, account }: { source: RemoteUsageSource; acco
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-foreground flex items-center gap-2">
+            <button
+              onClick={toggleCollapsed}
+              className="p-0.5 -ml-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              title={collapsed ? '展开该来源' : '收起该来源'}
+              aria-expanded={!collapsed}
+            >
+              <ChevronDown className={`w-4 h-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+            </button>
             {source.name}
             <span
               className={`inline-block w-2 h-2 rounded-full ${loggedIn ? 'bg-green-500' : 'bg-muted'}`}
@@ -789,6 +818,9 @@ function CommandCodePanel({ source, account }: { source: RemoteUsageSource; acco
         </div>
       </div>
 
+      {/* 折叠收起：错误提示 / 空态 / 数据区（标题行与账号栏常驻可见） */}
+      {!collapsed && (
+        <>
       {/* 错误提示 */}
       {error && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive flex items-center justify-between gap-3">
@@ -1073,6 +1105,8 @@ function CommandCodePanel({ source, account }: { source: RemoteUsageSource; acco
           </section>
         </>
       )}
+        </>
+      )}
     </div>
   )
 }
@@ -1106,6 +1140,9 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
   const currency = settings.currency
   // 凭据 / 快照 / IPC 一律按**账号**键控（默认账号 id = 源 id）
   const accountId = account.id
+
+  // 该来源面板的折叠状态（按源 id 键控；跨视图切换与应用重启保持）
+  const { collapsed, toggleCollapsed } = useSourceCollapsed(source.id)
 
   const [status, setStatus] = useState<MonitorStatus | null>(
     () => getCloudSnapshot(accountId)?.status ?? null
@@ -1370,6 +1407,14 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-foreground flex items-center gap-2">
+            <button
+              onClick={toggleCollapsed}
+              className="p-0.5 -ml-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              title={collapsed ? '展开该来源' : '收起该来源'}
+              aria-expanded={!collapsed}
+            >
+              <ChevronDown className={`w-4 h-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+            </button>
             {source.name}
             <span
               className={`inline-block w-2 h-2 rounded-full ${hasApiKey ? 'bg-green-500' : 'bg-muted'}`}
@@ -1407,6 +1452,9 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
         </div>
       </div>
 
+      {/* 折叠收起：错误提示 / 凭据条 / 空态 / 数据区（标题行与账号栏常驻可见） */}
+      {!collapsed && (
+        <>
       {/* 错误提示 */}
       {error && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive flex items-center justify-between gap-3">
@@ -1682,6 +1730,8 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
           </div>
         </section>
       )}
+        </>
+      )}
     </div>
   )
 }
@@ -1824,6 +1874,9 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
   const currency = settings.currency
   // 凭据 / 快照 / 本地累计 / IPC 一律按**账号**键控（默认账号 id = 源 id，历史数据零迁移）
   const accountId = account.id
+
+  // 该来源面板的折叠状态（按源 id 键控；跨视图切换与应用重启保持）
+  const { collapsed, toggleCollapsed } = useSourceCollapsed(source.id)
 
   const [status, setStatus] = useState<MonitorStatus | null>(
     () => getCloudSnapshot(accountId)?.status ?? null
@@ -2085,6 +2138,14 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-foreground flex items-center gap-2">
+            <button
+              onClick={toggleCollapsed}
+              className="p-0.5 -ml-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              title={collapsed ? '展开该来源' : '收起该来源'}
+              aria-expanded={!collapsed}
+            >
+              <ChevronDown className={`w-4 h-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+            </button>
             {source.name}
             <span
               className={`inline-block w-2 h-2 rounded-full ${loggedIn ? 'bg-green-500' : 'bg-muted'}`}
@@ -2147,6 +2208,9 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
         </div>
       </div>
 
+      {/* 折叠收起：错误提示 / 空态 / 数据区（标题行与账号栏常驻可见） */}
+      {!collapsed && (
+        <>
       {/* 错误提示 */}
       {error && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive flex items-center justify-between gap-3">
@@ -2421,6 +2485,8 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
           </section>
         </>
       )}
+        </>
+      )}
     </div>
   )
 }
@@ -2430,6 +2496,9 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
 function DeepSeekPanel({ source, account }: { source: RemoteUsageSource; account: MonitorAccount }) {
   // 凭据 / 快照 / 本地累计 / IPC 一律按**账号**键控（默认账号 id = 源 id，历史数据零迁移）
   const accountId = account.id
+
+  // 该来源面板的折叠状态（按源 id 键控；跨视图切换与应用重启保持）
+  const { collapsed, toggleCollapsed } = useSourceCollapsed(source.id)
 
   const [status, setStatus] = useState<MonitorStatus | null>(
     () => getCloudSnapshot(accountId)?.status ?? null
@@ -2617,6 +2686,14 @@ function DeepSeekPanel({ source, account }: { source: RemoteUsageSource; account
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-foreground flex items-center gap-2">
+            <button
+              onClick={toggleCollapsed}
+              className="p-0.5 -ml-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              title={collapsed ? '展开该来源' : '收起该来源'}
+              aria-expanded={!collapsed}
+            >
+              <ChevronDown className={`w-4 h-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+            </button>
             {source.name}
             <span
               className={`inline-block w-2 h-2 rounded-full ${loggedIn ? 'bg-green-500' : 'bg-muted'}`}
@@ -2679,6 +2756,9 @@ function DeepSeekPanel({ source, account }: { source: RemoteUsageSource; account
         </div>
       </div>
 
+      {/* 折叠收起：错误提示 / 空态 / 数据区（标题行与账号栏常驻可见） */}
+      {!collapsed && (
+        <>
       {/* 错误提示 */}
       {error && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive flex items-center justify-between gap-3">
@@ -2880,6 +2960,8 @@ function DeepSeekPanel({ source, account }: { source: RemoteUsageSource; account
               </table>
             </div>
           </section>
+        </>
+      )}
         </>
       )}
     </div>
