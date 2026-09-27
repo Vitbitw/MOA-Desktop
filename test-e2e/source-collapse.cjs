@@ -165,9 +165,15 @@ async function main() {
     )
     ok(seg.includes('onClick={toggleCollapsed}'), `${name}：标题行有折叠按钮`)
     ok(seg.includes('ChevronDown') && seg.includes("'-rotate-90'"), `${name}：chevron 折叠态旋转`)
+    // 折叠态补文字状态：必须在 h2 内（标题行常驻），且区分登录过期态
+    const statusIdx = seg.indexOf('{collapsed && (')
+    ok(statusIdx > 0 && statusIdx < seg.indexOf('</h2>'), `${name}：折叠态文字状态在 h2 内（标题行常驻）`)
+    ok(seg.includes("errorCode === 'session_expired' ? 'bg-yellow-500'"), `${name}：登录过期时状态点转黄`)
+    ok(seg.includes("'登录已过期'") || seg.includes("'API Key 已失效'"), `${name}：折叠态含过期文案`)
   }
   eq(src.split('useSourceCollapsed(source.id)').length - 1, 4, '全文件折叠 hook 调用恰好 4 处')
   eq(src.split('{!collapsed && (').length - 1, 4, '全文件折叠包裹恰好 4 处')
+  eq(src.split('{collapsed && (').length - 1, 4, '全文件折叠态文字状态恰好 4 处')
 
   console.log(`\n通过 ${pass} / 失败 ${fail}`)
   process.exit(fail === 0 ? 0 : 1)

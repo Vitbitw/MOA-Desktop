@@ -757,9 +757,35 @@ function CommandCodePanel({ source, account }: { source: RemoteUsageSource; acco
             </button>
             {source.name}
             <span
-              className={`inline-block w-2 h-2 rounded-full ${loggedIn ? 'bg-green-500' : 'bg-muted'}`}
-              title={loggedIn ? '已登录' : '未登录'}
+              className={`inline-block w-2 h-2 rounded-full ${
+                errorCode === 'session_expired' ? 'bg-yellow-500' : loggedIn ? 'bg-green-500' : 'bg-muted'
+              }`}
+              title={
+                errorCode === 'session_expired'
+                  ? '登录已过期'
+                  : loggedIn
+                    ? '已登录'
+                    : statusKnown
+                      ? '未登录'
+                      : '登录态读取中'
+              }
             />
+            {/* 折叠态补文字登录状态：展开态有错误条与登录按钮、信息已足；折叠态需自足 */}
+            {collapsed && (
+              <span
+                className={`text-xs font-normal ${
+                  errorCode === 'session_expired' ? 'text-yellow-600' : 'text-muted-foreground'
+                }`}
+              >
+                {errorCode === 'session_expired'
+                  ? '登录已过期'
+                  : loggedIn
+                    ? '已登录'
+                    : statusKnown
+                      ? '未登录'
+                      : '登录态读取中'}
+              </span>
+            )}
           </h2>
           <a
             href={source.studioUrl}
@@ -1417,9 +1443,23 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
             </button>
             {source.name}
             <span
-              className={`inline-block w-2 h-2 rounded-full ${hasApiKey ? 'bg-green-500' : 'bg-muted'}`}
-              title={hasApiKey ? '已配置 API Key' : '未配置 API Key'}
+              className={`inline-block w-2 h-2 rounded-full ${
+                errorCode === 'session_expired' ? 'bg-yellow-500' : hasApiKey ? 'bg-green-500' : 'bg-muted'
+              }`}
+              title={
+                errorCode === 'session_expired' ? 'API Key 已失效' : hasApiKey ? '已配置 API Key' : '未配置 API Key'
+              }
             />
+            {/* 折叠态补文字状态：展开态有凭据条与错误条、信息已足；折叠态需自足 */}
+            {collapsed && (
+              <span
+                className={`text-xs font-normal ${
+                  errorCode === 'session_expired' ? 'text-yellow-600' : 'text-muted-foreground'
+                }`}
+              >
+                {errorCode === 'session_expired' ? 'API Key 已失效' : hasApiKey ? '已配置 API Key' : '未配置 API Key'}
+              </span>
+            )}
           </h2>
           <a
             href={source.studioUrl}
@@ -2148,9 +2188,35 @@ function MimoPanel({ source, account }: { source: RemoteUsageSource; account: Mo
             </button>
             {source.name}
             <span
-              className={`inline-block w-2 h-2 rounded-full ${loggedIn ? 'bg-green-500' : 'bg-muted'}`}
-              title={loggedIn ? '已登录' : '未登录'}
+              className={`inline-block w-2 h-2 rounded-full ${
+                errorCode === 'session_expired' ? 'bg-yellow-500' : loggedIn ? 'bg-green-500' : 'bg-muted'
+              }`}
+              title={
+                errorCode === 'session_expired'
+                  ? '登录已过期'
+                  : loggedIn
+                    ? '已登录'
+                    : statusKnown
+                      ? '未登录'
+                      : '登录态读取中'
+              }
             />
+            {/* 折叠态补文字登录状态：展开态有错误条与登录按钮、信息已足；折叠态需自足 */}
+            {collapsed && (
+              <span
+                className={`text-xs font-normal ${
+                  errorCode === 'session_expired' ? 'text-yellow-600' : 'text-muted-foreground'
+                }`}
+              >
+                {errorCode === 'session_expired'
+                  ? '登录已过期'
+                  : loggedIn
+                    ? '已登录'
+                    : statusKnown
+                      ? '未登录'
+                      : '登录态读取中'}
+              </span>
+            )}
           </h2>
           <a
             href={source.studioUrl}
@@ -2696,9 +2762,35 @@ function DeepSeekPanel({ source, account }: { source: RemoteUsageSource; account
             </button>
             {source.name}
             <span
-              className={`inline-block w-2 h-2 rounded-full ${loggedIn ? 'bg-green-500' : 'bg-muted'}`}
-              title={loggedIn ? '已登录' : '未登录'}
+              className={`inline-block w-2 h-2 rounded-full ${
+                errorCode === 'session_expired' ? 'bg-yellow-500' : loggedIn ? 'bg-green-500' : 'bg-muted'
+              }`}
+              title={
+                errorCode === 'session_expired'
+                  ? '登录已过期'
+                  : loggedIn
+                    ? '已登录'
+                    : statusKnown
+                      ? '未登录'
+                      : '登录态读取中'
+              }
             />
+            {/* 折叠态补文字登录状态：展开态有错误条与登录按钮、信息已足；折叠态需自足 */}
+            {collapsed && (
+              <span
+                className={`text-xs font-normal ${
+                  errorCode === 'session_expired' ? 'text-yellow-600' : 'text-muted-foreground'
+                }`}
+              >
+                {errorCode === 'session_expired'
+                  ? '登录已过期'
+                  : loggedIn
+                    ? '已登录'
+                    : statusKnown
+                      ? '未登录'
+                      : '登录态读取中'}
+              </span>
+            )}
           </h2>
           <a
             href={source.studioUrl}
