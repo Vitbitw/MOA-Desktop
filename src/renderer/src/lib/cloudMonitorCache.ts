@@ -29,11 +29,13 @@ export interface CloudSnapshot {
   cumulative: CumulativeModelUsage | null
   /** 采集器状态（Command Code） */
   collector: CollectorStatusInfo | null
-  /** 模型明细口径选择（Command Code：服务端聚合 / 本地累计） */
+  /** 模型明细口径选择（Command Code / MiMo：服务端聚合 / 本地累计） */
   detailMode: 'monthly' | 'cumulative' | null
+  /** 模型明细口径选择（OpenCode Go：服务端聚合 export / 本地累计；与 CC 分开存储，取值域不混用） */
+  ocDetailMode: 'detail' | 'cumulative' | null
 }
 
-const EMPTY: CloudSnapshot = { usage: null, status: null, cumulative: null, collector: null, detailMode: null }
+const EMPTY: CloudSnapshot = { usage: null, status: null, cumulative: null, collector: null, detailMode: null, ocDetailMode: null }
 
 const snapshots = new Map<string, CloudSnapshot>()
 

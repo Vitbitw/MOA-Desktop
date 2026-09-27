@@ -1,10 +1,10 @@
-// ─── 用量后台采集（Command Code / Xiaomi MiMo） ───
+// ─── 用量后台采集（Command Code / Xiaomi MiMo / OpenCode Go） ───
 // 目的：服务端列表接口对部分套餐只给最近 100 条（实测跨度约 20 分钟），「本地累计」只有在
 // 采集足够频繁时才有意义。这里在应用运行期间按设置间隔自动拉取并累积落库，
 // 使累计不依赖「云监控页是否打开」。
 //
 // 说明：
-//   - 处理 commandcode / mimo 类型的已启用源下**每一个账号**（DeepSeek 等其余源接口结构不同，累积逻辑不可复用）
+//   - 处理 commandcode / mimo / opencode 类型的已启用源下**每一个账号**（DeepSeek 等其余源接口结构不同，累积逻辑不可复用）
 //   - 采集间隔 = 统一自动刷新间隔（monitoring.autoRefreshMinutes，与页面刷新共用；0 = 关闭），
 //     每分钟检查一次是否需要采集，间隔从设置读取 → 改设置无需重启应用
 //   - 与手动刷新共用 refreshCommandCodeUsage / refreshMimoUsage，因此同样走 fetchProxy（尊重网络代理设置）；
@@ -15,6 +15,7 @@ import { readAppSettings } from '../config/appSettings'
 import { getUsageCredential } from '../store/key-store'
 import { refreshCommandCodeUsage, usageTokenKey } from './commandCode'
 import { refreshMimoUsage } from './mimo'
+import { refreshOpenCodeUsage, usageApiKeyKey } from './opencode'
 import { getCumulativeUsage, recordCollectorRun } from './usageAccumulator'
 import { saveUsageSnapshot } from './snapshotStore'
 import type { AppSettings, MonitorAccount, MonitorUsage, RemoteUsageSource } from '../../shared/types'
@@ -69,11 +70,11 @@ function latestCollectedAt(): number {
   return max
 }
 
-/** 参与后台采集的账号：已启用的 commandcode / mimo 源 × 该源全部账号 */
+/** 参与后台采集的账号：已启用的 commandcode / mimo / opencode 源 × 该源全部账号 */
 function collectibleAccounts(settings: AppSettings): Array<{ source: RemoteUsageSource; account: MonitorAccount }> {
   const out: Array<{ source: RemoteUsageSource; account: MonitorAccount }> = []
   for (const source of settings.monitoring.sources) {
-    if (!source.enabled || (source.type !== 'commandcode' && source.type !== 'mimo')) continue
+    if (!source.enabled || (source.type !== 'commandcode' && source.type !== 'mimo' && source.type !== 'opencode')) continue
     for (const account of settings.monitoring.accounts) {
       if (account.sourceId === source.id) out.push({ source, account })
     }
@@ -109,6 +110,18 @@ async function refreshAccountForCollect(
     }
     return { ok: false, code: res.code, inserted: 0, data: null, debug: `失败 code=${res.code}` }
   }
+  if (source.type === 'opencode') {
+    const res = await refreshOpenCodeUsage(accountId)
+    if (res.ok) {
+      return {
+        ok: true,
+        inserted: res.persisted,
+        data: res.data,
+        debug: `ok 明细模型 ${res.data.models?.length ?? 0} 个 · 变更 ${res.persisted} 行`
+      }
+    }
+    return { ok: false, code: res.code, inserted: 0, data: null, debug: `失败 code=${res.code}` }
+  }
   const before = getCumulativeUsage(accountId).records
   const res = await refreshCommandCodeUsage(accountId)
   if (res.ok) {
@@ -134,7 +147,9 @@ async function collectOnce(trigger: 'first' | 'timer'): Promise<void> {
       // 同一账号同一间隔内只采一次（页面刷新已占位则跳过）
       const last = lastCollectedByAccount.get(account.id) ?? 0
       if (last > 0 && intervalMs > 0 && Date.now() - last < intervalMs) continue
-      if (!getUsageCredential(usageTokenKey(account.id))) continue
+      // 凭据预检（未配置凭据的账号不进入采集）：opencode 的凭据键 = `<accountId>.apiKey`，其余源 = 账号 id
+      const credKey = source.type === 'opencode' ? usageApiKeyKey(account.id) : usageTokenKey(account.id)
+      if (!getUsageCredential(credKey)) continue
       const outcome = await refreshAccountForCollect(source, account.id)
       lastCollectedByAccount.set(account.id, Date.now())
       // 持久化运行记录：即使本轮没有新记录，也能在 UI 上看到"采集器还在跑"

@@ -7,6 +7,7 @@
 //   ③ 同一间隔内所有账号都不重复拉取
 //   ④ 全员过期 + 新增账号：下一轮全部可采（含从未采集过的新号）
 //   ⑤ 自动刷新关闭（0）：不采集
+//   ⑥ OpenCode Go 参与采集（v2 明细落库）：占位抑制本账号、过期后恢复采集
 // 用法：node test-e2e/collector-dispatch.cjs
 // 做法：esbuild transform collector.ts → CJS，stub require 注入假设置 / 凭据 / refresh；
 //       覆写全局 setTimeout/setInterval 捕获首采与周期回调（不真等 15s/60s），
@@ -46,18 +47,20 @@ let fakeNow = 1_700_000_000_000
 Date.now = () => fakeNow
 
 // ── stub 状态与调用记录 ──
-const calls = { cc: [], mm: [], runs: [] }
+const calls = { cc: [], mm: [], oc: [], runs: [] }
 const settingsState = {
   monitoring: {
     autoRefreshMinutes: 10,
     sources: [
       { id: 'cc', type: 'commandcode', name: 'CC', url: 'https://cc.example', enabled: true },
-      { id: 'mm', type: 'mimo', name: 'MiMo', url: 'https://mm.example', enabled: true }
+      { id: 'mm', type: 'mimo', name: 'MiMo', url: 'https://mm.example', enabled: true },
+      { id: 'oc', type: 'opencode', name: 'OpenCode Go', url: 'https://oc.example', enabled: true }
     ],
     accounts: [
       { id: 'cc-main', sourceId: 'cc', label: '主号', billing: 'plan' },
       { id: 'cc-payg', sourceId: 'cc', label: '按量号', billing: 'usage' },
-      { id: 'mm-main', sourceId: 'mm', label: '', billing: 'plan' }
+      { id: 'mm-main', sourceId: 'mm', label: '', billing: 'plan' },
+      { id: 'oc-main', sourceId: 'oc', label: '', billing: 'plan' }
     ]
   }
 }
@@ -76,6 +79,14 @@ const stubs = {
     refreshMimoUsage: async (accountId) => {
       calls.mm.push(accountId)
       return { ok: true, persisted: 0, data: { fetchedAt: fakeNow } }
+    }
+  },
+  opencode: {
+    // 凭据键 = `<accountId>.apiKey`（与 commandCode 的 usageTokenKey 不同；collector 凭据预检按源类型取键）
+    usageApiKeyKey: (accountId) => accountId + '.apiKey',
+    refreshOpenCodeUsage: async (accountId) => {
+      calls.oc.push(accountId)
+      return { ok: true, persisted: 3, data: { fetchedAt: fakeNow } }
     }
   },
   usageAccumulator: {
@@ -117,44 +128,51 @@ async function main() {
   await flush()
   eq(calls.cc, ['cc-main', 'cc-payg'], 'CC 源两账号均被采集（配置顺序）')
   eq(calls.mm, ['mm-main'], 'MiMo 源账号被采集')
+  eq(calls.oc, ['oc-main'], 'OpenCode 源账号被采集（参与后台采集）')
+  ok(calls.runs.some((r) => r.id === 'oc-main' && r.ok), 'OpenCode 采集运行记录写入（inserted=persisted）')
 
   // ② 核心回归：主号页面刷新占位 → 其余已过期账号不得被吞
   console.log('[2] 页面刷新占位只抑制本账号（核心回归：修复前整轮被吞）')
   fakeNow += 30_000 // 30s 后主号被占位（模拟页面手动/自动刷新）
   collector.markUsageCollected('cc-main')
+  collector.markUsageCollected('oc-main') // OpenCode 页面刷新同样占位（index.ts MONITOR_REFRESH 已接入）
   fakeNow += 10 * 60_000 - 30_000 // 距初始首采恰好 10 分钟：其余账号过期、主号仍新鲜（9.5 分钟）
   const beforeCC = calls.cc.length
   const beforeMM = calls.mm.length
+  const beforeOC = calls.oc.length
   timers.interval()
   await flush()
   eq(calls.cc.slice(beforeCC), ['cc-payg'], '按量号照常采集（旧实现：latest=max 判新鲜 → 整轮被跳过）')
   eq(calls.mm.slice(beforeMM), ['mm-main'], '其它源账号照常采集')
   ok(!calls.cc.slice(beforeCC).includes('cc-main'), '被占位的主号间隔内不重复拉取')
+  eq(calls.oc.slice(beforeOC), [], '被占位的 OpenCode 账号间隔内不重复拉取（markUsageCollected 占位生效）')
 
   // ③ 间隔内不重复拉取
   console.log('[3] 同一间隔内不重复拉取')
   fakeNow += 1_000
-  const n3 = calls.cc.length + calls.mm.length
+  const n3 = calls.cc.length + calls.mm.length + calls.oc.length
   timers.interval()
   await flush()
-  eq(calls.cc.length + calls.mm.length, n3, '全部账号均新鲜 → 本轮零采集')
+  eq(calls.cc.length + calls.mm.length + calls.oc.length, n3, '全部账号均新鲜 → 本轮零采集')
 
   // ④ 全员过期 + 新增账号：下一轮全部可采
   console.log('[4] 全员过期 + 从未采集的新账号：下一轮全部可采')
   settingsState.monitoring.accounts.push({ id: 'cc-new', sourceId: 'cc', label: '新号', billing: 'usage' })
   fakeNow += 10 * 60_000
   const beforeCC4 = calls.cc.length
+  const beforeOC4 = calls.oc.length
   timers.interval()
   await flush()
   eq(calls.cc.slice(beforeCC4), ['cc-main', 'cc-payg', 'cc-new'], '过期账号与新增账号全部采集（新号 last=0 直接命中）')
+  eq(calls.oc.slice(beforeOC4), ['oc-main'], '过期后 OpenCode 账号恢复采集')
 
   // ⑤ 自动刷新关闭（0）：不采集
   console.log('[5] 自动刷新关闭（0）时不采集')
   settingsState.monitoring.autoRefreshMinutes = 0
-  const n5 = calls.cc.length + calls.mm.length
+  const n5 = calls.cc.length + calls.mm.length + calls.oc.length
   timers.interval()
   await flush()
-  eq(calls.cc.length + calls.mm.length, n5, '关闭状态零采集')
+  eq(calls.cc.length + calls.mm.length + calls.oc.length, n5, '关闭状态零采集')
 
   console.log('')
   console.log(`${pass} passed, ${fail} failed`)

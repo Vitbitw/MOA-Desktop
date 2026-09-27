@@ -891,8 +891,8 @@ function registerIpcHandlers() {
     const source = resolveMonitorTarget(accountId)
     // 页面刷新与后台采集共用同一「自动刷新间隔」：这里先按**本账号**占位，
     // 采集器据此跳过该账号间隔内的重复拉取（不影响同源其它账号）
-    // OpenCode Go 不参与后台采集（快照式数据无累计语义）→ 不占位
-    if (source.type === 'commandcode' || source.type === 'mimo') markUsageCollected(accountId)
+    // OpenCode Go 有明细可累计（v2 export 落库）→ 同样占位
+    if (source.type === 'commandcode' || source.type === 'mimo' || source.type === 'opencode') markUsageCollected(accountId)
     const result =
       source.type === 'mimo'
         ? await refreshMimoUsage(accountId)

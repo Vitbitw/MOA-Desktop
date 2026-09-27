@@ -1118,6 +1118,17 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
   const [errorCode, setErrorCode] = useState<MonitorErrorCode | null>(null)
   const [showApiKeyInput, setShowApiKeyInput] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
+  // 本地累计（明细 export 的「天 × 模型」行，累计口径让跨月数字只增不减）
+  const [cumulative, setCumulative] = useState<CumulativeModelUsage | null>(
+    () => getCloudSnapshot(accountId)?.cumulative ?? null
+  )
+  const [collector, setCollector] = useState<CollectorStatusInfo | null>(
+    () => getCloudSnapshot(accountId)?.collector ?? null
+  )
+  const [detailMode, setDetailMode] = useState<'detail' | 'cumulative'>(() => {
+    const saved = getCloudSnapshot(accountId)?.ocDetailMode
+    return saved === 'cumulative' ? 'cumulative' : 'detail'
+  })
   // 上次刷新时间 = 快照的 fetchedAt（与 usage 同源，重进页面随快照一起恢复）
   const lastFetchedAt = usage?.fetchedAt ?? null
   // 快照恢复是否已完成（会话内模块缓存 / 主进程持久化快照）：TTL 判定须等它完成，避免快照未到先误拉
@@ -1185,6 +1196,27 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
     }
   }
 
+  // 本地累计 + 采集器状态（累计口径的数据来源；与 CC / MiMo 共用同一 IPC 与存储表，按账号隔离）
+  const loadCumulative = async () => {
+    if (!accountId) return
+    try {
+      const [cumRes, stRes] = await Promise.all([
+        window.moaAPI.monitorGetCumulative(accountId),
+        window.moaAPI.monitorCollectorStatus()
+      ])
+      if (cumRes.success && cumRes.data) {
+        setCumulative(cumRes.data)
+        patchCloudSnapshot(accountId, { cumulative: cumRes.data })
+      }
+      if (stRes.success && stRes.data) {
+        setCollector(stRes.data)
+        patchCloudSnapshot(accountId, { collector: stRes.data })
+      }
+    } catch {
+      // 累计读取失败不阻塞页面（首次为空属正常）
+    }
+  }
+
   // 从主进程读取上次会话（应用重启前）持久化的用量快照；本次会话模块缓存已有则跳过
   const hydrateUsage = async () => {
     if (getCloudSnapshot(accountId)?.usage != null) return
@@ -1201,16 +1233,42 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
     }
   }
 
-  // 挂载：读取状态；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
+  // 挂载：读取状态 + 本地累计；用量本体从快照恢复（会话内模块缓存 / 主进程持久化快照，见 hydrateUsage）
   useEffect(() => {
     loadStatus()
+    void loadCumulative()
     void hydrateUsage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId])
 
-  // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示
+  // 每次刷新成功后同步累计数据（lastFetchedAt 变化 = 刷新完成）
   useEffect(() => {
-    if (snapshotReady && status?.hasApiKey && shouldFetchOnMount(usage, refreshMinutes)) {
+    if (lastFetchedAt) void loadCumulative()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastFetchedAt])
+
+  // 页面打开期间轮询本地累计：后台采集写入的新记录自动出现，否则数字看着像"不动"
+  useEffect(() => {
+    if (!accountId) return
+    const timer = setInterval(() => {
+      void loadCumulative()
+    }, 60_000)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId])
+
+  // 明细口径选择写回快照：切视图往返后保持用户选择（OpenCode 专用字段，与 CC 的 detailMode 取值域不混用）
+  useEffect(() => {
+    if (accountId) patchCloudSnapshot(accountId, { ocDetailMode: detailMode })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId, detailMode])
+
+  // 登录态与快照恢复都就绪后：无快照或快照已过期（超过统一自动刷新间隔）才打远端；新鲜则直接用快照展示。
+  // 旧版快照（升级前保存，无 sourcesAvailable 标记）不判新鲜，直接重拉到新结构（先例：MiMo 的 detailList 判定）。
+  useEffect(() => {
+    if (!snapshotReady || !status?.hasApiKey) return
+    const legacySnapshot = usage != null && usage.sourcesAvailable?.detail === undefined
+    if (shouldFetchOnMount(usage, refreshMinutes) || legacySnapshot) {
       refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1265,6 +1323,47 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
   }
 
   // ── 渲染 ──
+  const detailAvailable = usage?.sourcesAvailable?.detail ?? false
+  const serverRows: NonNullable<OpenCodeUsage['models']> = usage?.models ?? []
+  const cumulativeRows = cumulative?.models ?? []
+  const effectiveDetailMode: 'detail' | 'cumulative' =
+    detailMode === 'detail' && !detailAvailable ? 'cumulative' : detailMode
+  const shownModels: Array<{
+    model: string
+    requests: number
+    cost: number
+    tokensIn: number
+    tokensOut: number
+    tokensTotal: number
+    cacheReadTokens?: number
+  }> = effectiveDetailMode === 'detail' ? serverRows : cumulativeRows
+  // 缓存读取列：仅服务端聚合口径有该字段（本地累计落库未单独保留）→ 无该字段的行显示 —
+  const hasCacheRead = shownModels.some((m) => m.cacheReadTokens !== undefined)
+  const detailTotals =
+    shownModels.length > 0
+      ? shownModels.reduce(
+          (acc, m) => ({
+            requests: acc.requests + m.requests,
+            tokensIn: acc.tokensIn + m.tokensIn,
+            tokensOut: acc.tokensOut + m.tokensOut,
+            cacheReadTokens: acc.cacheReadTokens + (m.cacheReadTokens ?? 0),
+            tokensTotal: acc.tokensTotal + m.tokensTotal,
+            cost: acc.cost + m.cost
+          }),
+          { requests: 0, tokensIn: 0, tokensOut: 0, cacheReadTokens: 0, tokensTotal: 0, cost: 0 }
+        )
+      : null
+  const cumulativeSinceLabel = cumulative?.sinceTs !== undefined ? fmtSpan(cumulative.sinceTs, cumulative.sinceTs) : null
+  // 采集器是否还活着：持久化的最近采集时间超过 2×间隔（且至少 10 分钟）即视为可能停止；
+  // 自动刷新关闭时不判断（不采集是预期行为，避免误报「采集已停止」）
+  const collectorState = cumulative?.collectorState
+  const staleThresholdMs = Math.max(2 * (collector?.intervalMinutes ?? refreshMinutes) * 60_000, 10 * 60_000)
+  const collectorStale =
+    refreshMinutes > 0 &&
+    collectorState?.lastRunAt !== undefined &&
+    collectorState.lastRunAt > 0 &&
+    Date.now() - collectorState.lastRunAt > staleThresholdMs
+
   return (
     <div className="flex flex-col gap-4">
       {/* 顶部：源信息 + 操作 */}
@@ -1416,6 +1515,173 @@ function OpenCodePanel({ source, account }: { source: RemoteUsageSource; account
           />
         </div>
       </section>
+
+      {/* 模型明细：服务端聚合（export 最近 30 个 UTC 日）/ 本地累计（双口径，照 CommandCodePanel 模式） */}
+      {usage && (
+        <section>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-2">
+            <h3 className="text-xs font-semibold text-muted-foreground">模型明细</h3>
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  [
+                    'detail',
+                    '服务端聚合',
+                    '服务端按「天 × 模型」聚合的最近 30 个 UTC 日明细；数据源 /console/api/v2/usage/export（成本为按量价格折算的等价成本，仅供参考）'
+                  ],
+                  [
+                    'cumulative',
+                    '本地累计',
+                    '本地按「日期 × 模型」自然键 upsert 累积（自首次采集起，只增不减）；采集停止期间的用量会漏采'
+                  ]
+                ] as const
+              ).map(([mode, label, hint]) => {
+                const disabled = mode === 'detail' && !detailAvailable
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => setDetailMode(mode)}
+                    disabled={disabled}
+                    title={disabled ? '服务端明细不可用（API Key 无 Console 明细权限，或 export 未返回数据），仅可查看本地累计' : hint}
+                    className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                      effectiveDetailMode === mode
+                        ? 'border-primary/50 bg-primary/10 text-foreground'
+                        : 'border-border text-muted-foreground hover:bg-accent'
+                    } ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* 口径说明行 */}
+          {effectiveDetailMode === 'detail' ? (
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mb-2 text-xs text-muted-foreground">
+              <span>来自 Console usage export · 最近 30 个 UTC 日</span>
+              {usage.modelsCoverage && <span>· {usage.modelsCoverage.rows} 行（天 × 模型）</span>}
+              {usage.modelsCoverage && <span>· 覆盖 {usage.modelsCoverage.days} 天</span>}
+              <span
+                className="cursor-help"
+                title="明细来自 /console/api/v2/usage/export（scope=organization，range=30d）；成本为按量价格折算的等价成本（cost_micro_cents ÷ 1e8）——Go 订阅按月额度计费，实际不按此扣费，仅供参考"
+              >
+                · 口径说明
+              </span>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mb-2 text-xs text-muted-foreground">
+              {cumulative && cumulative.records > 0 ? (
+                <>
+                  <span>本地累计 {cumulative.records.toLocaleString()} 行（日期 × 模型）</span>
+                  {cumulativeSinceLabel && <span>· 自 {cumulativeSinceLabel} 起</span>}
+                  {cumulative.toTs !== undefined && <span>· 最近记录 {fmtSpan(cumulative.toTs, cumulative.toTs)}</span>}
+                  {collectorState && collectorState.lastRunAt !== undefined && (
+                    <span className={collectorStale ? 'text-yellow-600' : undefined}>
+                      · 最近采集 {fmtTime(collectorState.lastRunAt)}（已 {collectorState.runs} 轮
+                      {collectorState.runs > collectorState.okRuns ? ` · 失败 ${collectorState.runs - collectorState.okRuns}` : ''}）
+                    </span>
+                  )}
+                  {collectorStale && <span className="text-yellow-600">· 采集可能已停止</span>}
+                  {collectorState === undefined && cumulative.lastCollectedAt !== undefined && (
+                    <span>· 最近采集 {fmtTime(cumulative.lastCollectedAt)}</span>
+                  )}
+                  {collector && !collector.enabled && (
+                    <span className="text-yellow-600">· 自动刷新已关闭（仅手动刷新时累积）</span>
+                  )}
+                  {collector?.enabled && collector.intervalMinutes > 0 && (
+                    <span>· 每 {collector.intervalMinutes} 分钟自动采集</span>
+                  )}
+                  {collector?.lastError && <span className="text-yellow-600">· 最近一次采集失败（{collector.lastError}）</span>}
+                  <span
+                    className="cursor-help"
+                    title="本地累计由每次采集到的「日期 × 模型」行按自然键 upsert 累积（数值变化覆盖、恒等不计）；采集未运行期间的用量会漏采，故仅代表“已观测到的用量”；成本为等价成本（参考折算）"
+                  >
+                    · 口径说明
+                  </span>
+                </>
+              ) : (
+                <span>暂无本地累计数据（自动刷新或手动刷新后会逐步累积）</span>
+              )}
+            </div>
+          )}
+          {!detailAvailable && (
+            <div className="mb-2 text-xs text-yellow-600/90">
+              服务端明细不可用（该 API Key 无 Console 明细权限，或 export 接口未返回数据）——不影响上方三卡。
+            </div>
+          )}
+          <div className="rounded-lg border border-border bg-card overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-muted-foreground border-b border-border">
+                  <th className="text-left px-4 py-2 font-medium">模型</th>
+                  <th className="text-right px-4 py-2 font-medium">请求数</th>
+                  <th className="text-right px-4 py-2 font-medium">↑ 输入</th>
+                  <th className="text-right px-4 py-2 font-medium">↓ 输出</th>
+                  <th
+                    className="text-right px-4 py-2 font-medium"
+                    title="缓存读取 Tokens（cache_read_tokens）；本地累计口径未单独保留该字段，显示 —"
+                  >
+                    缓存读取
+                  </th>
+                  <th
+                    className="text-right px-4 py-2 font-medium"
+                    title="总 Tokens 口径 = 输入 + 输出 + 缓存读取 + 缓存写入（5 分钟 + 1 小时）"
+                  >
+                    总 Tokens
+                  </th>
+                  <th
+                    className="text-right px-4 py-2 font-medium"
+                    title="等价成本 = 服务端按量价格折算（cost_micro_cents ÷ 1e8）；Go 订阅按月额度计费，实际不按此扣费，仅供参考"
+                  >
+                    成本
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownModels.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-12 text-center text-sm text-muted-foreground">
+                      {effectiveDetailMode === 'detail'
+                        ? '暂无明细（export 未返回数据）'
+                        : '暂无本地累计数据（自动刷新或手动刷新后会逐步累积）'}
+                    </td>
+                  </tr>
+                ) : (
+                  shownModels.map((m) => (
+                    <tr key={m.model} className="border-b border-border/50 last:border-b-0 hover:bg-accent/30">
+                      <td className="px-4 py-2 text-foreground">{m.model}</td>
+                      <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.requests)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensIn)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensOut)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums">
+                        {m.cacheReadTokens !== undefined ? fmtNum(m.cacheReadTokens) : '—'}
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums">{fmtNum(m.tokensTotal)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums">{formatCost(m.cost, currency)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+              {detailTotals && (
+                <tfoot>
+                  <tr className="border-t border-border text-xs font-medium text-muted-foreground">
+                    <td className="px-4 py-2">合计</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{fmtNum(detailTotals.requests)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{fmtNum(detailTotals.tokensIn)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{fmtNum(detailTotals.tokensOut)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {hasCacheRead ? fmtNum(detailTotals.cacheReadTokens) : '—'}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">{fmtNum(detailTotals.tokensTotal)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{formatCost(detailTotals.cost, currency)}</td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </section>
+      )}
     </div>
   )
 }

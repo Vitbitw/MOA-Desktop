@@ -449,14 +449,44 @@ export interface OpenCodeWindowInfo {
   resetAt?: number
 }
 
-/** OpenCode Go 用量归一化数据（单端点，全有或全无；失败走错误码，无区块级降级） */
+/** OpenCode Go 用量归一化数据（v2：区块级降级——windows 失败走错误码，detail 失败仅明细区块降级） */
 export interface OpenCodeUsage {
   fetchedAt: number
+  sourcesAvailable: {
+    /** /zen/go/v1/usage 三窗口 */
+    windows: boolean
+    /** /console/api/v2/usage/export 明细（失败时区块级降级） */
+    detail: boolean
+  }
   windows: {
     /** 5 小时滚动窗口 */
     rolling?: OpenCodeWindowInfo
     weekly?: OpenCodeWindowInfo
     monthly?: OpenCodeWindowInfo
+  }
+  /** 服务端聚合口径：最近 30 个 UTC 日，按「天 × 模型」行聚合为按模型汇总 */
+  models?: Array<{
+    model: string
+    requests: number
+    /** 等价成本（USD；cost_micro_cents / 1e8，按量价格折算，非 Go 订阅实际扣费） */
+    cost: number
+    tokensIn: number
+    tokensOut: number
+    cacheReadTokens: number
+    /** 总 Tokens 口径 = 输入 + 输出 + 缓存读取 + 缓存写入（5 分钟 + 1 小时） */
+    tokensTotal: number
+  }>
+  /** 明细覆盖情况（口径标注用） */
+  modelsCoverage?: {
+    /** 请求的 range（天）：30 */
+    rangeDays: number
+    /** 实际有数据的天数 */
+    days: number
+    /** 聚合行数（天 × 模型） */
+    rows: number
+    /** 最早/最新数据日（epoch 毫秒，UTC 零点） */
+    fromTs?: number
+    toTs?: number
   }
 }
 

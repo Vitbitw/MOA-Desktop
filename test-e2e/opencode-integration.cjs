@@ -7,9 +7,11 @@
 //      整体覆盖默认值）；c2（补种挪到账号补建之后）会造成「源出现、账号缺失、面板永不渲染」
 //      的静默失效。本脚本 stub db/database 驱动真实 mergeSettings，断言补种 + 账号补建 +
 //      幂等 + 禁用不复活 + 读侧不落库。
-//   S2 变异 g 存活：让 opencode 也走 markUsageCollected 无任何套件能发现。本脚本对 index.ts
-//      监控 IPC 段做结构断言（仿 vendor-billing [14] 的挂接自证先例）：LOGIN 拒绝分支 /
-//      REFRESH 挂接 refreshOpenCodeUsage / markUsageCollected 占位仅 cc/mimo。
+//   S2（v1 历史，变异 g）：v1 设计「opencode 不参与后台采集」→ 占位仅 cc/mimo，把 opencode 加进占位
+//      也无任何套件能发现。v2（2026-09-27 设计变更）opencode 有明细可累计（v2 export 落库）→ 占位改为
+//      **应含** opencode。本脚本对 index.ts 监控 IPC 段做结构断言（仿 vendor-billing [14] 的挂接自证先例）：
+//      LOGIN 拒绝分支 / REFRESH 挂接 refreshOpenCodeUsage / markUsageCollected 占位含 opencode
+//      （与上一版断言相反，防「改回去」回归）。
 
 const path = require('path')
 const fs = require('fs')
@@ -180,7 +182,11 @@ async function main() {
     ok(refreshSeg.includes('refreshOpenCodeUsage('), 'REFRESH 挂接 refreshOpenCodeUsage')
     const occupyLines = refreshSeg.split('\n').filter((l) => l.includes('markUsageCollected('))
     ok(occupyLines.length === 1, 'markUsageCollected 占位仅一处', occupyLines)
-    ok(occupyLines.every((l) => !l.includes("'opencode'")), 'opencode 不参与 markUsageCollected 占位（不参与后台采集）', occupyLines)
+    ok(
+      occupyLines.every((l) => l.includes("'opencode'")),
+      'opencode 参与 markUsageCollected 占位（v2 设计变更：有明细可累计；与上一版断言相反）',
+      occupyLines
+    )
 
     // LOGOUT 段（MONITOR_LOGOUT → MONITOR_SET_API_KEY）
     const logoutSeg = idxSrc.slice(idxSrc.indexOf('IPC.MONITOR_LOGOUT'), idxSrc.indexOf('IPC.MONITOR_SET_API_KEY'))
