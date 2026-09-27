@@ -7,7 +7,7 @@
 //   ③ 同一间隔内所有账号都不重复拉取
 //   ④ 全员过期 + 新增账号：下一轮全部可采（含从未采集过的新号）
 //   ⑤ 自动刷新关闭（0）：不采集
-//   ⑥ OpenCode Go 参与采集（v2 明细落库）：占位抑制本账号、过期后恢复采集
+//   ⑥ OpenCode Go 参与采集（v2 明细落库）：占位抑制本账号、过期后恢复采集、凭据预检用 <accountId>.apiKey 键、inserted 透传与落盘快照
 // 用法：node test-e2e/collector-dispatch.cjs
 // 做法：esbuild transform collector.ts → CJS，stub require 注入假设置 / 凭据 / refresh；
 //       覆写全局 setTimeout/setInterval 捕获首采与周期回调（不真等 15s/60s），
@@ -47,7 +47,7 @@ let fakeNow = 1_700_000_000_000
 Date.now = () => fakeNow
 
 // ── stub 状态与调用记录 ──
-const calls = { cc: [], mm: [], oc: [], runs: [] }
+const calls = { cc: [], mm: [], oc: [], runs: [], credKeys: [], snapshots: [] }
 const settingsState = {
   monitoring: {
     autoRefreshMinutes: 10,
@@ -67,7 +67,12 @@ const settingsState = {
 
 const stubs = {
   'config/appSettings': { readAppSettings: () => settingsState },
-  'store/key-store': { getUsageCredential: (key) => `TOKEN:${key}` },
+  'store/key-store': {
+    getUsageCredential: (key) => {
+      calls.credKeys.push(key)
+      return `TOKEN:${key}`
+    }
+  },
   commandCode: {
     usageTokenKey: (accountId) => accountId,
     refreshCommandCodeUsage: async (accountId) => {
@@ -91,9 +96,11 @@ const stubs = {
   },
   usageAccumulator: {
     getCumulativeUsage: () => ({ records: 0 }),
-    recordCollectorRun: (id, run) => calls.runs.push({ id, ok: run.ok })
+    recordCollectorRun: (id, run) => calls.runs.push({ id, ok: run.ok, inserted: run.inserted })
   },
-  snapshotStore: { saveUsageSnapshot: () => {} }
+  snapshotStore: {
+    saveUsageSnapshot: (accountId) => calls.snapshots.push(accountId)
+  }
 }
 
 /** 加载 collector.ts：esbuild transform + new Function 注入 stub require（needle 子串匹配） */
@@ -129,7 +136,12 @@ async function main() {
   eq(calls.cc, ['cc-main', 'cc-payg'], 'CC 源两账号均被采集（配置顺序）')
   eq(calls.mm, ['mm-main'], 'MiMo 源账号被采集')
   eq(calls.oc, ['oc-main'], 'OpenCode 源账号被采集（参与后台采集）')
-  ok(calls.runs.some((r) => r.id === 'oc-main' && r.ok), 'OpenCode 采集运行记录写入（inserted=persisted）')
+  ok(calls.runs.some((r) => r.id === 'oc-main' && r.ok), 'OpenCode 采集运行记录写入（ok）')
+  eq(calls.runs.find((r) => r.id === 'oc-main') && calls.runs.find((r) => r.id === 'oc-main').inserted, 3, 'opencode 运行记录 inserted 透传 persisted（stub 固定 3）')
+  ok(calls.snapshots.includes('oc-main'), 'opencode 采集结果写入落盘快照（页面未打开时快照照常刷新）')
+  ok(calls.credKeys.includes('oc-main.apiKey'), 'opencode 凭据预检用 <accountId>.apiKey 键')
+  ok(!calls.credKeys.includes('oc-main'), 'opencode 凭据预检不误用裸账号 id 键（CC/MiMo 才是裸键）')
+  ok(calls.credKeys.includes('cc-main') && calls.credKeys.includes('mm-main'), 'CC/MiMo 凭据预检用裸账号 id 键')
 
   // ② 核心回归：主号页面刷新占位 → 其余已过期账号不得被吞
   console.log('[2] 页面刷新占位只抑制本账号（核心回归：修复前整轮被吞）')

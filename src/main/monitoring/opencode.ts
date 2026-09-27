@@ -134,13 +134,13 @@ export interface ExportRow {
 
 /**
  * 解析 usage export CSV（实测 2026-09-27：14 列、CRLF、无引号包裹、无逗号内嵌）。
- * 表头 14 列逐字校验，不符 → null（结构不识别 → 明细区块降级，不猜形态）；
- * 行按换行拆（兼容 \r\n 与 \n）；列数不足的行跳过并计数；数值 toNum 缺省 0；day → UTC 零点。
+ * 表头 14 列逐字校验（兼容 BOM 前缀），不符 → null（结构不识别 → 明细区块降级，不猜形态）；
+ * 行按换行拆（兼容 \r\n 与 \n）；列数与表头不一致（不足 = 截断；多余 = 字段内嵌逗号，错位后是脏数据）的行跳过并计数；数值 toNum 缺省 0；day → UTC 零点。
  * 不做完整 CSV 引号解析：实测无引号，服务端若改形态 → 表头/列数校验兜底降级。
  */
 export function parseUsageExportCsv(text: string): ExportRow[] | null {
   const lines = text.split('\n')
-  const headerCols = (lines[0] ?? '').replace(/\r$/, '').split(',')
+  const headerCols = (lines[0] ?? '').replace(/^\uFEFF/, '').replace(/\r$/, '').split(',')
   if (headerCols.length !== EXPORT_HEADER.length || !headerCols.every((c, i) => c === EXPORT_HEADER[i])) {
     return null
   }
@@ -150,8 +150,8 @@ export function parseUsageExportCsv(text: string): ExportRow[] | null {
     const line = lines[i].replace(/\r$/, '')
     if (line.trim() === '') continue
     const f = line.split(',')
-    // 列数不足的行跳过（结构漂移的局部兜底）；表头已逐字校验，不猜测补位
-    if (f.length < EXPORT_HEADER.length) {
+    // 列数与表头不一致的行跳过（结构漂移的局部兜底）；表头已逐字校验，不猜测补位
+    if (f.length !== EXPORT_HEADER.length) {
       skipped += 1
       continue
     }
@@ -182,7 +182,7 @@ export function parseUsageExportCsv(text: string): ExportRow[] | null {
     })
   }
   if (skipped > 0) {
-    console.warn(`[Monitor] OpenCode export CSV 跳过 ${skipped} 行列数不足/缺关键字段`)
+    console.warn(`[Monitor] OpenCode export CSV 跳过 ${skipped} 行列数不一致/缺关键字段`)
   }
   return rows
 }

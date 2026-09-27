@@ -13,7 +13,7 @@
 // 本测试 stub fetchProxy + keyStore + usageAccumulator 驱动**真实** refreshOpenCodeUsage / parseUsageExportCsv /
 // aggregateExportRows（esbuild 打包，不触网），断言：
 //   URL / Bearer / Accept 头、实测三窗口解析、resetsAt 多形态归一（ISO / epoch 秒 / epoch 毫秒 / 缺失 / 非法）、
-//   percent 越界夹取、CSV 解析矩阵（标准 / 列数不足跳过 / 表头不符 null / 数值缺省 0 / day 解析 / 表头防回归锚）、
+//   percent 越界夹取、CSV 解析矩阵（标准 / 列数不一致跳过（不足与内嵌逗号多余）/ 表头不符 null / BOM 兼容 / 数值缺省 0 / day 解析 / 表头防回归锚）、
 //   聚合（多行 SUM、成本降序）、落库参数（id=day|model、cost 1e8 换算、requests 列值）、
 //   双端点降级矩阵（detail 403 / 网络失败 / CSV 不识别 → ok+detail=false；windows 失败 → 错误码照旧且不发 detail）。
 const path = require('path')
@@ -49,7 +49,7 @@ const STUBS = {
   usageAccumulator: `module.exports = {
   persistUsageRecords: (accountId, rows) => {
     ;(globalThis.__persistCalls || (globalThis.__persistCalls = [])).push({ accountId, rows })
-    return rows.length
+    return 7
   }
 }`
 }
@@ -227,7 +227,7 @@ async function main() {
     eq(cov && cov.fromTs, DAY_TS, 'fromTs = 2026-09-27 UTC 零点')
     eq(cov && cov.toTs, DAY_TS, 'toTs = 2026-09-27 UTC 零点')
     // 落库（persisted 随返回值 + 落库参数）
-    eq(res.persisted, 2, 'persisted = 本次落库影响行数（stub 返回 rows.length）')
+    eq(res.persisted, 7, 'persisted = 落库返回值透传（stub 固定返回 7，与行数 2 可分辨）')
     const call = globalThis.__persistCalls[0]
     ok(!!call, 'persistUsageRecords 被调用一次', globalThis.__persistCalls.length)
     eq(call && call.accountId, 'acc-1', '落库按 accountId 键控')
@@ -396,6 +396,15 @@ async function main() {
     const shortRow = '2026-09-27,service_account,svcacct_x,Legacy: user@x.com,opencode-go,deepseek-v4.1-flash,298'
     const skipRows = parseUsageExportCsv([CSV_HEADER, CSV_ROW_1, shortRow, CSV_ROW_2].join(CRLF) + CRLF)
     ok(skipRows !== null && skipRows.length === 2, '列数不足行跳过（其余行保留）', skipRows && skipRows.length)
+
+    // 多余列行跳过（字段内嵌逗号 → 字段错位；错位后是脏数据，不猜）
+    const extraRow = '2026-09-27,service_account,svcacct_x,Doe, John,opencode-go,deepseek-v4.1-flash,298,1418794,341157,35582464,0,0,52426066,2026-09-27T10:27:54.000Z'
+    const extraRows = parseUsageExportCsv([CSV_HEADER, CSV_ROW_1, extraRow, CSV_ROW_2].join(CRLF) + CRLF)
+    ok(extraRows !== null && extraRows.length === 2, '多余列（内嵌逗号）行跳过（其余行保留）', extraRows && extraRows.length)
+
+    // BOM 前缀表头兼容（服务端若带 BOM 不炸）
+    const bomRows = parseUsageExportCsv(String.fromCharCode(0xfeff) + CSV_HEADER + CRLF + CSV_ROW_1)
+    ok(bomRows !== null && bomRows.length === 1, 'BOM 前缀表头兼容', bomRows && bomRows.length)
 
     // 表头不符 → null（结构不识别 → 区块级降级）
     eq(parseUsageExportCsv(CSV_STANDARD.replace('cost_micro_cents', 'cost')), null, '表头列名不符 → null（降级，不猜）')

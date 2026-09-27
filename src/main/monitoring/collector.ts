@@ -7,7 +7,7 @@
 //   - 处理 commandcode / mimo / opencode 类型的已启用源下**每一个账号**（DeepSeek 等其余源接口结构不同，累积逻辑不可复用）
 //   - 采集间隔 = 统一自动刷新间隔（monitoring.autoRefreshMinutes，与页面刷新共用；0 = 关闭），
 //     每分钟检查一次是否需要采集，间隔从设置读取 → 改设置无需重启应用
-//   - 与手动刷新共用 refreshCommandCodeUsage / refreshMimoUsage，因此同样走 fetchProxy（尊重网络代理设置）；
+//   - 与手动刷新共用 refreshCommandCodeUsage / refreshMimoUsage / refreshOpenCodeUsage，因此同样走 fetchProxy（尊重网络代理设置）；
 //     页面刷新会调用 markUsageCollected(accountId) 占位——**按账号隔离**，
 //     A 账号的页面刷新不会抑制 B 账号同一间隔内的后台采集
 
