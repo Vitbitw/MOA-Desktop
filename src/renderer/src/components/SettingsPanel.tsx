@@ -2483,7 +2483,7 @@ function ProbeSection() {
                           })}
                           {hasMcCol && (
                             <th
-                              className="py-1 px-1 w-[44px] text-right text-muted-foreground font-medium"
+                              className="py-1 px-1 w-[56px] text-right text-muted-foreground font-medium"
                               title="订阅计划页 Monthly credits：该模型的月度额度（只读）"
                             >
                               月额度
