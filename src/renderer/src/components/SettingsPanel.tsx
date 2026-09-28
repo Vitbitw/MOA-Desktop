@@ -2399,6 +2399,28 @@ function ProbeSection() {
                     </label>
                   )}
 
+                  {/* 订阅套餐（仅 Command Code）：定位官方计划页抓「Usage limits / Monthly credits」 */}
+                  {providerForSource(s)?.baseUrl?.includes('api.commandcode.ai') && (
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>订阅套餐</span>
+                      <select
+                        value={s.ccPlanId ?? ''}
+                        onChange={(e) => updateSource(s.id, { ccPlanId: e.target.value || undefined })}
+                        className="rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                      >
+                        <option value="">自动检测（读云监控订阅）</option>
+                        <option value="individual-go">Go</option>
+                        <option value="individual-goat">Goat</option>
+                        <option value="individual-pro">Pro</option>
+                        <option value="individual-max">Max</option>
+                        <option value="individual-ultra">Ultra</option>
+                      </select>
+                      <span className="text-muted-foreground/70">
+                        探查时抓对应计划页的请求数限额与月度额度；云监控未识别订阅时请手动选择
+                      </span>
+                    </label>
+                  )}
+
                   <label className="block">
                     <span className="text-xs text-muted-foreground">官方定价页 URL</span>
                     <input

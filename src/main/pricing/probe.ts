@@ -10,6 +10,7 @@
 import { BrowserWindow } from 'electron'
 import { readAppSettings, updateRawAppSettings } from '../config/appSettings'
 import { getAllProviders, fetchAndCacheModels } from '../providers/providerManager'
+import { buildUpstreamHeaders, newUpstreamSessionId } from '../providers/upstreamHeaders'
 import { getMoaConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
 import { getUsageSnapshot } from '../monitoring/snapshotStore'
@@ -454,6 +455,14 @@ export function isCommandCodeSource(source: PricingProbeSource): boolean {
  */
 export function resolveProbeTarget(source: PricingProbeSource): ProbeTarget {
   if (!isCommandCodeSource(source)) return { url: source.url }
+  // 源级手动指定套餐（UI 选择）：云监控快照拿不到订阅时的可靠来源，优先于自动解析
+  const manual = source.ccPlanId ? CC_PLAN_PAGE[source.ccPlanId] : undefined
+  if (manual) {
+    if (DEBUG) {
+      console.log(`[PricingProbe] ${source.name}(${source.id}) 手动套餐 ${source.ccPlanId} → 计划页 ${manual.url}（额度列「${manual.creditsColumn}」）`)
+    }
+    return { url: manual.url, creditsColumn: manual.creditsColumn }
+  }
   try {
     // v5：套餐信息按**账号**存。同一源可能有 Plan 账号与按量账号——优先取 Plan 账号的订阅快照，
     // 拿不到再看其它账号，避免用按量账号的空订阅去否定套餐计划页。
@@ -1017,6 +1026,8 @@ export async function probeSource(
   onStage?: (stage: ProbeStage) => void,
   force = false
 ): Promise<ProbeSourceResult> {
+  // 本次探查任务的上游会话 ID：任务内全部 LLM 调用（主提取/补漏/额度）复用（opencode 系上游路由与缓存用）
+  const llmSessionId = newUpstreamSessionId()
   // 关键词自动取所绑定厂商 /models 的模型名
   const keywords = await getSourceKeywords(source)
   // 探查目标：Command Code 按订阅套餐动态选计划页（含额度列标题），其余源原样（后续抓取/来源记录统一用 effSource）
@@ -1052,7 +1063,7 @@ export async function probeSource(
   const pageText = locatePricingFragment(fullText, keywords, cache)
   const prompt = buildProbePrompt(effSource, keywords, pageText, target.creditsColumn)
   onStage?.('extracting')
-  const result = await callProbeLLM(model, prompt)
+  const result = await callProbeLLM(model, prompt, llmSessionId)
   if (result.status !== 'success' || !result.content) {
     return { ok: false, error: `大模型调用失败: ${result.error || '空响应'}` }
   }
@@ -1075,7 +1086,7 @@ export async function probeSource(
   const missing = findMissingModels(fullText, keywords, entries)
   if (missing.length > 0 && missing.length <= 20) {
     const fillText = buildMissingFragment(fullText, missing)
-    const fill = await callProbeLLM(model, buildFillPrompt(fillText, missing, target.creditsColumn))
+    const fill = await callProbeLLM(model, buildFillPrompt(fillText, missing, target.creditsColumn), llmSessionId)
     if (fill.status === 'success' && fill.content) {
       const added = appendNewEntries(entries, buildProbedEntries(effSource, extractJsonArray(fill.content) ?? [], keywords))
       if (DEBUG && added > 0) {
@@ -1088,7 +1099,7 @@ export async function probeSource(
   if (isCc) {
     const creditsText = locateCreditsFragment(fullText)
     if (creditsText) {
-      const cr = await callProbeLLM(model, buildCreditsPrompt(creditsText, target.creditsColumn))
+      const cr = await callProbeLLM(model, buildCreditsPrompt(creditsText, target.creditsColumn), llmSessionId)
       if (cr.status === 'success' && cr.content) {
         const creditsRaw = extractJsonArray<RawCreditsEntry>(cr.content) ?? []
         const touched = mergeCreditsIntoEntries(entries, creditsRaw, keywords)
@@ -1111,7 +1122,7 @@ export async function probeSource(
       const modelsText = await fetchPageText(CC_MODELS_URL, uncovered)
       if (modelsText) {
         const frag = buildMissingFragment(modelsText, uncovered)
-        const fill = await callProbeLLM(model, buildFillPrompt(frag, uncovered))
+        const fill = await callProbeLLM(model, buildFillPrompt(frag, uncovered), llmSessionId)
         if (fill.status === 'success' && fill.content) {
           const added = appendNewEntries(
             entries,
@@ -1148,9 +1159,9 @@ export function isRetriableLLMError(err: string): boolean {
 }
 
 /** 单次 LLM 调用（支持流式/非流式），返回 SubModelOutput */
-async function probeLLMOnce(model: ProbeModel, prompt: string, useStream: boolean): Promise<SubModelOutput> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (model.apiKey) headers.Authorization = `Bearer ${model.apiKey}`
+async function probeLLMOnce(model: ProbeModel, prompt: string, useStream: boolean, sessionId?: string): Promise<SubModelOutput> {
+  // 请求头统一构建（opencode.ai 系上游自动补 x-opencode-session，缺失会 400）
+  const headers = buildUpstreamHeaders(model.baseUrl, model.apiKey, sessionId)
   const body = JSON.stringify({
     model: model.modelId,
     messages: [{ role: 'user', content: prompt }],
@@ -1224,13 +1235,13 @@ async function probeLLMOnce(model: ProbeModel, prompt: string, useStream: boolea
  * 调用探查模型。优先流式（响应头尽早返回、边生成边输出，规避中转/Cloudflare 上游超时 524）；
  * 流式失败则回退非流式；可重试错误（5xx/524/超时/网络）重试一次，4xx 不重试避免重复计费。
  */
-async function callProbeLLM(model: ProbeModel, prompt: string): Promise<SubModelOutput> {
+async function callProbeLLM(model: ProbeModel, prompt: string, sessionId?: string): Promise<SubModelOutput> {
   let last: SubModelOutput | null = null
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const streamed = await probeLLMOnce(model, prompt, true)
+    const streamed = await probeLLMOnce(model, prompt, true, sessionId)
     if (streamed.status === 'success') return streamed
     last = streamed
-    const fallback = await probeLLMOnce(model, prompt, false)
+    const fallback = await probeLLMOnce(model, prompt, false, sessionId)
     if (fallback.status === 'success') return fallback
     last = fallback
     const err = fallback.error || streamed.error || ''

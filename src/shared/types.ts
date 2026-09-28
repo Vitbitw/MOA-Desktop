@@ -756,6 +756,12 @@ export interface PricingProbeSource {
    * 定向补充定价；关闭则只保留套餐计划页覆盖的模型。
    */
   fetchAllModelsPricing?: boolean
+  /**
+   * 仅 Command Code 源：手动指定订阅套餐（CC_PLAN_PAGE 的 key，如 individual-goat）。
+   * 用于定位官方计划页做「Usage limits / Monthly credits」额度抓取；
+   * 缺省（未选）时自动读云监控快照的订阅 planId，两者都拿不到则回退源 URL（不抓额度）。
+   */
+  ccPlanId?: string
 }
 
 /** 单个源的页面级探查缓存（独立于 sources 持久化，UI 编辑源时不会误覆盖） */
