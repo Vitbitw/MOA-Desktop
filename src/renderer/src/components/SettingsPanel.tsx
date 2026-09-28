@@ -1658,7 +1658,7 @@ function PricingRow({
           )}
         </td>
         <td className="py-1.5 px-1">
-          <div className="flex items-center gap-1 w-[64px]">
+          <div className="flex items-center gap-1 w-[64px] ml-auto">
             <input
               type="number"
               step="0.001"
@@ -1668,16 +1668,10 @@ function PricingRow({
               onChange={(e) => onChange({ ...config, input: e.target.value === '' ? undefined : Number(e.target.value) })}
               className={numInputCls}
             />
-            <span
-              className="shrink-0 text-[10px] text-muted-foreground whitespace-nowrap"
-              title={unitLabel}
-            >
-              {unitLabel}
-            </span>
           </div>
         </td>
         <td className="py-1.5 px-1">
-          <div className="flex items-center gap-1 w-[64px]">
+          <div className="flex items-center gap-1 w-[64px] ml-auto">
             <input
               type="number"
               step="0.001"
@@ -1687,16 +1681,10 @@ function PricingRow({
               onChange={(e) => onChange({ ...config, output: e.target.value === '' ? undefined : Number(e.target.value) })}
               className={numInputCls}
             />
-            <span
-              className="shrink-0 text-[10px] text-muted-foreground whitespace-nowrap"
-              title={unitLabel}
-            >
-              {unitLabel}
-            </span>
           </div>
         </td>
         <td className="py-1.5 px-1">
-          <div className="flex items-center gap-1 w-[64px]">
+          <div className="flex items-center gap-1 w-[64px] ml-auto">
             <input
               type="number"
               step="0.001"
@@ -1706,16 +1694,10 @@ function PricingRow({
               onChange={(e) => onChange({ ...config, cacheRead: e.target.value === '' ? undefined : Number(e.target.value) })}
               className={numInputCls}
             />
-            <span
-              className="shrink-0 text-[10px] text-muted-foreground whitespace-nowrap"
-              title={unitLabel}
-            >
-              {unitLabel}
-            </span>
           </div>
         </td>
         <td className="py-1.5 px-1">
-          <div className="flex items-center gap-1 w-[64px]">
+          <div className="flex items-center gap-1 w-[64px] ml-auto">
             <input
               type="number"
               step="0.001"
@@ -1725,12 +1707,6 @@ function PricingRow({
               onChange={(e) => onChange({ ...config, cacheCreation: e.target.value === '' ? undefined : Number(e.target.value) })}
               className={numInputCls}
             />
-            <span
-              className="shrink-0 text-[10px] text-muted-foreground whitespace-nowrap"
-              title={unitLabel}
-            >
-              {unitLabel}
-            </span>
           </div>
         </td>
         {showMonthlyCredits && (
@@ -2196,7 +2172,7 @@ function ProbeSection() {
   }
 
   return (
-    <div className="space-y-5 max-w-3xl">
+    <div className="space-y-5 max-w-[1200px]">
       <p className="text-sm text-muted-foreground">
         抓取官方定价页并用大模型提取定价，写入独立「官方探查价」层（支持峰谷/错峰时段价）。
         费用优先级：手动覆盖 &gt; 官方探查 &gt; 内置默认。
@@ -2306,6 +2282,8 @@ function ProbeSection() {
                 e.usageLimits.weekly !== undefined ||
                 e.usageLimits.monthly !== undefined)
           )
+          // 表头单位标注（源级）：取首个探查条目的货币/单位；缺省 $/M
+          const srcUnitLabel = `${meta.entries[0]?.currency === 'CNY' ? '¥' : '$'}/${unitAbbrev(meta.entries[0]?.unit)}`
           // 源绑定的厂商（通道徽标由此推导；未绑定不标）
           const boundProvider = providerForSource(s)
           return (
@@ -2458,7 +2436,7 @@ function ProbeSection() {
                     </div>
 
                     {!collapsed.has(s.id) && (
-                      <table className="w-full text-sm">
+                      <table className="w-full text-sm min-w-[720px]">
                       <thead>
                         <tr className="border-b border-border">
                           {SORT_COLUMNS.map((col) => {
@@ -2478,6 +2456,9 @@ function ProbeSection() {
                                   {col.label}
                                   {sortIndicator(s.id, col.key)}
                                 </button>
+                                {isNum && (
+                                  <div className="text-[10px] leading-tight font-normal opacity-60">{srcUnitLabel}</div>
+                                )}
                               </th>
                             )
                           })}
