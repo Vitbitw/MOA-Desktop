@@ -1650,8 +1650,8 @@ function PricingRow({
           ) : (
             <button
               onClick={() => setEditingKey(true)}
-              className="block w-full truncate text-left text-xs font-mono text-foreground hover:text-primary"
-              title="点击编辑模型 ID"
+              className="block w-full break-all text-left text-xs font-mono text-foreground hover:text-primary"
+              title={`${modelId}（点击编辑）`}
             >
               {modelId}
             </button>
@@ -1733,6 +1733,26 @@ function PricingRow({
             </span>
           </div>
         </td>
+        {showMonthlyCredits && (
+          <td
+            className="py-1.5 px-1 text-right text-xs tabular-nums text-muted-foreground"
+            title="该模型月度额度（订阅计划页 Monthly credits，只读）"
+          >
+            {mcText}
+          </td>
+        )}
+        {showUsageLimits && (
+          <td
+            className="py-1.5 px-1 text-right text-[10px] tabular-nums text-muted-foreground whitespace-nowrap"
+            title={
+              hasUl
+                ? '官方估算请求数：5 小时 / 每周 / 每月（只读）'
+                : '暂无用量限额数据（计划页 Usage limits 区块抓取后显示）'
+            }
+          >
+            {ulText}
+          </td>
+        )}
         <td className="py-1.5 px-1">
           <div className="flex items-center gap-1">
             <button
@@ -1759,26 +1779,6 @@ function PricingRow({
             </button>
           </div>
         </td>
-        {showMonthlyCredits && (
-          <td
-            className="py-1.5 px-1 text-right text-xs tabular-nums text-muted-foreground"
-            title="该模型月度额度（订阅计划页 Monthly credits，只读）"
-          >
-            {mcText}
-          </td>
-        )}
-        {showUsageLimits && (
-          <td
-            className="py-1.5 px-1 text-right text-[10px] tabular-nums text-muted-foreground whitespace-nowrap"
-            title={
-              hasUl
-                ? '官方估算请求数：5 小时 / 每周 / 每月（只读）'
-                : '暂无用量限额数据（计划页 Usage limits 区块抓取后显示）'
-            }
-          >
-            {ulText}
-          </td>
-        )}
       </tr>
       {showWindows && (
         <tr className="border-b border-border/50 bg-accent/10">
@@ -2466,7 +2466,7 @@ function ProbeSection() {
                             return (
                               <th
                                 key={col.key}
-                                className={`py-1 text-muted-foreground font-medium ${isNum ? 'text-right px-1 w-[96px]' : 'text-left px-2'}`}
+                                className={`py-1 text-muted-foreground font-medium ${isNum ? 'text-right px-1 w-[76px]' : 'text-left px-2'}`}
                               >
                                 <button
                                   onClick={() => handleSortClick(s.id, col.key)}
@@ -2483,7 +2483,7 @@ function ProbeSection() {
                           })}
                           {hasMcCol && (
                             <th
-                              className="py-1 px-1 w-[64px] text-right text-muted-foreground font-medium"
+                              className="py-1 px-1 w-[44px] text-right text-muted-foreground font-medium"
                               title="订阅计划页 Monthly credits：该模型的月度额度（只读）"
                             >
                               月额度
@@ -2491,7 +2491,7 @@ function ProbeSection() {
                           )}
                           {hasUlCol && (
                             <th
-                              className="py-1 px-1 w-[130px] text-right text-muted-foreground font-medium"
+                              className="py-1 px-1 w-[108px] text-right text-muted-foreground font-medium"
                               title="官方估算请求数：5 小时 / 每周 / 每月（只读）"
                             >
                               Usage limits
