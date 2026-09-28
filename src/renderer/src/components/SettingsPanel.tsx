@@ -1621,7 +1621,7 @@ function PricingRow({
   }
 
   const numInputCls =
-    'min-w-0 flex-1 text-right rounded border border-input bg-background px-1.5 py-1 text-xs text-foreground placeholder:text-muted-foreground/60'
+    'min-w-0 flex-1 text-right rounded border border-input bg-background px-1 py-1 text-xs text-foreground placeholder:text-muted-foreground/60'
 
   // 只读额度列文本：月额度（原币格式化）与 Usage limits（5 小时 / 每周 / 每月 请求数）
   const mcText = probedMonthlyCredits !== undefined ? formatCost(probedMonthlyCredits, currency) : '—'
@@ -1658,7 +1658,7 @@ function PricingRow({
           )}
         </td>
         <td className="py-1.5 px-1">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 w-[64px]">
             <input
               type="number"
               step="0.001"
@@ -1677,7 +1677,7 @@ function PricingRow({
           </div>
         </td>
         <td className="py-1.5 px-1">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 w-[64px]">
             <input
               type="number"
               step="0.001"
@@ -1696,7 +1696,7 @@ function PricingRow({
           </div>
         </td>
         <td className="py-1.5 px-1">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 w-[64px]">
             <input
               type="number"
               step="0.001"
@@ -1715,7 +1715,7 @@ function PricingRow({
           </div>
         </td>
         <td className="py-1.5 px-1">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 w-[64px]">
             <input
               type="number"
               step="0.001"
@@ -2432,7 +2432,7 @@ function ProbeSection() {
                   </label>
 
                   {/* 定价：自动填入官方探查价，可直接编辑 */}
-                  <div className="border-t border-border pt-3">
+                  <div className="border-t border-border pt-3 overflow-x-auto">
                     <div className="flex items-center justify-between mb-2">
                       <button
                         onClick={() => toggleCollapsed(s.id)}
@@ -2458,7 +2458,7 @@ function ProbeSection() {
                     </div>
 
                     {!collapsed.has(s.id) && (
-                      <table className="w-full text-sm table-fixed">
+                      <table className="w-full text-sm">
                       <thead>
                         <tr className="border-b border-border">
                           {SORT_COLUMNS.map((col) => {
@@ -2466,7 +2466,7 @@ function ProbeSection() {
                             return (
                               <th
                                 key={col.key}
-                                className={`py-1 text-muted-foreground font-medium ${isNum ? 'text-right px-1 w-[76px]' : 'text-left px-2'}`}
+                                className={`py-1 text-muted-foreground font-medium ${isNum ? 'text-right px-1' : 'text-left px-2'}`}
                               >
                                 <button
                                   onClick={() => handleSortClick(s.id, col.key)}
@@ -2491,7 +2491,7 @@ function ProbeSection() {
                           )}
                           {hasUlCol && (
                             <th
-                              className="py-1 px-1 w-[108px] text-right text-muted-foreground font-medium"
+                              className="py-1 px-1 text-right text-muted-foreground font-medium"
                               title="官方估算请求数：5 小时 / 每周 / 每月（只读）"
                             >
                               Usage limits
