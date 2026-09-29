@@ -29,9 +29,31 @@ const parts = [
   pfn('canonNorm'),
   pfn('canonicalizePattern'),
   grab(probeSrc, 'MAX_PAGE_CHARS', /const MAX_PAGE_CHARS = [^\n]+/),
+  grab(probeSrc, 'FRAGMENT_PAD', /const FRAGMENT_PAD = [^\n]+/),
+  grab(probeSrc, 'MIN_FRAGMENT_PRICE_MARKS', /const MIN_FRAGMENT_PRICE_MARKS = [^\n]+/),
+  grab(probeSrc, 'HITS_PER_KEYWORD', /const HITS_PER_KEYWORD = [^\n]+/),
+  grab(probeSrc, 'CANDIDATE_HITS_PER_KEYWORD', /const CANDIDATE_HITS_PER_KEYWORD = [^\n]+/),
+  grab(probeSrc, 'PRICE_MARK_WEIGHT', /const PRICE_MARK_WEIGHT = [^\n]+/),
+  grab(probeSrc, 'NARROW_PAD', /const NARROW_PAD = [^\n]+/),
   grab(probeSrc, 'CREDITS_ANCHOR_REQUESTS', /const CREDITS_ANCHOR_REQUESTS = [^\n]+/),
   grab(probeSrc, 'CREDITS_ANCHOR_MONTHLY', /const CREDITS_ANCHOR_MONTHLY = [^\n]+/),
   grab(probeSrc, 'CREDITS_SLICE_CHARS', /const CREDITS_SLICE_CHARS = [^\n]+/),
+  pfn('quantile'),
+  pfn('firstKeywordHits'),
+  pfn('keywordHitPositions'),
+  pfn('allKeywordHits'),
+  pfn('priceMarksIn'),
+  pfn('priceMarkPositions'),
+  pfn('pickPriceAdjacentPosition'),
+  pfn('clusterHits'),
+  pfn('pricingSpan'),
+  pfn('pricingSpanByDensity'),
+  pfn('locatePricingFragment'),
+  pfn('locateByFirstHits'),
+  pfn('locateByPriceDensity'),
+  pfn('cleanAnchor'),
+  pfn('deriveFragmentAnchors'),
+  pfn('buildMissingFragment'),
   pfn('toFiniteNum'),
   pfn('toMonthlyCredits'),
   pfn('parseDays'),
@@ -61,7 +83,7 @@ function makeFactory(deps) {
     'readAppSettings',
     'getUsageSnapshot',
     cachedJs +
-      '\n; return { toMonthlyCredits, buildProbedEntries, resolveProbeTarget, buildProbePrompt, buildFillPrompt, CC_PLAN_PAGE, canonicalizePattern, locateCreditsFragment, buildCreditsPrompt, mergeCreditsIntoEntries }'
+      '\n; return { toMonthlyCredits, buildProbedEntries, resolveProbeTarget, buildProbePrompt, buildFillPrompt, CC_PLAN_PAGE, canonicalizePattern, locateCreditsFragment, buildCreditsPrompt, mergeCreditsIntoEntries, normalizeForMatch, allKeywordHits, keywordHitPositions, priceMarksIn, locatePricingFragment, locateByFirstHits, locateByPriceDensity, deriveFragmentAnchors, buildMissingFragment }'
   )
   return f(
     deps.getAllProviders || (() => []),
@@ -323,6 +345,66 @@ console.log('额度区块：')
   ok(p.includes('"fiveHour"') && p.includes('"weekly"') && p.includes('"monthly"') && p.includes('"monthlyCredits"'), 'prompt 含四个输出字段')
   ok(p.includes('只取列标题为「Monthly credits」'), 'prompt 含指列规则')
   ok(!f.buildCreditsPrompt('TEXT').includes('只取列标题为'), '无列提示 → 不含指列规则')
+}
+
+// ── 10. 定价区块定位：价格门控 + 密度路径 + 锚句/补漏价格邻近 ──
+console.log('定价区块定位：')
+{
+  const f = makeFactory({})
+  const KW = ['alpha-5', 'beta-6', 'gamma-7']
+
+  eq(f.priceMarksIn('a $1.0 b ¥2 c ￥3 d', 0, 20), 3, 'priceMarksIn 计 $¥￥ 三种标记')
+  eq(f.priceMarksIn('a $1.0 b', 0, 2), 0, '区间外不计数')
+  const mt = f.normalizeForMatch('Alpha 5 x Alpha 5 x Alpha 5')
+  eq(f.keywordHitPositions(mt, 'alpha-5', 2), [0, 10], 'keywordHitPositions 去重升序 + 限流')
+  const t5 = 'Alpha 5 x Beta 6 x Alpha 5'
+  eq(
+    [...f.allKeywordHits(t5, ['alpha-5', 'beta-6'])].sort((a, b) => a - b),
+    [t5.indexOf('Alpha 5'), t5.indexOf('Beta 6'), t5.lastIndexOf('Alpha 5')],
+    'allKeywordHits 覆盖全部出现位置'
+  )
+
+  // opencode 形态：正文前部先列模型名枚举区（无价格），价格表在数千字符之后
+  const nameList = ' 模型列表： Alpha 5 Beta 6 Gamma 7 NoPriceHere'
+  const priceTable = ' 模型 输入 输出 Alpha 5 $1.00 $2.00 Beta 6 $3.00 $4.00 Gamma 7 $5.00 $6.00 PriceTable'
+  const text4 = nameList + '说'.repeat(6000) + priceTable
+  const oldFrag = f.locateByFirstHits(text4, KW)
+  ok(oldFrag.includes('NoPriceHere') && !oldFrag.includes('PriceTable'), '常规路径切到无价格枚举区（门控触发的前提）')
+
+  const frag4 = f.locatePricingFragment(text4, KW)
+  ok(frag4.includes('PriceTable') && frag4.includes('$5.00'), '价格不足 → 密度路径切到价格表')
+  ok(!frag4.includes('NoPriceHere'), '密度片段不含枚举区')
+  const d = f.locateByPriceDensity(text4, KW)
+  ok(!!d && d.includes('$5.00') && !d.includes('NoPriceHere'), 'locateByPriceDensity 直接命中价格表')
+
+  // 门控零回归：主簇（命中数最多）里价格充足 → 不重切（即使别处价格更多）
+  const a3 = ' Alpha 5 $1.11 $2.22 $3.33 LegacyKeep Beta 6 Gamma 7'
+  const b3 = ' Alpha 5 MorePrice $9.99 $8.88 $7.77 $6.66 $5.55 MoreEnd'
+  const text3 = a3 + '填'.repeat(6000) + b3
+  const frag3 = f.locatePricingFragment(text3, KW)
+  ok(frag3.includes('LegacyKeep') && !frag3.includes('MoreEnd'), '主簇价格充足 → 常规路径不重切（零回归）')
+
+  // 锚句价格邻近：同 pattern 多处出现时优选价格区，锚落在价格区而非顶部枚举区
+  const entries = [{ pattern: 'alpha-5' }, { pattern: 'beta-6' }, { pattern: 'gamma-7' }]
+  const anchors = f.deriveFragmentAnchors(text4, entries)
+  ok(!!anchors.fragmentFrom && text4.includes(anchors.fragmentFrom), '锚句是原文连续片段')
+  const fromIdx = anchors.fragmentFrom ? text4.indexOf(anchors.fragmentFrom) : -1
+  ok(fromIdx > 4000, '锚落在价格区（不是顶部名字枚举区）')
+
+  // 补漏切片价格邻近：目标行必在片段内
+  const mfrag = f.buildMissingFragment(text4, ['beta-6'])
+  ok(mfrag.includes('$3.00') && mfrag.includes('Beta 6'), '补漏切片取价格邻近位置')
+
+  // opencode 真实形态（中文表头）：密度路径覆盖完整表格（含表头与末行）
+  const ocLike =
+    ' 当前的模型列表包括： Alpha 5 Beta 6 Gamma 7 ' +
+    '说明'.repeat(400) +
+    ' 模型 输入 输出 缓存读取 缓存写入 每月限制 Alpha 5 $1.00 $2.00 $0.10 - $60 Beta 6 $3.00 $4.00 $0.30 $0.20 $15 Gamma 7 $5.00 $6.00 $0.50 - $30'
+  const ocFrag = f.locatePricingFragment(ocLike, KW)
+  ok(
+    ocFrag.includes('缓存读取') && ocFrag.includes('$1.00') && ocFrag.includes('$30'),
+    '中文表头价格表：密度路径覆盖表头与末行'
+  )
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

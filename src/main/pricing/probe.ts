@@ -1,7 +1,8 @@
 // ─── 官方定价探查（LLM 自动更新定价）───
 // 职责：
 //   1. 抓取官方定价页文本：HTTP（fetchProxy，尊重网络代理）优先 + 隐藏浏览器渲染兜底（兼容 SPA）
-//   2. 用配置的大模型从页面文本提取结构化定价（含峰谷/错峰时段价）
+//   2. 用配置的大模型从页面文本提取结构化定价（含峰谷/错峰时段价）；定位对页面模板不敏感——
+//      价格门控：常规片段切不到价格（如页面先列模型名枚举区）时改用「价格密度定位」+ 提取 0 条时整页降级重试
 //   3. Command Code 源增强：plan pattern 规范化到 /models 模型 ID、计划页额度区块提取（Usage limits 请求数 +
 //      Monthly credits）、套餐外模型（premium）定价补全（全站 models 页定向提取）
 //   4. 校验、币种归一化（CNY ÷7.2 → USD）、写入 AppSettings.probedPricing（独立探查定价层）
@@ -36,6 +37,16 @@ const LLM_TIMEOUT_MS = 150_000
 const MAX_PAGE_CHARS = 12_000
 /** 锚句定位定价区块时的前后安全边距（字符），保证锚所在的表头/行上下文完整 */
 const FRAGMENT_PAD = 400
+/** 价格标记最少数量：片段内低于此值视为「没切到价格区」，触发价格密度定位（见 locatePricingFragment） */
+const MIN_FRAGMENT_PRICE_MARKS = 3
+/** 单个关键词参与定位聚簇命中的位置数上限（防超长页面/高频词爆量） */
+const HITS_PER_KEYWORD = 8
+/** 锚句/补漏切片时单关键词的候选位置数上限（多于定位：需覆盖名字枚举区 + 多处表格行） */
+const CANDIDATE_HITS_PER_KEYWORD = 24
+/** 价格密度评分权重：每个价格标记（$¥￥）计 3 分，与命中数（1 分/命中）合并排序 */
+const PRICE_MARK_WEIGHT = 3
+/** 价格分位收窄的外扩字符数：覆盖「模型名 + 价格」行的上下文 */
+const NARROW_PAD = 300
 /** CNY → USD 固定折算率（与 usageFormat.ts 的 7.2 一致） */
 const CNY_TO_USD_RATE = 7.2
 /** 额度区块锚：请求数限额表表头（goat/pro/max 三套餐页通用）；`fullText.indexOf` 定位 */
@@ -192,30 +203,39 @@ export function canonicalizePattern(pattern: string, keywords: string[]): string
 }
 
 /**
- * 由关键词命中位置求定价区块的覆盖区间（起止索引）。
+ * 由关键词命中位置求定价区块的覆盖区间（起止索引）——常规路径。
  * 命中常分为多个簇：页面顶部 DEAL/套餐区小簇（几个模型名）、定价表主体大簇、页脚 FAQ 小簇。
  * 直接取「命中数最多的簇」为主簇，天然排除顶部/页脚离群簇，保证窗口精确覆盖定价表
  * 且不超出 MAX_PAGE_CHARS 截断配额（截断会切掉表尾模型）。
  */
 function pricingSpan(hits: number[], textLen: number): { lo: number; hi: number } | undefined {
   if (hits.length === 0) return undefined
-  hits.sort((a, b) => a - b)
-  const GAP = Math.max(4_000, textLen * 0.08)
-  // 相邻间距 <= GAP 归同一簇
-  const clusters: number[][] = []
-  let cur = [hits[0]]
-  for (let i = 1; i < hits.length; i++) {
-    if (hits[i] - hits[i - 1] <= GAP) {
-      cur.push(hits[i])
-    } else {
-      clusters.push(cur)
-      cur = [hits[i]]
-    }
-  }
-  clusters.push(cur)
+  const clusters = clusterHits(hits, textLen)
   // 主簇 = 命中数最多的簇
   const main = clusters.reduce((a, b) => (b.length > a.length ? b : a))
   return { lo: main[0], hi: main[main.length - 1] }
+}
+
+/**
+ * 按价格密度选取定价区块（价格密度路径的定位核心）。
+ * 全部命中聚簇后逐簇评分 = 命中数 + PRICE_MARK_WEIGHT × 簇区间内价格标记数，取最高分簇。
+ * 解决「模型名首次集中出现在页面顶部枚举区（无价格）」时常规路径切错区块的问题
+ * （如 opencode.ai 的 Go 文档页：正文先列当前模型列表，价格表在其后，首命中全落在列表里）。
+ */
+function pricingSpanByDensity(fullText: string, keywords: string[]): { lo: number; hi: number } | undefined {
+  const hits = allKeywordHits(fullText, keywords)
+  if (hits.length === 0) return undefined
+  const clusters = clusterHits(hits, fullText.length)
+  let best = clusters[0]
+  let bestScore = -1
+  for (const c of clusters) {
+    const score = c.length + PRICE_MARK_WEIGHT * priceMarksIn(fullText, c[0], c[c.length - 1])
+    if (score > bestScore) {
+      bestScore = score
+      best = c
+    }
+  }
+  return { lo: best[0], hi: best[best.length - 1] }
 }
 
 /** 每个关键词（含变体）首次命中在全文中的位置（原文索引）；未命中跳过 */
@@ -232,6 +252,97 @@ function firstKeywordHits(fullText: string, keywords: string[]): number[] {
     }
   }
   return hits
+}
+
+/**
+ * 单个关键词（含变体）在**归一化全文**中的所有命中位置（位置去重、升序、最多 limit 个）。
+ * 变体之间共享去重（同一出现不被多变体重复计）。
+ * 供定位聚簇（allKeywordHits）、锚句生成与补漏切片（价格邻近优选）复用。
+ */
+function keywordHitPositions(matchText: string, k: string, limit: number): number[] {
+  const out = new Set<number>()
+  for (const v of keywordVariants(k)) {
+    const nv = normalizeForMatch(v)
+    if (!nv) continue
+    let idx = matchText.indexOf(nv)
+    while (idx !== -1) {
+      out.add(idx)
+      if (out.size >= limit) break
+      idx = matchText.indexOf(nv, idx + 1)
+    }
+    if (out.size >= limit) break
+  }
+  return [...out].sort((a, b) => a - b)
+}
+
+/** 全部关键词的全部命中位置（每关键词限 HITS_PER_KEYWORD 个；定位聚簇用） */
+function allKeywordHits(fullText: string, keywords: string[]): number[] {
+  const matchText = normalizeForMatch(fullText)
+  const hits: number[] = []
+  for (const k of keywords) {
+    hits.push(...keywordHitPositions(matchText, k, HITS_PER_KEYWORD))
+  }
+  return hits
+}
+
+/** 区间内价格标记（$ / ¥ / ￥）数量：片段有效性判定与价格密度评分用 */
+function priceMarksIn(text: string, lo: number, hi: number): number {
+  let n = 0
+  const from = Math.max(0, lo)
+  const to = Math.min(text.length, hi)
+  for (let i = from; i < to; i++) {
+    const c = text[i]
+    if (c === '$' || c === '¥' || c === '￥') n++
+  }
+  return n
+}
+
+/** 区间内全部价格标记位置（原文索引，升序；价格分位收窄用） */
+function priceMarkPositions(text: string, lo: number, hi: number): number[] {
+  const out: number[] = []
+  const from = Math.max(0, lo)
+  const to = Math.min(text.length, hi)
+  for (let i = from; i < to; i++) {
+    const c = text[i]
+    if (c === '$' || c === '¥' || c === '￥') out.push(i)
+  }
+  return out
+}
+
+/**
+ * 从候选命中位置中优选「价格邻近」的一处：位置后 [p-100, p+600] 窗口内价格标记最多者（并列取最早）。
+ * 用于锚句生成与补漏切片——跳过页面顶部模型名枚举区等无价格的出现。空数组返回 -1。
+ */
+function pickPriceAdjacentPosition(fullText: string, positions: number[]): number {
+  let pick = positions[0] ?? -1
+  let bestScore = -1
+  for (const p of positions) {
+    const score = priceMarksIn(fullText, p - 100, p + 600)
+    if (score > bestScore) {
+      bestScore = score
+      pick = p
+    }
+  }
+  return pick
+}
+
+/** 命中位置聚簇：相邻间距 ≤ GAP（页面越大 GAP 越大）归同簇；返回按位置升序的簇数组 */
+function clusterHits(hits: number[], textLen: number): number[][] {
+  if (hits.length === 0) return []
+  const sorted = [...hits].sort((a, b) => a - b)
+  const GAP = Math.max(4_000, textLen * 0.08)
+  const clusters: number[][] = []
+  let cur = [sorted[0]]
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] - sorted[i - 1] <= GAP) {
+      cur.push(sorted[i])
+    } else {
+      clusters.push(cur)
+      cur = [sorted[i]]
+    }
+  }
+  clusters.push(cur)
+  return clusters
 }
 
 function containsKeyword(text: string, keywords: string[]): boolean {
@@ -339,12 +450,31 @@ function readProbedPricingEntries(sourceId: string): ProbedPricingEntry[] {
 }
 
 /**
- * 从全文定位定价区块文本（LLM 输入片段）：
- * 关键词（模型名，归一化匹配）命中位置构成的覆盖区间为主依据，缓存锚句区间并入取并集——
- * 即使历史锚句劣化（集中在单行）或漂移，也不会让片段小于关键词覆盖的定价表主体。
- * 全部失败回退整页头部截断（原行为兜底）。
+ * 从全文定位定价区块文本（LLM 输入片段），价格门控两条路径：
+ *  1) 常规路径（locateByFirstHits）：关键词（模型名，归一化匹配）首次命中聚簇的主簇 + 缓存锚句区间并集——
+ *     已工作页面的原行为；
+ *  2) 价格密度路径（locateByPriceDensity）：常规片段里价格标记（$¥￥）不足 MIN_FRAGMENT_PRICE_MARKS 时启用——
+ *     全部命中聚簇按「命中数 + 3×价格标记数」评分选簇，再按簇内价格位置 3%~97% 分位收窄，
+ *     修复「页面先列模型名枚举区（无价格）、价格表在后」导致首命中全落在枚举区、片段切不到价格的页面。
+ * 密度路径不可用时回退常规结果（含整页头部截断兜底）。
  */
 function locatePricingFragment(
+  fullText: string,
+  keywords: string[],
+  anchors?: Pick<PricingPageCache, 'fragmentFrom' | 'fragmentTo'>
+): string {
+  const legacy = locateByFirstHits(fullText, keywords, anchors)
+  // 价格门控：常规片段已含价格 → 沿用（对已能解析的页面零回归）
+  if (priceMarksIn(legacy, 0, legacy.length) >= MIN_FRAGMENT_PRICE_MARKS) return legacy
+  return locateByPriceDensity(fullText, keywords) ?? legacy
+}
+
+/**
+ * 常规路径（原行为）：关键词首次命中聚簇的覆盖区间为主依据，缓存锚句区间并入取并集——
+ * 即使历史锚句劣化（集中在单行）或漂移，也不会让片段小于关键词覆盖的定价表主体。
+ * 全部失败回退整页头部截断。
+ */
+function locateByFirstHits(
   fullText: string,
   keywords: string[],
   anchors?: Pick<PricingPageCache, 'fragmentFrom' | 'fragmentTo'>
@@ -375,6 +505,23 @@ function locatePricingFragment(
   return fullText.slice(0, MAX_PAGE_CHARS)
 }
 
+/**
+ * 价格密度路径：全命中聚簇评分选簇 + 价格分位收窄。
+ * 收窄聚焦价格实体区（3%~97% 分位 ± NARROW_PAD），避免「名字枚举区 + 表格 + 尾注」被合簇后
+ * 超出 MAX_PAGE_CHARS 截断丢掉表尾。选中簇区间内价格不足（无信号可用）返回 undefined。
+ */
+function locateByPriceDensity(fullText: string, keywords: string[]): string | undefined {
+  const span = pricingSpanByDensity(fullText, keywords)
+  if (!span) return undefined
+  const prices = priceMarkPositions(fullText, span.lo, span.hi)
+  if (prices.length < MIN_FRAGMENT_PRICE_MARKS) return undefined
+  const a = prices[Math.floor((prices.length - 1) * 0.03)]
+  const b = prices[Math.floor((prices.length - 1) * 0.97)]
+  const lo = Math.max(0, a - NARROW_PAD)
+  const hi = Math.min(fullText.length, b + NARROW_PAD)
+  return fullText.slice(lo, hi).slice(0, MAX_PAGE_CHARS)
+}
+
 /** 清理锚文本：压缩空白。锚须是原文连续片段（indexOf 子串匹配），故不删内部字符 */
 function cleanAnchor(s: string): string {
   return s.replace(/\s+/g, ' ').trim()
@@ -382,7 +529,8 @@ function cleanAnchor(s: string): string {
 
 /**
  * 探查成功后从全文生成定价区块锚句：
- * 取所有条目 pattern（模型名）在全文中的命中位置，取 20%~80% 分位分别作为起止锚。
+ * 取所有条目 pattern（模型名）在全文中的「价格邻近」命中位置——同 pattern 多处出现时优选周围价格标记
+ * 最多的一处（排除页面顶部模型名枚举区等无价格出现），取 20%~80% 分位分别作为起止锚。
  * 用分位而非首末：顶部 DEAL/套餐区也会出现模型名（离群点），首末锚会被污染；
  * 分位锚稳定落在定价表主体，下次页面变更时间按锚切出完整定价区块。
  */
@@ -391,7 +539,13 @@ function deriveFragmentAnchors(
   entries: ProbedPricingEntry[]
 ): { fragmentFrom?: string; fragmentTo?: string } {
   if (entries.length === 0) return {}
-  const hits = firstKeywordHits(fullText, entries.map((e) => e.pattern))
+  const matchText = normalizeForMatch(fullText)
+  const hits: number[] = []
+  for (const e of entries) {
+    if (!e.pattern) continue
+    const pick = pickPriceAdjacentPosition(fullText, keywordHitPositions(matchText, e.pattern, CANDIDATE_HITS_PER_KEYWORD))
+    if (pick >= 0) hits.push(pick)
+  }
   if (hits.length === 0) return {}
   hits.sort((a, b) => a - b)
   const lo = quantile(hits, 0.2) ?? hits[0]
@@ -521,7 +675,7 @@ function buildProbePrompt(
 2. 计费单位按页面实际标注如实填写到 unit 字段（如 "per 1M tokens" / "per 1K tokens" / "per request" / "per hour"）；页面未标注单位时默认 "per 1M tokens"。
 3. 只输出 JSON 数组，每项结构：
 { "pattern": "模型ID或唯一前缀", "input": 数字, "output": 数字, "currency": "USD"|"CNY", "unit": "计费单位描述", "cacheRead": 数字(可选), "cacheCreation": 数字(可选), "monthlyCredits": 数字(可选), "windows": [ { "start": "HH:mm", "end": "HH:mm", "input": 数字, "output": 数字, "days": ["mon","tue"] (可选, 适用星期, 缺省=每天; 也接受 "weekday"/"工作日"/"weekend"/"周末" 或 [1,2,3] 数字数组) } ] }
-   - 页面标注的「输入（缓存命中）」对应 cacheRead，「输入（缓存未命中）」对应 input。
+   - 页面标注的「输入（缓存命中）」对应 cacheRead，「输入（缓存未命中）」对应 input；中文表头「缓存读取」按 cacheRead、「缓存写入」按 cacheCreation 提取（页面无该列则省略）。
    - monthlyCredits 是套餐给该模型的「月度额度」（如计划页 Monthly credits 列的 $70），是额度不是单价：取当前生效数值（促销行的划线原价忽略，只取现价）；页面没有该列就省略，不要编造。${columnRule}
 4. windows 用于峰谷/错峰/时段优惠价（如 off-peak、错峰、时段折扣、凌晨低价、工作日/周末差价）。若页面含此类时段价，务必提取到 windows；无则省略该字段。窗口时间为 24 小时制 HH:mm，时区为 ${tz}。
 4.5. 定价表可能延续到片段末尾（如 Inkling、Grok 等表尾模型）。务必把页面上所有已标注价格的模型都提取，不要遗漏表格末尾的行。
@@ -568,19 +722,19 @@ function findMissingModels(
   return missing
 }
 
-/** 补漏输入：围绕每个缺失模型在全文中的位置切片（前后上下文），重叠区间合并后拼接。
- *  不依赖主定位窗口——即使主窗口被 12k 截断切掉了表尾，这里仍能精确包含目标模型行。 */
+/**
+ * 补漏输入：围绕每个缺失模型在全文中的「价格邻近」位置切片（前后上下文），重叠区间合并后拼接。
+ * 同 pattern 多处出现时优选周围价格标记最多的位置（页面顶部模型名枚举区等无价格出现会被跳过）。
+ * 不依赖主定位窗口——即使主窗口被 12k 截断切掉了表尾，这里仍能精确包含目标模型行。
+ */
 function buildMissingFragment(fullText: string, missing: string[]): string {
   const matchText = normalizeForMatch(fullText)
   // 每个缺失模型取一个命中位置，切片 [idx-300, idx+800]
   const ranges: { lo: number; hi: number }[] = []
   for (const k of missing) {
-    for (const v of keywordVariants(k)) {
-      const idx = matchText.indexOf(normalizeForMatch(v))
-      if (idx >= 0) {
-        ranges.push({ lo: Math.max(0, idx - 300), hi: Math.min(fullText.length, idx + 800) })
-        break
-      }
+    const pick = pickPriceAdjacentPosition(fullText, keywordHitPositions(matchText, k, CANDIDATE_HITS_PER_KEYWORD))
+    if (pick >= 0) {
+      ranges.push({ lo: Math.max(0, pick - 300), hi: Math.min(fullText.length, pick + 800) })
     }
   }
   if (ranges.length === 0) return fullText.slice(0, MAX_PAGE_CHARS)
@@ -1074,6 +1228,30 @@ export async function probeSource(
   }
 
   let entries = buildProbedEntries(effSource, extractJsonArray(result.content) ?? [], keywords)
+  if (entries.length === 0) {
+    // 降级重试：定位片段可能切错区块（如页面顶部先列模型名枚举区，价格表在片段之外）→ 改用整页头部再试一次
+    const fallbackText = fullText.slice(0, MAX_PAGE_CHARS)
+    if (fallbackText !== pageText) {
+      if (DEBUG) {
+        console.log(
+          `[PricingProbe] ${source.name}(${source.id}) 片段未提取到定价（${pageText.length} chars）→ 整页头部重试（${fallbackText.length} chars）`
+        )
+      }
+      const retry = await callProbeLLM(
+        model,
+        buildProbePrompt(effSource, keywords, fallbackText, target.creditsColumn),
+        llmSessionId
+      )
+      if (retry.status === 'success' && retry.content) {
+        entries = buildProbedEntries(effSource, extractJsonArray(retry.content) ?? [], keywords)
+        if (DEBUG) {
+          console.log(`[PricingProbe] ${source.name}(${source.id}) 整页头部重试提取 ${entries.length} 条`)
+        }
+      } else if (DEBUG) {
+        console.warn(`[PricingProbe] ${source.name}(${source.id}) 整页头部重试失败: ${retry.error || 'empty'}`)
+      }
+    }
+  }
   if (entries.length === 0) {
     // 失败时打印原始响应便于定位（可能是格式不符 / 页面无相关价格）
     console.warn(
