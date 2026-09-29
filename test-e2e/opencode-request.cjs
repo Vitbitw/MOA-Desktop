@@ -7,7 +7,7 @@
 //     响应 { usage: { rolling / weekly / monthly: { status, percent, resetsAt(ISO) } } }；
 //     percent = 已用百分比（0-100 整数）；无效 key → 401；HEAD 恒 401 → 必须 GET。
 //   detail：GET https://opencode.ai/console/api/v2/usage/export?scope=organization&range=30d（Accept: text/csv）→ 200，
-//     14 列 CSV（day,…,cost_micro_cents,last_active_at）、CRLF、无引号包裹、无逗号内嵌；
+//     13 列 CSV（day,…,cost_micro_cents）、CRLF、无引号包裹、无逗号内嵌（2026-09-29 服务端移除末列 last_active_at；解析器=核心列前缀校验，末列增删兼容）；
 //     cost_micro_cents 1e8 = $1；v1 端点对 Go key 恒 403（已废弃）；range 只支持 7d/30d（24h → 400）。
 //
 // 本测试 stub fetchProxy + keyStore + usageAccumulator 驱动**真实** refreshOpenCodeUsage / parseUsageExportCsv /
@@ -24,14 +24,18 @@ const OUT = path.join(ROOT, '.hermes', 'defense-test', 'opencode-request.cjs')
 const API = 'https://opencode.ai/zen/go/v1/usage'
 const EXPORT_API = 'https://opencode.ai/console/api/v2/usage/export?scope=organization&range=30d'
 
-// 实测表头（2026-09-27，逐字）——防回归锚：opencode.ts 的 EXPORT_HEADER 若漂移，本组断言必红
+// 实测表头（2026-09-29，逐字；服务端已移除末列 last_active_at：14 → 13 列）——防回归锚：opencode.ts 的 EXPORT_HEADER 若漂移，本组断言必红
 const CSV_HEADER =
-  'day,user_type,user_id,user_name,provider,model,requests,input_tokens,output_tokens,cache_read_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cost_micro_cents,last_active_at'
-// 实测行（2026-09-27）
+  'day,user_type,user_id,user_name,provider,model,requests,input_tokens,output_tokens,cache_read_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cost_micro_cents'
+// 旧形态表头（2026-09-27 实测，含末列）——末列增删兼容断言用
+const CSV_HEADER_LEGACY14 = CSV_HEADER + ',last_active_at'
+// 实测行（2026-09-29）
 const CSV_ROW_1 =
-  '2026-09-27,service_account,svcacct_x,Legacy: user@x.com,opencode-go,deepseek-v4.1-flash,298,1418794,341157,35582464,0,0,52426066,2026-09-27T10:27:54.000Z'
+  '2026-09-27,service_account,svcacct_x,Legacy: user@x.com,opencode-go,deepseek-v4.1-flash,298,1418794,341157,35582464,0,0,52426066'
 const CSV_ROW_2 =
-  '2026-09-27,service_account,svcacct_x,Legacy: user@x.com,opencode-go,deepseek-v4-flash,1,85,29,0,0,0,3015,2026-09-27T08:58:05.000Z'
+  '2026-09-27,service_account,svcacct_x,Legacy: user@x.com,opencode-go,deepseek-v4-flash,1,85,29,0,0,0,3015'
+// 旧形态行（含 last_active_at 末列）——与 CSV_HEADER_LEGACY14 配对
+const CSV_ROW_LEGACY14_1 = CSV_ROW_1 + ',2026-09-27T10:27:54.000Z'
 const CRLF = String.fromCharCode(13) + String.fromCharCode(10)
 const LF = String.fromCharCode(10)
 const CSV_STANDARD = [CSV_HEADER, CSV_ROW_1, CSV_ROW_2].join(CRLF) + CRLF
@@ -376,10 +380,10 @@ async function main() {
   console.log('')
   console.log('S9 CSV 解析矩阵（表头防回归锚）')
   {
-    // 表头防回归锚：14 列逐字（与实测一致；opencode.ts 常量漂移时这里必红）
-    eq(CSV_HEADER.split(',').length, 14, '实测表头 14 列（防回归锚）')
+    // 表头防回归锚：13 列逐字（与实测一致；opencode.ts 常量漂移时这里必红）
+    eq(CSV_HEADER.split(',').length, 13, '实测表头 13 列（防回归锚，2026-09-29 服务端删 last_active_at）')
     const rows = parseUsageExportCsv(CSV_STANDARD)
-    ok(rows !== null && rows.length === 2, '标准 14 列表头 + 2 行 → 2 行', rows && rows.length)
+    ok(rows !== null && rows.length === 2, '标准 13 列表头 + 2 行 → 2 行', rows && rows.length)
     eq(rows && rows[0].day, '2026-09-27', 'day 保留')
     eq(rows && rows[0].dayTs, DAY_TS, 'day → Date.parse(day + T00:00:00Z)（UTC 零点）')
     eq(rows && rows[0].model, 'deepseek-v4.1-flash', 'model 解析')
@@ -392,13 +396,23 @@ async function main() {
     ok(lfRows !== null && lfRows.length === 1, '兼容 LF 换行', lfRows && lfRows.length)
     eq(lfRows && lfRows[0].requests, 298, 'LF 形态字段照常解析')
 
+    // 末列增删兼容：旧 14 列形态（含 last_active_at）与假设的未来 15 列形态 → 前缀命中、按核心列解析
+    const legacy14 = parseUsageExportCsv([CSV_HEADER_LEGACY14, CSV_ROW_LEGACY14_1].join(CRLF) + CRLF)
+    ok(legacy14 !== null && legacy14.length === 1, '旧 14 列形态（last_active_at）→ 兼容解析', legacy14 && legacy14.length)
+    eq(legacy14 && legacy14[0].requests, 298, '旧形态按核心列取值')
+    const future15 = parseUsageExportCsv([CSV_HEADER + ',x_future_col', CSV_ROW_1 + ',abc'].join(CRLF) + CRLF)
+    ok(future15 !== null && future15.length === 1, '末列追加（假设未来形态）→ 兼容解析', future15 && future15.length)
+
+    // 中间插列 → 前缀不匹配 → null（错位防护：中间结构变化必须响铃）
+    eq(parseUsageExportCsv(CSV_HEADER.replace('provider', 'x_new,provider') + CRLF + CSV_ROW_1), null, '中间插列 → null（防错位，不猜）')
+
     // 列数不足行跳过（其余行保留）
     const shortRow = '2026-09-27,service_account,svcacct_x,Legacy: user@x.com,opencode-go,deepseek-v4.1-flash,298'
     const skipRows = parseUsageExportCsv([CSV_HEADER, CSV_ROW_1, shortRow, CSV_ROW_2].join(CRLF) + CRLF)
     ok(skipRows !== null && skipRows.length === 2, '列数不足行跳过（其余行保留）', skipRows && skipRows.length)
 
     // 多余列行跳过（字段内嵌逗号 → 字段错位；错位后是脏数据，不猜）
-    const extraRow = '2026-09-27,service_account,svcacct_x,Doe, John,opencode-go,deepseek-v4.1-flash,298,1418794,341157,35582464,0,0,52426066,2026-09-27T10:27:54.000Z'
+    const extraRow = '2026-09-27,service_account,svcacct_x,Doe, John,opencode-go,deepseek-v4.1-flash,298,1418794,341157,35582464,0,0,52426066'
     const extraRows = parseUsageExportCsv([CSV_HEADER, CSV_ROW_1, extraRow, CSV_ROW_2].join(CRLF) + CRLF)
     ok(extraRows !== null && extraRows.length === 2, '多余列（内嵌逗号）行跳过（其余行保留）', extraRows && extraRows.length)
 
@@ -408,7 +422,7 @@ async function main() {
 
     // 表头不符 → null（结构不识别 → 区块级降级）
     eq(parseUsageExportCsv(CSV_STANDARD.replace('cost_micro_cents', 'cost')), null, '表头列名不符 → null（降级，不猜）')
-    eq(parseUsageExportCsv(CSV_HEADER.split(',').slice(0, 13).join(',') + CRLF + CSV_ROW_1), null, '表头列数不足 → null')
+    eq(parseUsageExportCsv(CSV_HEADER.split(',').slice(0, 12).join(',') + CRLF + CSV_ROW_1), null, '表头核心列不足 → null')
     eq(parseUsageExportCsv(CSV_HEADER.split(',').reverse().join(',') + CRLF + CSV_ROW_1), null, '表头列序不符 → null')
     eq(parseUsageExportCsv(''), null, '空文本 → null')
     eq(parseUsageExportCsv('some,random'), null, '任意文本 → null')

@@ -25,11 +25,17 @@ const EXPORT_PATH = '/console/api/v2/usage/export'
 const EXPORT_RANGE = '30d'
 /** 明细 range 对应天数（口径标注用） */
 const EXPORT_RANGE_DAYS = 30
-/** usage export CSV 表头（14 列逐字校验；服务端改形态 → 表头不符 → null → 区块级降级，不猜） */
+/**
+ * usage export CSV 核心列（前 13 列逐字校验）。
+ * 实测 2026-09-29：服务端移除末列 last_active_at（14 → 13 列）→ 历史「14 列逐字」校验每次都降级。
+ * 校验策略 = 核心列逐字前缀匹配 + 数据行宽随表头实际列数（解析只读前 13 列索引）：
+ *   - 末尾列增删 → 前缀仍逐字命中（安全：末列不参与解析）；
+ *   - 中间插列 / 删列 / 改名 → 前缀不匹配 → null → 区块级降级，不猜形态。
+ */
 const EXPORT_HEADER = [
   'day', 'user_type', 'user_id', 'user_name', 'provider', 'model', 'requests',
   'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_5m_tokens',
-  'cache_write_1h_tokens', 'cost_micro_cents', 'last_active_at'
+  'cache_write_1h_tokens', 'cost_micro_cents'
 ] as const
 
 // ─── 凭证 key 约定（与 commandCode 一致；按**账号**键控，默认账号 id = 源 id）───
@@ -133,17 +139,19 @@ export interface ExportRow {
 }
 
 /**
- * 解析 usage export CSV（实测 2026-09-27：14 列、CRLF、无引号包裹、无逗号内嵌）。
- * 表头 14 列逐字校验（兼容 BOM 前缀），不符 → null（结构不识别 → 明细区块降级，不猜形态）；
- * 行按换行拆（兼容 \r\n 与 \n）；列数与表头不一致（不足 = 截断；多余 = 字段内嵌逗号，错位后是脏数据）的行跳过并计数；数值 toNum 缺省 0；day → UTC 零点。
+ * 解析 usage export CSV（实测 2026-09-29：13 列、CRLF、无引号包裹、无逗号内嵌）。
+ * 表头核心 13 列逐字前缀校验（兼容 BOM 前缀），不符 → null（结构不识别 → 明细区块降级，不猜形态）；
+ * 行按换行拆（兼容 \r\n 与 \n）；数据行宽锁定表头实际列数（末列增删跟随表头；不足 = 截断；多余 = 字段内嵌逗号，错位后是脏数据）的行跳过并计数；数值 toNum 缺省 0；day → UTC 零点。
  * 不做完整 CSV 引号解析：实测无引号，服务端若改形态 → 表头/列数校验兜底降级。
  */
 export function parseUsageExportCsv(text: string): ExportRow[] | null {
   const lines = text.split('\n')
   const headerCols = (lines[0] ?? '').replace(/^\uFEFF/, '').replace(/\r$/, '').split(',')
-  if (headerCols.length !== EXPORT_HEADER.length || !headerCols.every((c, i) => c === EXPORT_HEADER[i])) {
+  // 核心列逐字前缀校验（末列增删兼容见 EXPORT_HEADER 注释）；width 锁定表头实际列数
+  if (headerCols.length < EXPORT_HEADER.length || !EXPORT_HEADER.every((c, i) => headerCols[i] === c)) {
     return null
   }
+  const width = headerCols.length
   const rows: ExportRow[] = []
   let skipped = 0
   for (let i = 1; i < lines.length; i++) {
@@ -151,7 +159,7 @@ export function parseUsageExportCsv(text: string): ExportRow[] | null {
     if (line.trim() === '') continue
     const f = line.split(',')
     // 列数与表头不一致的行跳过（结构漂移的局部兜底）；表头已逐字校验，不猜测补位
-    if (f.length !== EXPORT_HEADER.length) {
+    if (f.length !== width) {
       skipped += 1
       continue
     }
