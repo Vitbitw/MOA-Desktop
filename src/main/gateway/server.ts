@@ -21,6 +21,7 @@ import type { Provider, SubModelOutput } from '../../shared/types'
 import type { MoaResponse } from '../moa/moaEngine'
 import type { MoaRuntimeConfig } from '../moa/moaConfig'
 import { fetchProxy } from '../local/fetchProxy'
+import { buildUpstreamHeaders } from '../providers/upstreamHeaders'
 import { broadcastToUi, GATEWAY_ROUND_START, GATEWAY_SUB_UPDATE, GATEWAY_AGG_START, GATEWAY_AGG_CHUNK, GATEWAY_ROUND_DONE } from '../uiBridge'
 import type { GatewayRoundStartPayload, GatewaySubUpdatePayload, GatewayAggStartPayload, GatewayAggChunkPayload, GatewayRoundDonePayload } from '../uiBridge'
 
@@ -31,6 +32,16 @@ let runningConfig: { host: string; port: number } | null = null
 /** 上游转发请求的超时预算（30 分钟）。带信号调用可避免 fetchProxy 的全局 timeoutMs
  * 误伤非流式慢速上游（模型思考 >15s 时首字节迟迟不回）；30 分钟为兜底上限。 */
 const UPSTREAM_TIMEOUT_MS = 30 * 60_000
+
+/**
+ * 本次请求的上游会话 ID：客户端自带 x-opencode-session 时透传（值经字符/长度校验，非法回退随机值），
+ * 否则生成一次性 ID。同一请求的所有上游调用（子模型 / 聚合 / 直通）复用同一值，
+ * 供 opencode.ai 系上游做路由与 prompt 缓存（缺失该头直接 400）。
+ */
+function upstreamSessionId(req: Request): string {
+  const raw = req.get('x-opencode-session') ?? ''
+  return /^[A-Za-z0-9._:-]{1,128}$/.test(raw) ? raw : crypto.randomUUID()
+}
 
 // ── 并发计数与限流 ──
 // 此前 /health 的 activeRequests/queueLength 硬编码 0，maxConcurrency 设置从未生效。
@@ -397,6 +408,7 @@ async function executeMoaRound(opts: {
   roundId: string
   controller: AbortController
   sink: MoaClientSink
+  sessionId?: string
 }): Promise<MoaResponse> {
   const { config, roundId, controller, sink } = opts
 
@@ -446,6 +458,7 @@ async function executeMoaRound(opts: {
     extraBody: opts.extraBody,
     // 客户端断开 → abort 链路：信号透传引擎（中止后不再发起聚合、进行中调用随之中断）
     signal: controller.signal,
+    sessionId: opts.sessionId,
     emitSubOutput: (output, index) => {
       const update: GatewaySubUpdatePayload = {
         roundId,
@@ -514,8 +527,9 @@ async function handleAnthropicDirect(opts: {
   converted: ReturnType<typeof anthropicToOpenAI>
   model?: string
   stream: boolean
+  sessionId?: string
 }): Promise<void> {
-  const { res, provider, converted, stream } = opts
+  const { res, provider, converted, stream, sessionId } = opts
   const reqStart = Date.now()
   const roundId = crypto.randomUUID()
   // 请求名不在该 provider 模型列表时回落到其第一个模型；否则透传原名（与 chat/completions direct 一致）
@@ -582,8 +596,7 @@ async function handleAnthropicDirect(opts: {
   }
 
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
+    const headers = buildUpstreamHeaders(provider.baseUrl, provider.apiKey, sessionId)
     // 上游请求统一走 fetchProxy；body = 转换后的 OpenAI 请求（tools 等经 extraBody 带出）
     const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
@@ -786,6 +799,7 @@ export function createGatewayServer(): Express {
 
   // ── Chat completions ──
   app.post('/v1/chat/completions', withConcurrency(async (req: Request, res: Response) => {
+    const sessionId = upstreamSessionId(req)
     const config = getMoaConfig()
     // 模型决策（与聊天侧直连约定一致）：请求模型命中 provider → 用之；否则回落 MoA 菜单配置的
     // 首个子模型（命中时）；仍不命中则由 routeForRequest 回落第一个可用 provider 的首个模型
@@ -857,8 +871,7 @@ export function createGatewayServer(): Express {
       } satisfies GatewayRoundStartPayload)
 
       try {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-        if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
+        const headers = buildUpstreamHeaders(provider.baseUrl, provider.apiKey, sessionId)
         // 上游请求统一走 fetchProxy（本地回环地址自动直连，云端 provider 可走网络代理）
         // 自带超时信号：fetchProxy 不再套用全局 timeoutMs，避免误伤非流式慢速上游
         const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
@@ -1042,7 +1055,8 @@ export function createGatewayServer(): Express {
       messages: messages || [],
       roundId,
       controller,
-      sink
+      sink,
+      sessionId
     })
 
     // 用量明细（成功子模型 + 聚合器）统一计账
@@ -1110,6 +1124,7 @@ export function createGatewayServer(): Express {
   // 原则：Anthropic 格式只在网关边界转换，内部统一走 OpenAI 兼容管线（引擎 / 上游 providers / 事件桥全部复用）。
   // 忽略不报错：anthropic-version / anthropic-beta 头、thinking、cache_control、metadata。
   app.post('/v1/messages', withConcurrency(async (req: Request, res: Response) => {
+    const sessionId = upstreamSessionId(req)
     const config = getMoaConfig()
     const converted = anthropicToOpenAI(req.body)
     const stream = req.body?.stream === true
@@ -1123,7 +1138,7 @@ export function createGatewayServer(): Express {
 
     // ── 单模型直通（出口模式）/ 透传兜底：上游 OpenAI 兼容，响应/事件转换为 Anthropic 形态 ──
     if (directTarget || config.subModels.length === 0) {
-      await handleAnthropicDirect({ res, provider, converted, model: directTarget?.modelId ?? req.body?.model, stream })
+      await handleAnthropicDirect({ res, provider, converted, model: directTarget?.modelId ?? req.body?.model, stream, sessionId })
       return
     }
 
@@ -1146,7 +1161,8 @@ export function createGatewayServer(): Express {
       extraBody: converted.extraBody,
       roundId,
       controller,
-      sink
+      sink,
+      sessionId
     })
 
     // 用量明细（成功子模型 + 聚合器）统一计账（口径与 chat/completions 相同）
@@ -1204,6 +1220,7 @@ export function createGatewayServer(): Express {
     // baseUrl 已含 /v1 前缀（与 chat 路径同一约定），上游路径需去掉端点的 /v1，避免拼出 /v1/v1/*
     const upstreamPath = endpoint.replace(/^\/v1/, '')
     app.post(endpoint, withConcurrency(async (req: Request, res: Response) => {
+      const sessionId = upstreamSessionId(req)
       const provider = firstUsableProvider()
       const reqStart = Date.now()
       if (!provider) {
@@ -1219,8 +1236,7 @@ export function createGatewayServer(): Express {
         res.status(503).json({ error: { message: 'No provider configured', type: 'moa_config_error' } }); return
       }
       try {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-        if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`
+        const headers = buildUpstreamHeaders(provider.baseUrl, provider.apiKey, sessionId)
         const upstream = await fetchProxy(`${provider.baseUrl.replace(/\/+$/, '')}${upstreamPath}`, {
           method: 'POST',
           headers,

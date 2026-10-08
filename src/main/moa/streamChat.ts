@@ -7,6 +7,7 @@
 
 import { fetchProxy } from '../local/fetchProxy'
 import { parseOpenAIChunk, readSseStream } from './sseReader'
+import { buildUpstreamHeaders } from '../providers/upstreamHeaders'
 import { DEFAULT_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_MAX_TIMEOUT } from '../../shared/defaults'
 
 /** token 用量（与 SubModelOutput.tokenUsage / parseOpenAIChunk.usage 同形） */
@@ -66,6 +67,8 @@ export interface StreamChatOptions {
   idleTimeoutMs?: number
   /** 总时长上限覆盖（毫秒）；缺省 DEFAULT_STREAM_MAX_TIMEOUT，仅供测试/特殊场景 */
   maxTimeoutMs?: number
+  /** 上游会话 ID（映射到 opencode.ai 系上游的 x-opencode-session；同一对话复用同一值） */
+  sessionId?: string
 }
 
 export interface StreamChatResult {
@@ -94,12 +97,6 @@ function chatCompletionsUrl(providerBaseUrl: string): string {
   return `${providerBaseUrl.replace(/\/+$/, '')}/chat/completions`
 }
 
-/** 请求头：Content-Type + Bearer（apiKey 有则加） */
-function buildHeaders(apiKey?: string): Record<string, string> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-  return headers
-}
 
 /**
  * 组合外部信号与内部（超时/主动取消）信号。streamChat 与 callSubModel（非流式回退）共用。
@@ -367,7 +364,7 @@ async function streamOnce(opts: StreamChatOptions, includeStreamOptions: boolean
     try {
       resp = await fetchProxy(chatCompletionsUrl(opts.providerBaseUrl), {
         method: 'POST',
-        headers: buildHeaders(opts.apiKey),
+        headers: buildUpstreamHeaders(opts.providerBaseUrl, opts.apiKey, opts.sessionId),
         body: JSON.stringify(body),
         signal: combined.signal
       })
@@ -463,7 +460,7 @@ async function requestNonStream(opts: StreamChatOptions): Promise<StreamChatResu
   try {
     const resp = await fetchProxy(chatCompletionsUrl(opts.providerBaseUrl), {
       method: 'POST',
-      headers: buildHeaders(opts.apiKey),
+      headers: buildUpstreamHeaders(opts.providerBaseUrl, opts.apiKey, opts.sessionId),
       body: JSON.stringify({ ...opts.extraBody, model: opts.modelId, messages: opts.messages, stream: false }),
       signal: combined.signal
     })

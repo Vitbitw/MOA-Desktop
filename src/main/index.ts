@@ -534,6 +534,8 @@ function registerIpcHandlers() {
           // 定制聚合提示词须随聊天路径一并传入（此前只在网关路径生效）
           customAggregationPrompt: config.customAggregationPrompt,
           architecture: config.architecture,
+          // 上游会话 ID（= 会话 uuid）：同一对话跨轮复用（opencode 系上游 x-opencode-session 的路由/缓存语义）
+          sessionId: convId,
           emitSubOutput: (output, index) => {
             const update = {
               index,

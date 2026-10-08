@@ -1,5 +1,6 @@
 import type { SubModelOutput } from '../../shared/types'
 import { fetchProxy } from '../local/fetchProxy'
+import { buildUpstreamHeaders } from '../providers/upstreamHeaders'
 import { combineSignals, streamChat } from './streamChat'
 import type { ChatMessage } from './streamChat'
 
@@ -16,6 +17,8 @@ export interface SubModelCallOptions {
   extraBody?: Record<string, unknown>
   /** 外部中止信号（网关客户端断开等）；与内部 AbortSignal.timeout 组合，触发即中断请求 */
   signal?: AbortSignal
+  /** 上游会话 ID（映射到 opencode.ai 系上游的 x-opencode-session；同一对话复用同一值） */
+  sessionId?: string
 }
 
 /**
@@ -43,7 +46,7 @@ function buildRequestMessages(messages: ChatMessage[], systemPrompt?: string): C
  */
 export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelOutput> {
   const startTime = Date.now()
-  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, extraBody } = opts
+  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, extraBody, sessionId } = opts
 
   // Build payload
   const body: Record<string, unknown> = {
@@ -57,12 +60,11 @@ export async function callSubModel(opts: SubModelCallOptions): Promise<SubModelO
   const combined = combineSignals(signal, AbortSignal.timeout(timeoutMs))
 
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-    // P2-7：统一走 fetchProxy（本地引擎回环直连、云端 provider 可走网络代理）
+    // P2-7：统一走 fetchProxy（本地引擎回环直连、云端 provider 可走网络代理）；
+    // 请求头统一构建（opencode.ai 系上游自动补 x-opencode-session，缺失会 400）
     const resp = await fetchProxy(`${providerBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
-      headers,
+      headers: buildUpstreamHeaders(providerBaseUrl, apiKey, sessionId),
       body: JSON.stringify(body),
       signal: combined.signal
     })
@@ -133,7 +135,7 @@ export type SubModelStreamOptions = SubModelCallOptions & {
  */
 export async function callSubModelStream(opts: SubModelStreamOptions): Promise<SubModelOutput> {
   const startTime = Date.now()
-  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, onDelta, extraBody } = opts
+  const { providerBaseUrl, providerId, apiKey, modelId, messages, systemPrompt, timeoutMs, signal, onDelta, extraBody, sessionId } = opts
 
   const result = await streamChat({
     providerBaseUrl,
@@ -143,6 +145,7 @@ export async function callSubModelStream(opts: SubModelStreamOptions): Promise<S
     timeoutMs,
     signal,
     onDelta,
+    sessionId,
     // 附加字段（tools 等）透传给子模型：子模型可出 tool_calls 作为专家意见（不进最终响应）
     extraBody,
     // 回退链级 3：stream:true 被 400 拒绝（中转不支持）→ 复用现有非流式实现

@@ -23,6 +23,8 @@ export interface MoaRequest {
   signal?: AbortSignal
   /** 附加请求字段（tools / tool_choice / temperature 等）：逐路透传给子模型与聚合模型（Anthropic 端点用；缺省不传） */
   extraBody?: Record<string, unknown>
+  /** 上游会话 ID（映射到 opencode.ai 系上游的 x-opencode-session；同一对话复用同一值） */
+  sessionId?: string
 }
 
 export interface MoaResponse {
@@ -117,7 +119,8 @@ async function callAggregator(
   timeoutMs: number,
   onDelta?: (accumulatedText: string) => void,
   signal?: AbortSignal,
-  extraBody?: Record<string, unknown>
+  extraBody?: Record<string, unknown>,
+  sessionId?: string
 ): Promise<{ content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[]; finishReason?: string }> {
   const result = await streamChat({
     providerBaseUrl: aggInfo.providerBaseUrl,
@@ -127,7 +130,8 @@ async function callAggregator(
     timeoutMs,
     signal,
     onDelta,
-    extraBody
+    extraBody,
+    sessionId
   })
 
   const output: { content: string; success: boolean; error?: string; usage?: { prompt: number; completion: number }; toolCalls?: ToolCallResult[]; finishReason?: string } = {
@@ -176,6 +180,7 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
       systemPrompt: sm.systemPrompt,
       timeoutMs,
       signal: req.signal,
+      sessionId: req.sessionId,
       // 附加字段（tools 等）透传：子模型可出 tool_calls 作为专家意见（不进最终响应）
       extraBody: req.extraBody,
       // 流式增量 → running 累计事件（引擎不做节流：节流由 host 层 index.ts / 网关广播负责）
@@ -308,7 +313,8 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
     req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT,
     onAggDelta,
     req.signal,
-    req.extraBody
+    req.extraBody,
+    req.sessionId
   )
 
   if (!aggResult.success) {
@@ -328,7 +334,8 @@ async function executeMoAInternal(req: MoaRequest, events?: MoaEvents): Promise<
           req.aggTimeoutMs ?? DEFAULT_AGGREGATOR_TIMEOUT,
           onAggDelta,
           req.signal,
-          req.extraBody
+          req.extraBody,
+          req.sessionId
         )
         if (fallbackResult.success) {
           try { events?.emitAggregationChunk(fallbackResult.content, true) } catch { /* 忽略事件失败 */ }
